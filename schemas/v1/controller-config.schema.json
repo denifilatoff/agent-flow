@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-flow.dev/schemas/v1/controller-config.schema.json",
+  "title": "Agent Flow controller configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "configuration", "providers", "polling", "runtime"],
+  "properties": {
+    "apiVersion": { "const": "agent-flow/v1alpha1" },
+    "kind": { "const": "ControllerConfig" },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "flow", "catalog"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/absolutePath" },
+        "flow": { "type": "string", "pattern": "^config/flows/[a-z][a-z0-9-]*\\.ya?ml$" },
+        "catalog": { "type": "string", "const": "config/agents.yaml" }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "github": { "$ref": "#/$defs/github" },
+        "gitlab": { "$ref": "#/$defs/gitlab" }
+      }
+    },
+    "polling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intervalSeconds", "maxCallsPerMinute", "quotaReservePercent"],
+      "properties": {
+        "intervalSeconds": { "type": "integer", "minimum": 60, "default": 300 },
+        "maxCallsPerMinute": { "type": "integer", "minimum": 1, "maximum": 20, "default": 20 },
+        "quotaReservePercent": { "type": "integer", "minimum": 1, "maximum": 90, "default": 25 }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["concurrency", "dataDirectory", "healthPort"],
+      "properties": {
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "dataDirectory": { "$ref": "#/$defs/absolutePath" },
+        "healthPort": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 8080 }
+      }
+    }
+  },
+  "$defs": {
+    "absolutePath": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "providerBase": {
+      "type": "object",
+      "required": ["apiUrl", "tokenEnv", "repositories"],
+      "properties": {
+        "apiUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "tokenEnv": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "repositories": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/repository" }
+        }
+      }
+    },
+    "github": {
+      "type": "object",
+      "$ref": "#/$defs/providerBase",
+      "unevaluatedProperties": false
+    },
+    "gitlab": {
+      "type": "object",
+      "$ref": "#/$defs/providerBase",
+      "unevaluatedProperties": false
+    }
+  }
+}

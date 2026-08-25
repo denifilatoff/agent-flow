@@ -1,10 +1,12 @@
 # Agent flow controller architecture
 
-Status: Draft
+Status: Approved for prototype
 
 This document records the agreed target architecture for a controller that partially automates development work from
-GitHub or GitLab tickets. It is not a description of the current `reviewctl` implementation and does not replace the
-accepted MVP design in [`architecture.md`](architecture.md).
+GitHub or GitLab tickets.
+
+The prototype's executable YAML and JSON contracts are defined in
+[`prototype-contracts.md`](prototype-contracts.md) and `schemas/v1/`.
 
 ## Purpose
 
@@ -15,9 +17,8 @@ on the configured flow policy.
 The controller coordinates the work. Agents remain responsible for their domain work and publish their own final
 results. GitHub or GitLab is the source of truth for every operational decision.
 
-The current repository is only a temporary home for this design. The target implementation may replace the existing
-`reviewctl` code, use another language, move to another repository, or take another name. Existing code is reused only
-when it shortens the implementation without weakening these invariants.
+The implementation is greenfield. It uses existing libraries and provider capabilities when they shorten the work
+without weakening these invariants.
 
 ## Agreed invariants
 
@@ -43,8 +44,8 @@ when it shortens the implementation without weakening these invariants.
 - Flow and agent configuration lives in one Git repository.
 - A new flow instance pins the configuration repository commit SHA that was current when the instance started.
 - The controller records that SHA in the control comment it creates for the instance.
-- The pinned configuration revision includes every `apm.lock` produced for the agent catalog. External APM artifacts
-  must resolve through a committed lockfile.
+- The pinned configuration revision includes every `apm.lock.yaml` produced for the agent catalog. External APM
+  artifacts must resolve through a committed lockfile.
 - Fetching a newer configuration revision must not change a running instance.
 - A running instance changes its pinned revision only through an explicit migration.
 
@@ -408,9 +409,9 @@ parallelism across tickets, while a per-ticket in-memory guard prevents overlapp
 publication markers provide recovery after process loss; the in-memory guard is sufficient because only one controller
 instance is allowed.
 
-A Docker deployment mounts configuration credentials, repository workspaces, and the session directory. A Kubernetes
-deployment uses one replica and a persistent volume for sessions. Horizontal scaling, distributed leases, leader
-election, and an external queue are intentionally outside this design.
+The prototype runs in Docker on macOS and mounts configuration, credentials, repository workspaces, and the session
+directory. A later Kubernetes deployment uses one replica and a persistent volume for sessions. Horizontal scaling,
+distributed leases, leader election, and an external queue are intentionally outside this design.
 
 ## Security and trust boundary
 
@@ -430,13 +431,10 @@ from the executor user's machine.
 - Automatic merge remains disabled until a separate policy is agreed.
 - The controller will not implement its own state machine engine, workflow database, or general plugin framework.
 
-## Open design questions
+## Deferred design questions
 
-The following details were not agreed and must not be treated as implementation requirements yet:
+The following details are outside the working prototype and must not be treated as implementation requirements yet:
 
-- the exact YAML fields, built-in actions and guards, control comment schema, markers, and receipt format;
-- the YAML representation for enabling or removing human gates and the flow-specific transition for each gate verdict;
-- local workspace implementation and lifecycle, session directory layout, retention, and redaction;
-- the first deployment target: Docker or Kubernetes;
+- automatic retention and redaction policy for local session files;
 - the read-only UI scope and whether it reuses an existing XState graph viewer;
 - the conditions and provider rules for enabling automerge.
