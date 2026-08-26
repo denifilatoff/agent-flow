@@ -92,12 +92,21 @@ export function createController(dependencies: ControllerDependencies): Controll
           }
           cursors.set(key, startedAt);
         }
-        await Promise.all([...found.values()].map((ref) => tickets.schedule(ref)));
-        lifecycle = "ready";
       } catch (error) {
+        const errors = [error];
+        await cleanup(errors);
         lifecycle = "failed";
-        throw error;
+        throw collectedError(errors, "controller bootstrap failed");
       }
+
+      const results = await Promise.allSettled([...found.values()].map((ref) => tickets.schedule(ref)));
+      const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+      if (errors.length > 0) {
+        await cleanup(errors);
+        lifecycle = "failed";
+        throw collectedError(errors, "controller bootstrap failed");
+      }
+      lifecycle = "ready";
     },
 
     async run(signal): Promise<void> {
@@ -120,22 +129,15 @@ export function createController(dependencies: ControllerDependencies): Controll
         errors.push(error);
       }
 
-      stopping = true;
-      scans.close();
-      scanCalls.close();
-      tickets.close();
-      await cancellationPass(errors);
-      await settle(scans.drain(), errors);
-      await settle(scanCalls.drain(), errors);
-      await settle(tickets.drain(), errors);
-      await cancellationPass(errors);
+      await cleanup(errors);
       lifecycle = "stopped";
-      if (errors.length === 1) throw errors[0];
-      if (errors.length > 1) throw new AggregateError(errors, "controller shutdown failed");
+      if (errors.length > 0) throw collectedError(errors, "controller shutdown failed");
     },
 
     async reconcileNow(ref): Promise<void> {
-      if (lifecycle === "stopped" || lifecycle === "failed") throw new Error(`controller is ${lifecycle}`);
+      if (lifecycle !== "ready" && lifecycle !== "running") {
+        throw new Error(`controller reconcileNow requires ready or running (current: ${lifecycle})`);
+      }
       assertAllowedRef(ref);
       await tickets.schedule(ref);
     },
@@ -201,6 +203,18 @@ export function createController(dependencies: ControllerDependencies): Controll
     }
   }
 
+  async function cleanup(errors: unknown[]): Promise<void> {
+    stopping = true;
+    scans.close();
+    scanCalls.close();
+    tickets.close();
+    await cancellationPass(errors);
+    await settle(scans.drain(), errors);
+    await settle(scanCalls.drain(), errors);
+    await settle(tickets.drain(), errors);
+    await cancellationPass(errors);
+  }
+
   function reportError(error: unknown): void {
     try {
       dependencies.onError?.(error);
@@ -208,6 +222,10 @@ export function createController(dependencies: ControllerDependencies): Controll
       // Error reporting must not break the polling chain.
     }
   }
+}
+
+function collectedError(errors: unknown[], message: string): unknown {
+  return errors.length === 1 ? errors[0] : new AggregateError(errors, message);
 }
 
 function assertTicketIdentity(ref: TicketRef, adapter: DiscoveryAdapter, repository: string): void {

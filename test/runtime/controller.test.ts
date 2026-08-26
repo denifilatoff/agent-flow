@@ -516,3 +516,95 @@ test("a slow ticket does not block an independent repository ticket", async () =
 
   assert.deepEqual(started, [key(GITHUB_ONE), key(GITHUB_TWO)]);
 });
+
+test("failed bootstrap drains late reconciles and retries attempt cancellation", async () => {
+  const secondStarted = Promise.withResolvers<void>();
+  const releaseSecond = Promise.withResolvers<void>();
+  let running = true;
+  let cancelCalls = 0;
+  const attempts: AttemptLauncher = {
+    async start() {},
+    isRunning: () => running,
+    async cancel() {
+      cancelCalls += 1;
+      if (cancelCalls === 1) throw new Error("temporary cancel failure");
+      running = false;
+    },
+  };
+  const adapter: DiscoveryAdapter = {
+    kind: "github",
+    async bootstrap() { return [GITHUB_ONE, { ...GITHUB_ONE, number: 2 }]; },
+    async discover() { return { tickets: [], nextCursor: null }; },
+  };
+  const controller = createController({
+    providers: [{ adapter, repositories: ["owner/one"] }],
+    concurrency: 2,
+    reconcile: async (ref) => {
+      if (ref.number === 1) {
+        await secondStarted.promise;
+        throw new Error("bootstrap reconcile failed");
+      }
+      secondStarted.resolve();
+      await releaseSecond.promise;
+      return outcome(ref);
+    },
+    launcher: attempts,
+  });
+
+  const bootstrapping = controller.bootstrap();
+  let settled = false;
+  void bootstrapping.finally(() => { settled = true; }).catch(() => undefined);
+  await secondStarted.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  releaseSecond.resolve();
+
+  const error = await bootstrapping.catch((caught: unknown) => caught);
+  assert.ok(error instanceof AggregateError);
+  assert.match(String(error.errors[0]), /bootstrap reconcile failed/);
+  assert.match(String(error.errors[1]), /temporary cancel failure/);
+  assert.equal(cancelCalls, 2);
+  assert.equal(running, false);
+  await assert.rejects(controller.reconcileNow(GITHUB_ONE), /failed/);
+});
+
+test("reconcileNow is available only while ready or running", async () => {
+  const bootstrapEntered = Promise.withResolvers<void>();
+  const releaseBootstrap = Promise.withResolvers<void>();
+  const runEntered = Promise.withResolvers<void>();
+  const adapter: DiscoveryAdapter = {
+    kind: "github",
+    async bootstrap() {
+      bootstrapEntered.resolve();
+      await releaseBootstrap.promise;
+      return [];
+    },
+    async discover() { return { tickets: [], nextCursor: null }; },
+  };
+  const abort = new AbortController();
+  const controller = createController({
+    providers: [{ adapter, repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => outcome(ref),
+    launcher: launcher(),
+    delay: async (_milliseconds, signal) => {
+      runEntered.resolve();
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    },
+  });
+
+  await assert.rejects(controller.reconcileNow(GITHUB_ONE), /ready or running/);
+  const bootstrapping = controller.bootstrap();
+  await bootstrapEntered.promise;
+  await assert.rejects(controller.reconcileNow(GITHUB_ONE), /ready or running/);
+  releaseBootstrap.resolve();
+  await bootstrapping;
+  await controller.reconcileNow(GITHUB_ONE);
+
+  const running = controller.run(abort.signal);
+  await runEntered.promise;
+  await controller.reconcileNow(GITHUB_ONE);
+  abort.abort();
+  await running;
+  await assert.rejects(controller.reconcileNow(GITHUB_ONE), /ready or running/);
+});
