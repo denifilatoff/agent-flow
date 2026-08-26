@@ -1,0 +1,98 @@
+import assert from "node:assert/strict";
+import { cp, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { loadConfigBundle } from "../../src/config/load.ts";
+import { parseYaml, validateDocument } from "../../src/config/schema-validator.ts";
+import { validateSemantics } from "../../src/config/semantic.ts";
+
+const REVISION = "0123456789abcdef0123456789abcdef01234567";
+
+async function rejection(promise: Promise<unknown>): Promise<Error> {
+  try {
+    await promise;
+  } catch (error) {
+    assert.ok(error instanceof Error);
+    return error;
+  }
+  assert.fail("expected the promise to reject");
+}
+
+async function loadFixture(name: "invalid-target" | "duplicate-repository"): Promise<void> {
+  const controllerPath = name === "duplicate-repository"
+    ? `test/fixtures/config/${name}/controller.yaml`
+    : "config/controller.example.yaml";
+  const bundle = await loadConfigBundle(process.cwd(), controllerPath, REVISION);
+
+  if (name === "invalid-target") {
+    bundle.flow = validateDocument("Flow", await parseYaml(`test/fixtures/config/${name}/flow.yaml`));
+  }
+
+  await validateSemantics(bundle);
+}
+
+test("accepts the shipped bundle", async () => {
+  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
+  await assert.doesNotReject(validateSemantics(bundle));
+});
+
+test("rejects missing targets and duplicate repositories", async () => {
+  await assert.rejects(loadFixture("invalid-target"), /transition target .* does not exist/);
+  await assert.rejects(loadFixture("duplicate-repository"), /repository .* is configured more than once/);
+});
+
+test("reports every flow error in deterministic path order", async () => {
+  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
+  bundle.flow.spec.initial = "missing-initial";
+  bundle.flow.spec.states.assessment.agent = "missing-agent";
+  bundle.flow.spec.states.assessment.on!["agent-succeeded"] = {
+    target: "$resume",
+    resumeTarget: "missing-resume",
+    guards: ["missing-guard"],
+    actions: ["missing-action"],
+  } as never;
+  delete bundle.flow.spec.states["assessment-review"].on;
+  bundle.flow.spec.states.done.on = {
+    "authorized-comment": { target: "missing-final-target" },
+  };
+  bundle.flow.spec.states.waiting = {
+    kind: "paused",
+    on: { "authorized-comment": { target: "$resume" } },
+  };
+
+  const error = await rejection(validateSemantics(bundle));
+  assert.match(error.message, /initial state missing-initial does not exist/);
+  assert.match(error.message, /agent missing-agent does not exist/);
+  assert.match(error.message, /\$resume is allowed only from needs-human or blocked/);
+  assert.match(error.message, /resumeTarget is allowed only for transitions into needs-human or blocked/);
+  assert.match(error.message, /resume target missing-resume does not exist/);
+  assert.match(error.message, /guard missing-guard is not implemented/);
+  assert.match(error.message, /action missing-action is not implemented/);
+  assert.match(error.message, /non-final state must define at least one transition/);
+  assert.match(error.message, /final state must not define transitions/);
+  assert.ok(error.message.indexOf("flow.spec.initial") < error.message.indexOf("flow.spec.states.assessment.agent"));
+});
+
+test("rejects incomplete packages and paths outside the pinned root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-config-"));
+  try {
+    await cp("config", join(root, "config"), { recursive: true });
+    await cp("agent-packages", join(root, "agent-packages"), { recursive: true });
+    await unlink(join(root, "agent-packages/architect/apm.lock.yaml"));
+    await unlink(join(root, "agent-packages/planner/apm.yml"));
+    await writeFile(join(root, "agent-packages/developer/.apm/agents/extra.agent.md"), "---\nname: extra\n---\n");
+
+    const bundle = await loadConfigBundle(root, "config/controller.example.yaml", REVISION);
+    bundle.catalog.agents.reviewer.package = "../outside";
+
+    const error = await rejection(validateSemantics(bundle));
+    assert.match(error.message, /apm.lock.yaml is not a committed file/);
+    assert.match(error.message, /package must contain exactly one apm.yml/);
+    assert.match(error.message, /package must contain exactly one logical entry agent/);
+    assert.match(error.message, /package path escapes the pinned root/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

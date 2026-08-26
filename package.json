@@ -5,7 +5,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/config/schema-validator.test.ts"
+    "test": "node --test"
   },
   "dependencies": {
     "ajv": "8.20.0",

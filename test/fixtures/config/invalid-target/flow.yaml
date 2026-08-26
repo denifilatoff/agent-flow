@@ -1,0 +1,19 @@
+apiVersion: agent-flow/v1alpha1
+kind: Flow
+metadata:
+  id: invalid-target
+  activationLabel: agent-flow:development
+  managedLabel: agent-flow:managed
+spec:
+  initial: assessment
+  states:
+    assessment:
+      kind: agent
+      agent: architect
+      resultContract: assessment
+      context: [ticket]
+      "on":
+        agent-succeeded:
+          target: constructor
+    done:
+      kind: final
