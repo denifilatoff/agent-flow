@@ -268,7 +268,21 @@ test("runs Codex in the worktree with private attempt paths", async (t) => {
     assert.equal(call.env[name], undefined);
   }
   assert.match(call.env.CODEX_HOME!, /harness-session\/codex-/);
-  assert.equal(Buffer.concat(call.child.input).toString(), "Follow repository rules.\n\nDevelop the change.\n\nImplement ticket 17.\n");
+  assert.equal(
+    Buffer.concat(call.child.input).toString(),
+    `Follow repository rules.
+
+Develop the change.
+
+Implement ticket 17.
+
+When invoking the configured APM entry agent, pass these exact attempt file paths unchanged:
+contextPath: ${fixture.input.session.contextPath}
+receiptPath: ${fixture.input.session.receiptPath}
+The entry agent must read contextPath and write its final AgentReceipt to receiptPath.
+If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_RECEIPT_PATH, it may use these literal paths directly.
+`,
+  );
   call.child.stdout.write("stdout line\n");
   call.child.stderr.write("stderr line\n");
   call.child.finish(0, null);
@@ -361,6 +375,17 @@ test("rejects provider credentials that collide with protected harness variables
     await rejection;
     assert.equal(processes.calls.length, 0);
   }
+});
+
+test("rejects Codex attempt paths outside the attempt session", async (t) => {
+  const fixture = await runFixture("codex");
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const processes = processFixture();
+  fixture.input.session.receiptPath = fixture.authFile;
+  const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+
+  await assert.rejects(adapter.run(fixture.input), HarnessPreflightError);
+  assert.equal(processes.calls.length, 0);
 });
 
 test("terminates a cancelled Claude process once", async (t) => {
