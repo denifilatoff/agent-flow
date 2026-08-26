@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { inspect } from "node:util";
 
 import { loadConfigBundle, type ConfigBundle } from "../../src/config/load.ts";
 import type {
@@ -10,7 +11,7 @@ import type {
   ControlHumanGate,
   ControlState,
 } from "../../src/config/types.ts";
-import { renderControlComment } from "../../src/provider/control-comment.ts";
+import { parseControlComment, renderControlComment } from "../../src/provider/control-comment.ts";
 import type {
   DiscoveryPage,
   DiscoveryWindow,
@@ -217,6 +218,24 @@ function humanReceipt(verdict: ControlHumanGate["verdict"], sourceCommentId: str
   };
 }
 
+function questionReceipt(attemptId = ATTEMPT): AgentReceipt {
+  return {
+    apiVersion: "agent-flow/v1alpha1",
+    kind: "AgentReceipt",
+    flowInstanceId: FLOW_1,
+    attemptId,
+    outcome: "needs-human",
+    summary: "The closed change request needs a decision.",
+    artifacts: [{
+      kind: "comment",
+      id: "closed-question",
+      url: "https://github.example.test/comments/closed-question",
+      marker: `<!-- agent-flow:v1 flow=${FLOW_1} attempt=${attemptId} artifact=question -->`,
+      artifactKind: "question",
+    }],
+  };
+}
+
 class FakeProvider implements ProviderAdapter {
   readonly kind = "github" as const;
   readonly events: string[] = [];
@@ -407,6 +426,12 @@ test("reactivation creates a new flow and preserves terminal control history", a
   const provider = new FakeProvider();
   const launcher = new FakeLauncher();
   installControl(provider, controlState({ stateId: "done" }));
+  provider.snapshot.activation = {
+    present: true,
+    eventId: "804",
+    actor: MAINTAINER,
+    occurredAt: "2026-08-26T11:00:00.000Z",
+  };
 
   await reconcileTicket(dependencies(provider, launcher), TICKET);
 
@@ -416,6 +441,27 @@ test("reactivation creates a new flow and preserves terminal control history", a
   assert.ok(provider.snapshot.comments[0]?.body.includes(FLOW_1));
   assert.ok(provider.snapshot.comments[1]?.body.includes(FLOW_2));
   assert.equal(launcher.requests[0]?.control.flowInstanceId, FLOW_2);
+});
+
+test("finishes crash-window cleanup instead of reactivating the original label event", async () => {
+  const provider = new FakeProvider();
+  const launcher = new FakeLauncher();
+  const terminal = controlState({ stateId: "done", updatedAt: NOW });
+  installControl(provider, terminal);
+  provider.snapshot.activation = {
+    present: true,
+    eventId: "803",
+    actor: MAINTAINER,
+    occurredAt: terminal.activatedAt,
+  };
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.flowInstanceId, FLOW_1);
+  assert.equal(outcome.stateId, "done");
+  assert.equal(provider.created, 0);
+  assert.ok(!provider.snapshot.labels.includes("agent-flow:development"));
+  assert.deepEqual(launcher.requests, []);
 });
 
 test("repairs the permanent managed label for terminal history", async () => {
@@ -490,6 +536,23 @@ test("enters needs-human for a closed change and reviews a new head", async (t) 
     assert.equal(launcher.requests[0]?.agentId, "reviewer");
     assert.equal(launcher.requests[0]?.mode, "stage");
     assert.equal(launcher.requests[0]?.resultContract, "review");
+    assert.ok(launcher.requests[0]?.inputRevision);
+
+    launcher.running.delete(FLOW_1);
+    const index = provider.snapshot.comments.findIndex((candidate) => candidate.id.startsWith("control-"));
+    const state = parseControlComment(provider.snapshot.comments[index]!.body)!;
+    const request = launcher.requests[0]!;
+    provider.snapshot.comments[index] = controlComment({
+      ...state,
+      sequence: state.sequence + 1,
+      updatedAt: "2026-08-26T12:01:00.000Z",
+      attemptSeries: attemptSeries({
+        agentId: "reviewer",
+        stateId: "needs-human",
+        inputRevision: request.inputRevision,
+      }),
+      latestReceipt: questionReceipt(),
+    }, provider.snapshot.comments[index]!.id);
     await reconcileTicket(dependencies(provider, launcher), TICKET);
     assert.equal(launcher.requests.length, 1);
   });
@@ -506,6 +569,27 @@ test("enters needs-human for a closed change and reviews a new head", async (t) 
     assert.equal(launcher.requests[0]?.agentId, "reviewer");
     assert.equal(launcher.requests[0]?.snapshot.changeRequest?.headSha, NEW_HEAD);
   });
+});
+
+test("fails closed when an awaiting-merge snapshot replaces the linked change identity", async (t) => {
+  for (const state of ["open", "merged"] as const) {
+    await t.test(state, async () => {
+      const provider = new FakeProvider();
+      installControl(provider, controlState({ stateId: "awaiting-merge", changeRequest: controlChange() }));
+      provider.snapshot.changeRequest = changeRequest({
+        number: 99,
+        url: "https://github.example.test/example-owner/example-repository/pull/99",
+        headSha: NEW_HEAD,
+        state,
+      });
+      const launcher = new FakeLauncher();
+
+      await assert.rejects(reconcileTicket(dependencies(provider, launcher), TICKET), /change request identity/);
+      assert.equal(provider.updated, 0);
+      assert.deepEqual(launcher.requests, []);
+      assert.ok(!provider.events.includes("provider:set-labels"));
+    });
+  }
 });
 
 test("selects the first later unmarked authorized human comment", async () => {
@@ -659,7 +743,8 @@ test("sanitizes provider and configuration failures", async (t) => {
     provider.readError = new Error("token ghp_secret");
     const error = await reconcileTicket(dependencies(provider), TICKET).catch((caught: unknown) => caught);
     assert.match(String(error), /provider ticket read failed/);
-    assert.doesNotMatch(String(error), /ghp_secret/);
+    assert.doesNotMatch(inspect(error, { depth: null, showHidden: true }), /ghp_secret/);
+    assert.doesNotMatch(inspect(Object.getOwnPropertyDescriptors(error as object), { depth: null }), /ghp_secret/);
   });
 
   await t.test("configuration", async () => {
@@ -669,6 +754,86 @@ test("sanitizes provider and configuration failures", async (t) => {
     deps.config.loadPinned = async () => { throw new Error("https://user:secret@example.test"); };
     const error = await reconcileTicket(deps, TICKET).catch((caught: unknown) => caught);
     assert.match(String(error), /pinned configuration load failed/);
-    assert.doesNotMatch(String(error), /user:secret/);
+    assert.doesNotMatch(inspect(error, { depth: null, showHidden: true }), /user:secret/);
+    assert.doesNotMatch(inspect(Object.getOwnPropertyDescriptors(error as object), { depth: null }), /user:secret/);
+  });
+});
+
+test("uses stable semantic attempt input revisions", async (t) => {
+  await t.test("same provider input", async () => {
+    const provider = new FakeProvider();
+    const firstLauncher = new FakeLauncher();
+    await reconcileTicket(dependencies(provider, firstLauncher), TICKET);
+    const first = firstLauncher.requests[0]!.inputRevision;
+    firstLauncher.running.clear();
+
+    const secondLauncher = new FakeLauncher();
+    await reconcileTicket(dependencies(provider, secondLauncher), TICKET);
+
+    assert.equal(secondLauncher.requests[0]?.inputRevision, first);
+    assert.ok(first.length > 0 && first.length <= 255);
+  });
+
+  await t.test("new change-request head", async () => {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({ stateId: "review", changeRequest: controlChange() }));
+    provider.snapshot.changeRequest = changeRequest();
+    const firstLauncher = new FakeLauncher();
+    await reconcileTicket(dependencies(provider, firstLauncher), TICKET);
+
+    provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD });
+    const secondLauncher = new FakeLauncher();
+    await reconcileTicket(dependencies(provider, secondLauncher), TICKET);
+
+    assert.notEqual(secondLauncher.requests[0]?.inputRevision, firstLauncher.requests[0]?.inputRevision);
+  });
+
+  await t.test("new human comment", async () => {
+    async function revision(sourceId: string): Promise<string> {
+      const provider = new FakeProvider();
+      const receipt = assessmentReceipt();
+      const control = controlState({ stateId: "assessment-review", latestReceipt: receipt });
+      installControl(provider, control);
+      provider.snapshot.comments.push(
+        comment("assessment-result", "<!-- agent-flow:v1 flow=x attempt=y artifact=assessment -->", MAINTAINER, "2026-08-26T10:40:00.000Z"),
+        comment(sourceId, "Approved.", MAINTAINER, "2026-08-26T10:41:00.000Z"),
+      );
+      const launcher = new FakeLauncher();
+      await reconcileTicket(dependencies(provider, launcher), TICKET);
+      return launcher.requests[0]!.inputRevision;
+    }
+
+    assert.notEqual(await revision("answer-1"), await revision("answer-2"));
+  });
+
+  await t.test("new prior accepted output", async () => {
+    async function revision(attemptId: string): Promise<string> {
+      const provider = new FakeProvider();
+      const receipt = { ...reviewReceipt(), attemptId };
+      installControl(provider, controlState({
+        stateId: "development",
+        changeRequest: controlChange(),
+        attemptSeries: attemptSeries({
+          agentId: "reviewer",
+          stateId: "review",
+          current: {
+            attemptId,
+            status: "succeeded",
+            startedAt: "2026-08-26T10:30:00.000Z",
+            finishedAt: "2026-08-26T10:45:00.000Z",
+          },
+        }),
+        latestReceipt: receipt,
+      }));
+      provider.snapshot.changeRequest = changeRequest();
+      const launcher = new FakeLauncher();
+      await reconcileTicket(dependencies(provider, launcher), TICKET);
+      return launcher.requests[0]!.inputRevision;
+    }
+
+    assert.notEqual(
+      await revision("33333333-3333-4333-8333-333333333333"),
+      await revision("55555555-5555-4555-8555-555555555555"),
+    );
   });
 });

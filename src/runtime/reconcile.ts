@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { ConfigBundle } from "../config/load.js";
 import type {
@@ -40,6 +40,7 @@ export interface AttemptRequest {
   mode: "stage" | "human-input";
   sourceComment: ProviderComment | null;
   resultContract: ResultContract;
+  inputRevision: string;
 }
 
 export interface AttemptLauncher {
@@ -89,9 +90,9 @@ export async function reconcileTicket(
   if (active.length > 1) throw new Error("multiple active control comments");
 
   if (active.length === 0) {
-    if (!snapshot.activation.present) {
-      const latest = loaded.toSorted((left, right) =>
-        right.parsed.state.updatedAt.localeCompare(left.parsed.state.updatedAt))[0];
+    const latest = loaded.toSorted((left, right) =>
+      right.parsed.state.updatedAt.localeCompare(left.parsed.state.updatedAt))[0];
+    if (!snapshot.activation.present || (latest && !isFreshActivation(snapshot, latest.parsed.state))) {
       if (latest) {
         await ownLabels(
           provider,
@@ -110,6 +111,9 @@ export async function reconcileTicket(
   const current = active[0]!;
   assertAllowed(current.bundle, ref);
   const control = current.parsed.state;
+  if (control.stateId === "awaiting-merge") {
+    assertChangeIdentity(control.changeRequest, snapshot.changeRequest);
+  }
   const mergedWins = control.stateId === "awaiting-merge"
     && snapshot.changeRequest?.state === "merged";
   if ((!snapshot.activation.present || !snapshot.open) && !mergedWins) {
@@ -163,8 +167,9 @@ async function activate(
   history: LoadedControl[],
 ): Promise<ReconcileOutcome> {
   const actor = snapshot.activation.actor;
+  const eventId = snapshot.activation.eventId;
   const occurredAt = snapshot.activation.occurredAt;
-  if (!actor || !occurredAt) return outcome(history.at(-1)?.parsed.state ?? null, false, false);
+  if (!actor || !eventId || !occurredAt) return outcome(history.at(-1)?.parsed.state ?? null, false, false);
   const permission = await providerCall(
     "provider permission read failed",
     () => dependencies.provider.permission(snapshot.ref.repository, actor),
@@ -265,6 +270,14 @@ function assertSnapshot(snapshot: ProviderTicketSnapshot, ref: TicketRef): void 
     || snapshot.repository.name !== ref.repository) {
     throw new Error("provider ticket snapshot does not match the requested ticket");
   }
+}
+
+function isFreshActivation(snapshot: ProviderTicketSnapshot, terminal: ControlState): boolean {
+  const occurredAt = Date.parse(snapshot.activation.occurredAt ?? "");
+  const terminalUpdatedAt = Date.parse(terminal.updatedAt);
+  return Number.isFinite(occurredAt)
+    && Number.isFinite(terminalUpdatedAt)
+    && occurredAt > terminalUpdatedAt;
 }
 
 async function createControl(provider: ProviderAdapter, ref: TicketRef, control: ControlState): Promise<void> {
@@ -376,7 +389,8 @@ async function startIfNeeded(
   }
 
   if (!agentId || !resultContract) throw new Error("launchable flow state is missing its agent contract");
-  if (hasAcceptedAttempt(control, agentId, sourceComment, snapshot)) return false;
+  const inputRevision = attemptInputRevision(control, snapshot, sourceComment);
+  if (hasAcceptedAttempt(control, agentId, inputRevision)) return false;
 
   await dependencies.launcher.start({
     ref: snapshot.ref,
@@ -389,6 +403,7 @@ async function startIfNeeded(
     mode,
     sourceComment,
     resultContract,
+    inputRevision,
   });
   return true;
 }
@@ -396,16 +411,45 @@ async function startIfNeeded(
 function hasAcceptedAttempt(
   control: ControlState,
   agentId: string,
-  sourceComment: ProviderComment | null,
-  snapshot: ProviderTicketSnapshot,
+  inputRevision: string,
 ): boolean {
   const series = control.attemptSeries;
   const current = series?.current;
   if (!series || !current || series.agentId !== agentId || series.stateId !== control.stateId) return false;
+  if (series.inputRevision !== inputRevision) return false;
   if (current.status === "started") return true;
   if (current.status !== "succeeded") return false;
-  const input = sourceComment?.id ?? snapshot.changeRequest?.headSha;
-  return input === undefined || series.inputRevision === input;
+  return true;
+}
+
+function attemptInputRevision(
+  control: ControlState,
+  snapshot: ProviderTicketSnapshot,
+  sourceComment: ProviderComment | null,
+): string {
+  const parts: string[] = [`config:${control.configRevision}`];
+  if (sourceComment) {
+    parts.push(`comment:${sourceComment.id}`);
+  } else {
+    if (snapshot.changeRequest) {
+      parts.push([
+        "change",
+        snapshot.changeRequest.provider,
+        snapshot.changeRequest.repository,
+        snapshot.changeRequest.number,
+        snapshot.changeRequest.headSha,
+        snapshot.changeRequest.state,
+      ].join(":"));
+    }
+    if (control.humanGate) parts.push(`human:${control.humanGate.sourceCommentId}`);
+    if (!control.attemptSeries || control.attemptSeries.stateId !== control.stateId) {
+      if (control.latestReceipt) parts.push(`receipt:${control.latestReceipt.attemptId}`);
+    }
+    if (parts.length === 1 && snapshot.activation.eventId) {
+      parts.push(`activation:${snapshot.activation.eventId}`);
+    }
+  }
+  return `input:${createHash("sha256").update(JSON.stringify(parts)).digest("hex")}`;
 }
 
 async function firstAuthorizedComment(
@@ -462,6 +506,20 @@ function normalizedChange(change: ProviderTicketSnapshot["changeRequest"]): Cont
   };
 }
 
+function assertChangeIdentity(
+  control: ControlChangeRequest | null,
+  snapshot: ProviderTicketSnapshot["changeRequest"],
+): void {
+  if (!control
+    || !snapshot
+    || control.provider !== snapshot.provider
+    || control.repository !== snapshot.repository
+    || control.number !== snapshot.number
+    || control.url !== snapshot.url) {
+    throw new Error("change request identity does not match the control state");
+  }
+}
+
 function flowEvent(
   type: FlowEvent["type"],
   snapshot: ProviderTicketSnapshot,
@@ -493,15 +551,15 @@ function now(dependencies: ReconcileDependencies): string {
 async function providerCall<T>(message: string, operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
-  } catch (cause) {
-    throw new Error(message, { cause });
+  } catch {
+    throw new Error(message);
   }
 }
 
 async function configCall<T>(message: string, operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
-  } catch (cause) {
-    throw new Error(message, { cause });
+  } catch {
+    throw new Error(message);
   }
 }
