@@ -1,0 +1,11 @@
+{
+  "name": "agent-flow-runtime-tools",
+  "private": true,
+  "allowScripts": {
+    "@anthropic-ai/claude-code": true
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.217",
+    "@openai/codex": "0.150.0-alpha.8"
+  }
+}

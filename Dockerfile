@@ -6,17 +6,29 @@ RUN npm ci
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
+FROM node:24-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df AS tools
+
+WORKDIR /tools
+COPY docker/tools/package.json docker/tools/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund \
+    && node_modules/.bin/codex --version | grep -F "0.150.0-alpha.8" \
+    && node_modules/.bin/claude --version | grep -F "2.1.217"
+
 FROM node:24-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df
 
 ARG TARGETARCH
 ARG GH_VERSION=2.96.0
 ARG GLAB_VERSION=1.111.0
 ARG APM_VERSION=0.28.0
-ARG CODEX_VERSION=0.150.0-alpha.8
-ARG CLAUDE_VERSION=2.1.217
 
+COPY docker/apm-requirements.txt /tmp/apm-requirements.txt
+
+# Debian snapshot: 20260825T000000Z.
 RUN set -eux; \
-    apt-get update; \
+    sed -i \
+      's#http://deb.debian.org/debian-security#http://snapshot.debian.org/archive/debian-security/20260825T000000Z#g; s#http://deb.debian.org/debian#http://snapshot.debian.org/archive/debian/20260825T000000Z#g' \
+      /etc/apt/sources.list.d/debian.sources; \
+    apt-get -o Acquire::Check-Valid-Until=false update; \
     apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-pip; \
     rm -rf /var/lib/apt/lists/*; \
     case "$TARGETARCH" in \
@@ -35,17 +47,13 @@ RUN set -eux; \
     echo "$glab_sha  /tmp/glab.tgz" | sha256sum -c -; \
     tar -xzf /tmp/glab.tgz -C /usr/local bin/glab; \
     rm /tmp/gh.tgz /tmp/glab.tgz; \
-    python3 -m pip install --break-system-packages --no-cache-dir \
-      "https://files.pythonhosted.org/packages/3e/e0/a289f6256ddd77040bb37094ff78acc4f99a07c63dc1aca28eb72289b5a9/apm_cli-${APM_VERSION}-py3-none-any.whl#sha256=28682028559dc3e03b4d9d2431eea906f58eacfaa39974657d29646136a4f716"; \
-    npm install --global --omit=dev --no-audit --no-fund \
-      "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}"; \
-    npm cache clean --force; \
+    python3 -m pip install --break-system-packages --no-cache-dir --require-hashes \
+      --requirement /tmp/apm-requirements.txt; \
+    rm /tmp/apm-requirements.txt; \
     node --version | grep -E '^v24\.'; \
     gh --version | grep -F "gh version ${GH_VERSION}"; \
     glab --version | grep -F "glab ${GLAB_VERSION}"; \
     apm --version | grep -F "version ${APM_VERSION}"; \
-    codex --version | grep -F "$CODEX_VERSION"; \
-    claude --version | grep -F "$CLAUDE_VERSION"; \
     git --version
 
 RUN groupadd --gid 10001 agent \
@@ -58,9 +66,11 @@ WORKDIR /app
 COPY --from=build --chown=agent:agent /app/dist ./dist
 COPY --from=build --chown=agent:agent /app/node_modules ./node_modules
 COPY --from=build --chown=agent:agent /app/package.json ./package.json
+COPY --from=tools --chown=agent:agent /tools/node_modules /opt/tools/node_modules
 COPY --chown=agent:agent schemas ./schemas
 
-ENV HOME=/home/agent \
+ENV PATH=/opt/tools/node_modules/.bin:$PATH \
+    HOME=/home/agent \
     CODEX_HOME=/home/agent/.codex \
     CLAUDE_CONFIG_DIR=/home/agent/.claude \
     AGENT_FLOW_CONFIG_REPOSITORY=/config \

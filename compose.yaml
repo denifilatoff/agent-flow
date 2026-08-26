@@ -1,5 +1,6 @@
 services:
   controller:
+    init: true
     build:
       context: .
     environment:
