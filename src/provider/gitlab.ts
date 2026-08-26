@@ -221,6 +221,8 @@ export function createGitLabAdapter(
       return {
         ref,
         repository,
+        title: string(issue, "title"),
+        description: optionalString(issue.description, "GitLab issue description"),
         open,
         labels,
         updatedAt: string(issue, "updated_at"),

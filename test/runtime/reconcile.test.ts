@@ -110,6 +110,8 @@ function snapshot(patch: Partial<ProviderTicketSnapshot> = {}): ProviderTicketSn
   return {
     ref: TICKET,
     repository: repository(),
+    title: "Fix the edge case",
+    description: "Handle the documented edge case.",
     open: true,
     labels: ["bug", "agent-flow:development"],
     updatedAt: "2026-08-26T11:45:00.000Z",

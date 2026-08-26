@@ -646,7 +646,7 @@ class FixtureState {
   }
 
   private githubIssue() {
-    return { number: this.number, state: this.open ? "open" : "closed", updated_at: this.timestamp(), labels: this.labels.map((name) => ({ name })) };
+    return { number: this.number, title: "Fixture ticket", body: "Exercise the configured workflow.", state: this.open ? "open" : "closed", updated_at: this.timestamp(), labels: this.labels.map((name) => ({ name })) };
   }
 
   private githubTimeline() {
@@ -689,7 +689,7 @@ class FixtureState {
   }
 
   private gitlabIssue() {
-    return { id: 2300, iid: this.number, state: this.open ? "opened" : "closed", labels: this.labels, updated_at: this.timestamp(), web_url: `${this.origin}/api/gitlab/${this.repository}/-/issues/${this.number}` };
+    return { id: 2300, iid: this.number, title: "Fixture ticket", description: "Exercise the configured workflow.", state: this.open ? "opened" : "closed", labels: this.labels, updated_at: this.timestamp(), web_url: `${this.origin}/api/gitlab/${this.repository}/-/issues/${this.number}` };
   }
 
   private gitlabActivation() {

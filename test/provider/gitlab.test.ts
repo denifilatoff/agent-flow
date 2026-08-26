@@ -147,6 +147,8 @@ test("uses updated_after and normalizes an issue snapshot", async () => {
     nextCursor: next,
   });
   const ticket = await gitlab.readTicket(page.tickets[0]!);
+  assert.equal(ticket.title, "Fix the edge case");
+  assert.equal(ticket.description, "Handle the documented edge case without changing existing behavior.");
   assert.equal(ticket.activation.present, true);
   assert.equal(ticket.activation.eventId, "802");
   assert.equal(ticket.activation.actor?.login, "maintainer");

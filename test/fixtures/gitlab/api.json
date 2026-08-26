@@ -19,6 +19,8 @@
   "issue": {
     "id": 2300,
     "iid": 23,
+    "title": "Fix the edge case",
+    "description": "Handle the documented edge case without changing existing behavior.",
     "state": "opened",
     "labels": ["bug", "agent-flow:development", "agent-stage:review"],
     "updated_at": "2026-08-25T10:05:00.000Z",

@@ -17,6 +17,8 @@ const ATTEMPT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CONTEXT: AttemptContext = {
   ticket: {
     ref: { provider: "github", repository: "owner/repo", number: 17 },
+    title: "Fix the edge case",
+    description: "Handle the documented edge case.",
     repository: {
       provider: "github",
       name: "owner/repo",

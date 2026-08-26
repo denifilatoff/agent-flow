@@ -115,6 +115,8 @@ test("discovers changed issues and normalizes one snapshot", async () => {
       "repos/owner/repo/issues?state=all&since=2026-08-25T09%3A59%3A59.000Z&per_page=100&page=2",
   });
   const ticket = await github.readTicket(page.tickets[0]!);
+  assert.equal(ticket.title, "Fix the edge case");
+  assert.equal(ticket.description, "Handle the documented edge case without changing existing behavior.");
   assert.equal(ticket.activation.present, true);
   assert.equal(ticket.activation.eventId, "803");
   assert.equal(ticket.activation.actor?.login, "maintainer");

@@ -64,6 +64,7 @@ function snapshot(): ProviderTicketSnapshot {
   return {
     ref: { provider: "github", repository: "owner/repo", number: 7 },
     repository: { provider: "github", name: "owner/repo", host: "github.test", cloneRoot: "/", cloneUrl: "https://github.test/owner/repo.git" },
+    title: "Fix the edge case", description: "Handle the documented edge case.",
     open: true, labels: ["agent-flow:development", "agent-stage:development"], updatedAt: NOW,
     activation: { present: true, eventId: "event-1", actor, occurredAt: NOW }, comments: [],
     changeRequest: { provider: "github", repository: "owner/repo", number: 8,

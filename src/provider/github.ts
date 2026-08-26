@@ -208,6 +208,8 @@ export function createGitHubAdapter(
       return {
         ref,
         repository,
+        title: string(issue, "title"),
+        description: optionalString(issue.body, "GitHub issue body"),
         open,
         labels,
         updatedAt: string(issue, "updated_at"),

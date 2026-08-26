@@ -143,6 +143,8 @@ function snapshot(overrides: Partial<ProviderTicketSnapshot> = {}): ProviderTick
       cloneRoot: "https://github.example.test/",
       cloneUrl: "https://github.example.test/owner/repo.git",
     },
+    title: "Fix the edge case",
+    description: "Handle the documented edge case.",
     open: true,
     labels: ["agent-flow:development"],
     updatedAt: "2026-08-25T10:00:00.000Z",

@@ -55,6 +55,8 @@ export type ProviderArtifact = ProviderComment | NormalizedChangeRequest | Norma
 export interface ProviderTicketSnapshot {
   ref: TicketRef;
   repository: ProviderRepository;
+  title: string;
+  description: string;
   open: boolean;
   labels: string[];
   updatedAt: string;
