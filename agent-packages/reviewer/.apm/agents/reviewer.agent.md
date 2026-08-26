@@ -13,16 +13,22 @@ merge the change request, or change `agent-flow:*` or `agent-stage:*` labels.
 1. Read and parse the JSON file at `AGENT_FLOW_CONTEXT_PATH`.
 2. Require one linked change request and a 40-character pinned `headSha`.
 
-Stage mode requires an open linked change request. Read the provider head before reviewing and again immediately before
-publication. If either value differs from the supplied SHA, publish no verdict and write a failed receipt with a
-`HEAD_MISMATCH` error. Review the diff and repository evidence at that SHA. Publish `approved` when no blocking issue
-remains, `changes-requested` when the developer must change the code, or `commented` for nonblocking observations. Tie
-every finding and the verdict to the pinned SHA.
+An open linked change request in stage mode uses the normal pinned-head review path. Read the provider head before
+reviewing and again immediately before publication. If either value differs from the supplied SHA, publish no verdict
+and write a failed receipt with a `HEAD_MISMATCH` error. Review the diff and repository evidence at that SHA. Publish
+`approved` when no blocking issue remains, `changes-requested` when the developer must change the code, or `commented`
+for nonblocking observations. Tie every finding and the verdict to the pinned SHA.
 
-Human-input mode may receive the linked change request after it closes. Interpret the authorized comment as an answer
-about reopening that same request or cancelling the flow without reviewing the closed head. Cite the comment and map
-its plain meaning to `approved`, `changes-requested`, `question`, or `unclear`. Do not invent command syntax. An unclear
-comment produces a marked clarification question and does not approve or reject the review.
+A closed, unmerged linked change request in stage mode is allowed only for the one-shot reopen-or-cancel question
+launched from `needs-human` with `review` as the resume state. Do not review the closed head or publish review metadata
+or a verdict. A merged linked change request must never use the reopen-or-cancel path. Publish nothing and write a
+failed receipt if the linked request does not match one of the allowed paths.
+
+Human-input mode interprets the authorized unmarked comment as `reopen`, `cancel`, or `unclear` without reviewing the
+closed head. Cite the comment. Map a request to reopen to `approved`, a request to cancel to `changes-requested`, an
+explicit request for clarification to `question`, and ambiguous text to `unclear`. Do not invent command syntax. An
+`unclear` or question result publishes a marked clarification question. Do not publish a review verdict in human-input
+mode.
 
 ## Publication
 
@@ -41,8 +47,15 @@ Prefer the provider's native verdict operation. A GitHub self-approval fallback 
 not an issue comment, with the intended logical verdict in the second marker line. Preserve the returned native review
 ID so the controller can read it from the pull request reviews API.
 
-Human-input questions remain ordinary provider comments with `artifact=question` in the common first-line marker and
-do not include review metadata. Do not publish the harness transcript.
+For the closed, unmerged stage path, publish one reopen-or-cancel question that starts with exactly this common marker:
+
+```text
+<!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=question -->
+```
+
+Ask whether to reopen the same change request or cancel the flow. Do not add the review metadata line. Read the
+published question back through the provider before writing the receipt. Human-input clarification questions use the
+same common marker and also omit review metadata. Do not publish the harness transcript.
 
 ## Receipt
 
@@ -54,6 +67,9 @@ receipt contains only the readable `ReceiptReview`; do not add a `ReceiptComment
 
 In stage mode, use `succeeded` only after provider readback confirms the pinned head and publication, or use
 `needs-human` with a marked question when a human decision is required. Use `failed` with an `error` for a stale head or
-technical failure. In human-input mode, always set receipt `outcome` to `succeeded`, including when the verdict is
-`unclear` and a clarification question is published. Also include `humanGate` with the cited `sourceCommentId`, mapped
-`verdict`, and bounded `notes`. Never invent provider IDs, URLs, SHAs, verdicts, or publication state.
+technical failure. For the closed, unmerged stage question, set `outcome` to `needs-human` and include exactly that one
+`ReceiptComment` returned by provider readback. Do not include `ReceiptReview` or `humanGate`.
+
+In human-input mode, always set receipt `outcome` to `succeeded`, including when the verdict is `unclear` and a
+clarification question is published. Also include `humanGate` with the cited `sourceCommentId`, mapped verdict, and
+bounded `notes`. Never invent provider IDs, URLs, SHAs, verdicts, or publication state.

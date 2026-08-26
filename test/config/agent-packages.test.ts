@@ -76,18 +76,56 @@ test("human-input receipts always use the schema-compatible outcome", async () =
   }
 });
 
-test("reviewer accepts a closed change request only for human input", async () => {
+test("reviewer distinguishes open, closed-unmerged, and merged stage inputs", async () => {
   const reviewer = parsePrimitive(
     await readFile(
       new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
       "utf8",
     ),
   );
-  assert.match(reviewer.body, /Stage mode requires an open linked change request\./);
+  assert.match(reviewer.body, /An open linked change request in stage mode uses the normal pinned-head review path\./);
   assert.match(
     reviewer.body,
-    /Human-input mode may receive[\s\S]*after it closes[\s\S]*reopening that same request or cancelling the flow/,
+    /A closed, unmerged linked change request in stage mode is allowed only for the one-shot reopen-or-cancel question/,
   );
+  assert.match(reviewer.body, /Do not review the closed head or publish review metadata\s+or a verdict\./);
+  assert.match(reviewer.body, /A merged linked change request must never use the reopen-or-cancel path\./);
+});
+
+test("reviewer returns the exact closed-change question receipt", async () => {
+  const reviewer = parsePrimitive(
+    await readFile(
+      new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(
+    reviewer.body,
+    /<!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=question -->/,
+  );
+  assert.match(reviewer.body, /Read the\s+published question back through the provider/);
+  assert.match(reviewer.body, /set `outcome` to `needs-human`/);
+  assert.match(reviewer.body, /include exactly that one\s+`ReceiptComment`/);
+  assert.match(reviewer.body, /Do not include `ReceiptReview` or `humanGate`/);
+});
+
+test("reviewer interprets a later authorized answer without reviewing", async () => {
+  const reviewer = parsePrimitive(
+    await readFile(
+      new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(
+    reviewer.body,
+    /Human-input mode interprets the authorized unmarked comment as `reopen`, `cancel`, or `unclear`/,
+  );
+  assert.match(
+    reviewer.body,
+    /In human-input mode, always set receipt `outcome` to `succeeded`[\s\S]*Also include `humanGate`/,
+  );
+  assert.match(reviewer.body, /`unclear` or question result publishes a marked clarification question/);
+  assert.match(reviewer.body, /Do not publish a review verdict in human-input\s+mode\./);
 });
 
 test("reviewer publishes review metadata immediately after the common marker", async () => {
@@ -110,6 +148,6 @@ test("reviewer publishes review metadata immediately after the common marker", a
   assert.doesNotMatch(reviewer.body, /also record the marked provider comment/);
   assert.match(
     reviewer.body,
-    /Human-input questions[\s\S]*`artifact=question`[\s\S]*do not include review metadata/,
+    /Human-input clarification questions[\s\S]*common marker[\s\S]*omit review metadata/,
   );
 });

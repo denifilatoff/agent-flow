@@ -453,12 +453,21 @@ author: agent-flow
 targets: [codex]
 ```
 
-The entry agent must stop if the provider head differs from the supplied SHA. It publishes an approved,
-changes-requested, or commented verdict tied to that SHA. When GitHub prevents self-approval, it publishes a marked
-native `COMMENT` review with the same machine-readable verdict and returns its readable review ID. It never publishes
-an issue-comment fallback, merges, or edits controller labels. Run `apm lock --target
-codex --no-policy` to produce the lockfile without adding generated target files to the source package. The `**/*`
-entry instruction selects `reviewer` and repeats the environment and receipt boundary for target compilation.
+For an open change request, the entry agent must stop if the provider head differs from the supplied SHA. It publishes
+an approved, changes-requested, or commented verdict tied to that SHA. When GitHub prevents self-approval, it publishes
+a marked native `COMMENT` review with the same machine-readable verdict and returns its readable review ID. It never
+publishes an issue-comment fallback, merges, or edits controller labels.
+
+For the Task 17 one-shot stage attempt on a closed, unmerged change request, it reviews no code and publishes no review
+metadata or verdict. It publishes and reads back one marked reopen-or-cancel question, then returns `needs-human` with
+exactly that `ReceiptComment` and no `ReceiptReview` or `humanGate`. A merged request never uses this path. A later
+authorized unmarked answer runs in human-input mode, maps reopen, cancel, or unclear intent into a `succeeded` receipt
+with `humanGate`, and publishes a marked clarification question only when needed. Human-input mode publishes no review
+verdict.
+
+Run `apm lock --target codex --no-policy` to produce the lockfile without adding generated target files to the source
+package. The `**/*` entry instruction selects `reviewer` and repeats the environment and receipt boundary for target
+compilation.
 
 - [ ] **Step 4: Run the focused test and confirm green**
 
@@ -1501,8 +1510,12 @@ comment and nonblocking approval notes in the next attempt's context. `blocked` 
 directly and resets the current retry series.
 
 A closed, unmerged change request enters `needs-human` with review as the resume state. Launch the reviewer once in
-stage mode so it publishes the marked reopen-or-cancel question, then wait for the authorized unmarked answer. Never
-create a replacement change request automatically.
+stage mode. It must not review the closed head or publish review metadata or a verdict. It publishes one exact
+`artifact=question` reopen-or-cancel comment, reads it back, and returns `needs-human` with exactly that
+`ReceiptComment`, no `ReceiptReview`, and no `humanGate`. A merged change request never enters this path. Wait for the
+first authorized unmarked answer, then launch the reviewer in human-input mode. It interprets reopen, cancel, or unclear
+intent, returns `succeeded` with `humanGate`, and publishes a marked clarification question only for unclear or question
+intent. Never create a replacement change request automatically.
 
 - [ ] **Step 4: Run the focused test and confirm green**
 

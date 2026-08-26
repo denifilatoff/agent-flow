@@ -150,6 +150,17 @@ marker line carries the intended logical verdict, such as `approved`. The receip
 `ReceiptReview`, and the controller reads it back from `/pulls/<number>/reviews/<id>`. The fallback is not an issue
 comment. For native `APPROVED` and `CHANGES_REQUESTED` states, the marker verdict must agree with the provider state.
 
+An open linked change request follows the normal pinned-head review path. A closed, unmerged linked change request may
+run the reviewer in stage mode only once after Task 17 enters `needs-human` with `review` as the resume state. This run
+does not inspect the closed head or publish review metadata or a verdict. It publishes one reopen-or-cancel question
+that starts with the exact common marker for `artifact=question`, reads the provider comment back, and writes a
+`needs-human` receipt containing exactly that `ReceiptComment`. The receipt has no `ReceiptReview` or `humanGate`. A
+merged change request never uses this path.
+
+The first later authorized unmarked answer runs the reviewer in human-input mode. The reviewer interprets reopen,
+cancel, or unclear intent without reviewing code. It writes a `succeeded` receipt with `humanGate`; unclear or question
+intent also publishes one marked clarification question. Human-input mode never publishes a review verdict.
+
 ## Attempt files
 
 The controller creates one immutable session directory per attempt:
