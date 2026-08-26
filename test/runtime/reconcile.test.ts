@@ -150,6 +150,7 @@ function controlState(patch: Partial<ControlState> = {}): ControlState {
     resumeStateId: null,
     activatedBy: MAINTAINER,
     activatedAt: "2026-08-26T10:00:00.000Z",
+    activationEventId: "803",
     updatedAt: "2026-08-26T10:00:00.000Z",
     attemptSeries: null,
     latestReceipt: null,
@@ -360,6 +361,7 @@ test("accepts one authorized activation and owns one stage label", async () => {
   assert.equal(launcher.requests[0]?.agentId, "architect");
   assert.equal(launcher.requests[0]?.mode, "stage");
   assert.equal(launcher.requests[0]?.control.sequence, 0);
+  assert.equal(launcher.requests[0]?.control.activationEventId, "803");
   assert.ok(provider.events.indexOf("provider:read-control") < provider.events.indexOf("provider:set-labels"));
 });
 
@@ -430,7 +432,7 @@ test("reactivation creates a new flow and preserves terminal control history", a
     present: true,
     eventId: "804",
     actor: MAINTAINER,
-    occurredAt: "2026-08-26T11:00:00.000Z",
+    occurredAt: "2026-08-26T10:00:00.000Z",
   };
 
   await reconcileTicket(dependencies(provider, launcher), TICKET);
@@ -452,7 +454,7 @@ test("finishes crash-window cleanup instead of reactivating the original label e
     present: true,
     eventId: "803",
     actor: MAINTAINER,
-    occurredAt: terminal.activatedAt,
+    occurredAt: "2026-08-26T13:00:00.000Z",
   };
 
   const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
@@ -590,6 +592,18 @@ test("fails closed when an awaiting-merge snapshot replaces the linked change id
       assert.ok(!provider.events.includes("provider:set-labels"));
     });
   }
+});
+
+test("rejects a merged change request at a different reviewed head", async () => {
+  const provider = new FakeProvider();
+  installControl(provider, controlState({ stateId: "awaiting-merge", changeRequest: controlChange() }));
+  provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD, state: "merged" });
+  const launcher = new FakeLauncher();
+
+  await assert.rejects(reconcileTicket(dependencies(provider, launcher), TICKET), /reviewed head/);
+  assert.equal(provider.updated, 0);
+  assert.deepEqual(launcher.requests, []);
+  assert.ok(!provider.events.includes("provider:set-labels"));
 });
 
 test("selects the first later unmarked authorized human comment", async () => {
@@ -835,5 +849,41 @@ test("uses stable semantic attempt input revisions", async (t) => {
       await revision("33333333-3333-4333-8333-333333333333"),
       await revision("55555555-5555-4555-8555-555555555555"),
     );
+  });
+
+  await t.test("persisting the current started series", async () => {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({
+      stateId: "development",
+      changeRequest: controlChange(),
+      attemptSeries: attemptSeries({ agentId: "reviewer", stateId: "review" }),
+      latestReceipt: reviewReceipt("changes-requested"),
+    }));
+    provider.snapshot.changeRequest = changeRequest();
+    const firstLauncher = new FakeLauncher();
+    await reconcileTicket(dependencies(provider, firstLauncher), TICKET);
+    const request = firstLauncher.requests[0]!;
+    firstLauncher.running.clear();
+
+    const index = provider.snapshot.comments.findIndex((candidate) => candidate.id.startsWith("control-"));
+    const state = parseControlComment(provider.snapshot.comments[index]!.body)!;
+    provider.snapshot.comments[index] = controlComment({
+      ...state,
+      attemptSeries: attemptSeries({
+        agentId: "developer",
+        stateId: "development",
+        inputRevision: request.inputRevision,
+        current: {
+          attemptId: ATTEMPT,
+          status: "started",
+          startedAt: "2026-08-26T12:01:00.000Z",
+        },
+      }),
+    }, provider.snapshot.comments[index]!.id);
+    const secondLauncher = new FakeLauncher();
+
+    await reconcileTicket(dependencies(provider, secondLauncher), TICKET);
+
+    assert.deepEqual(secondLauncher.requests, []);
   });
 });

@@ -47,6 +47,7 @@ const CONTEXT: AttemptContext = {
     resumeStateId: null,
     activatedBy: { login: "maintainer", providerId: "41" },
     activatedAt: "2026-08-26T00:00:00.000Z",
+    activationEventId: "event-803",
     updatedAt: "2026-08-26T00:00:00.000Z",
     attemptSeries: null,
     latestReceipt: null,

@@ -27,6 +27,7 @@ function controlState(patch: Partial<ControlState> = {}): ControlState {
     resumeStateId: null,
     activatedBy: { login: "owner", providerId: "42" },
     activatedAt: "2026-08-26T09:00:00.000Z",
+    activationEventId: "event-803",
     updatedAt: "2026-08-26T09:00:00.000Z",
     attemptSeries: null,
     latestReceipt: null,
@@ -117,6 +118,7 @@ test("advances only the declared patch surface and preserves identity", () => {
       configRevision: next.configRevision,
       activatedBy: next.activatedBy,
       activatedAt: next.activatedAt,
+      activationEventId: next.activationEventId,
     },
     {
       flowInstanceId: current.flowInstanceId,
@@ -124,6 +126,7 @@ test("advances only the declared patch surface and preserves identity", () => {
       configRevision: current.configRevision,
       activatedBy: current.activatedBy,
       activatedAt: current.activatedAt,
+      activationEventId: current.activationEventId,
     },
   );
   assert.equal(next.sequence, 8);
@@ -147,4 +150,21 @@ test("rejects sequences that cannot be incremented safely", () => {
   const unsafe = parseControlComment(unsafeBody)!;
   assert.equal(Number.isSafeInteger(unsafe.sequence), false);
   assert.throws(() => advanceControlState(unsafe, {}, NOW), /safe integer/);
+});
+
+test("requires one bounded activation event ID", () => {
+  const valid = controlState();
+  assert.doesNotThrow(() => renderControlComment(valid));
+
+  const missing = { ...valid } as Partial<ControlState> & { activationEventId?: string };
+  delete missing.activationEventId;
+  assert.throws(() => renderControlComment(missing as ControlState), /activationEventId/);
+  assert.throws(
+    () => renderControlComment({ ...valid, activationEventId: "" } as ControlState),
+    /activationEventId/,
+  );
+  assert.throws(
+    () => renderControlComment({ ...valid, activationEventId: "x".repeat(256) } as ControlState),
+    /activationEventId/,
+  );
 });

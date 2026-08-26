@@ -92,7 +92,9 @@ export async function reconcileTicket(
   if (active.length === 0) {
     const latest = loaded.toSorted((left, right) =>
       right.parsed.state.updatedAt.localeCompare(left.parsed.state.updatedAt))[0];
-    if (!snapshot.activation.present || (latest && !isFreshActivation(snapshot, latest.parsed.state))) {
+    const seenActivation = snapshot.activation.eventId !== null
+      && loaded.some((entry) => entry.parsed.state.activationEventId === snapshot.activation.eventId);
+    if (!snapshot.activation.present || (latest && seenActivation)) {
       if (latest) {
         await ownLabels(
           provider,
@@ -195,6 +197,7 @@ async function activate(
     resumeStateId: null,
     activatedBy: actor,
     activatedAt: occurredAt,
+    activationEventId: eventId,
     updatedAt: timestamp,
     attemptSeries: null,
     latestReceipt: null,
@@ -270,14 +273,6 @@ function assertSnapshot(snapshot: ProviderTicketSnapshot, ref: TicketRef): void 
     || snapshot.repository.name !== ref.repository) {
     throw new Error("provider ticket snapshot does not match the requested ticket");
   }
-}
-
-function isFreshActivation(snapshot: ProviderTicketSnapshot, terminal: ControlState): boolean {
-  const occurredAt = Date.parse(snapshot.activation.occurredAt ?? "");
-  const terminalUpdatedAt = Date.parse(terminal.updatedAt);
-  return Number.isFinite(occurredAt)
-    && Number.isFinite(terminalUpdatedAt)
-    && occurredAt > terminalUpdatedAt;
 }
 
 async function createControl(provider: ProviderAdapter, ref: TicketRef, control: ControlState): Promise<void> {
@@ -373,6 +368,7 @@ async function startIfNeeded(
       state = resume;
       agentId = resume.agent;
       if (!sourceComment) {
+        if (hasAcceptedQuestion(control)) return false;
         if (snapshot.changeRequest?.state !== "closed" || control.resumeStateId !== "review") return false;
         resultContract = resume.resultContract;
       } else {
@@ -442,14 +438,20 @@ function attemptInputRevision(
       ].join(":"));
     }
     if (control.humanGate) parts.push(`human:${control.humanGate.sourceCommentId}`);
-    if (!control.attemptSeries || control.attemptSeries.stateId !== control.stateId) {
-      if (control.latestReceipt) parts.push(`receipt:${control.latestReceipt.attemptId}`);
-    }
+    if (control.latestReceipt) parts.push(`receipt:${control.latestReceipt.attemptId}`);
     if (parts.length === 1 && snapshot.activation.eventId) {
       parts.push(`activation:${snapshot.activation.eventId}`);
     }
   }
   return `input:${createHash("sha256").update(JSON.stringify(parts)).digest("hex")}`;
+}
+
+function hasAcceptedQuestion(control: ControlState): boolean {
+  const current = control.attemptSeries?.current;
+  return control.attemptSeries?.stateId === control.stateId
+    && current?.status === "succeeded"
+    && control.latestReceipt?.outcome === "needs-human"
+    && control.latestReceipt.attemptId === current.attemptId;
 }
 
 async function firstAuthorizedComment(
@@ -517,6 +519,9 @@ function assertChangeIdentity(
     || control.number !== snapshot.number
     || control.url !== snapshot.url) {
     throw new Error("change request identity does not match the control state");
+  }
+  if (snapshot.state === "merged" && control.headSha !== snapshot.headSha) {
+    throw new Error("merged change request does not match the reviewed head");
   }
 }
 

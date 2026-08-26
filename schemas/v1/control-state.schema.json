@@ -15,6 +15,7 @@
     "resumeStateId",
     "activatedBy",
     "activatedAt",
+    "activationEventId",
     "updatedAt",
     "attemptSeries",
     "latestReceipt",
@@ -37,6 +38,7 @@
     },
     "activatedBy": { "$ref": "#/$defs/actor" },
     "activatedAt": { "$ref": "#/$defs/timestamp" },
+    "activationEventId": { "type": "string", "minLength": 1, "maxLength": 255 },
     "updatedAt": { "$ref": "#/$defs/timestamp" },
     "attemptSeries": {
       "oneOf": [

@@ -113,7 +113,9 @@ The controller owns one mutable ticket comment per flow instance. Its first line
 
 The marker is followed by one fenced JSON object validated by `control-state.schema.json`. The controller edits this
 comment in place and increments `sequence` for each accepted change. It records the pinned config SHA, current state,
-resume state, current attempt series, latest validated receipt, human gate result, and linked change request.
+resume state, accepted activation event ID, current attempt series, latest validated receipt, human gate result, and
+linked change request. A terminal flow starts again only for a different authorized activation event ID; timestamps do
+not determine reactivation because provider and controller clocks may differ.
 
 The controller writes an attempt with status `started` and reads the comment back before launching a harness. A restart
 therefore cannot restore a consumed retry. Older attempt series do not need to remain in the control comment because

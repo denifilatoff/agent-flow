@@ -1491,8 +1491,9 @@ Follow this order:
 8. Start an attempt only for an agent or human-gate state that has no running attempt.
 
 The initial `ControlState` uses sequence 0, the flow ID and pinned 40-character SHA, `assessment`, a null resume state,
-the authorized activation actor and timestamp, and null attempt series, receipt, human gate, and change request. Create
-one new control comment for each terminal reactivation; never overwrite a prior flow instance's terminal comment.
+the authorized activation event ID, actor, and timestamp, and null attempt series, receipt, human gate, and change
+request. Create one new control comment for each terminal reactivation; never overwrite a prior flow instance's
+terminal comment.
 
 The first later unmarked comment from a `write`, `maintain`, or `admin` actor is the candidate human input. Human gates
 launch the current-stage agent in `human-input` mode. `needs-human` uses the same interpreter. Preserve the source

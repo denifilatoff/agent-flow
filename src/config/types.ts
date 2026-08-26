@@ -111,6 +111,7 @@ export interface ControlState {
   resumeStateId: string | null;
   activatedBy: Actor;
   activatedAt: string;
+  activationEventId: string;
   updatedAt: string;
   attemptSeries: AttemptSeries | null;
   latestReceipt: AgentReceipt | null;
