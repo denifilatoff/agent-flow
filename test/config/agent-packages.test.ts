@@ -52,3 +52,7 @@ test("architect package has one entry agent and a lockfile", async () => {
 test("planner package has one entry agent and a lockfile", async () => {
   await assertAgentPackage("planner", "plan");
 });
+
+test("developer package has one entry agent and a lockfile", async () => {
+  await assertAgentPackage("developer", "change-request");
+});
