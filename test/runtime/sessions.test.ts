@@ -21,6 +21,7 @@ const CONTEXT: AttemptContext = {
       provider: "github",
       name: "owner/repo",
       host: "github.example.test",
+      cloneRoot: "https://github.example.test/",
       cloneUrl: "https://github.example.test/owner/repo.git",
     },
     open: true,

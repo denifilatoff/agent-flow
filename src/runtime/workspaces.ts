@@ -38,7 +38,8 @@ interface RepositoryIdentity {
   provider: ProviderRepository["provider"];
   host: string;
   name: string;
-  remotePath: string;
+  cloneRoot: string;
+  cloneUrl: string;
 }
 
 interface WorkspaceBinding extends RepositoryIdentity {
@@ -257,14 +258,10 @@ export class WorkspaceManager {
 
   async #assertOrigin(directory: string, expected: RepositoryIdentity): Promise<void> {
     const result = await this.#run("git", ["remote", "get-url", "origin"], { cwd: directory });
-    const actual = parseRemoteIdentity(result.stdout);
-    if (
-      actual.host !== expected.host ||
-      !samePath(actual.path, expected.remotePath, expected.provider)
-    ) {
+    const actual = normalizeRepositoryUrl(result.stdout, "repository remote");
+    if (actual !== expected.cloneUrl) {
       throw new Error(
-        `repository identity mismatch: expected ${expected.host}/${expected.remotePath}, ` +
-        `received ${actual.host}/${actual.path}`,
+        `repository identity mismatch: expected ${expected.cloneUrl}, received ${actual}`,
       );
     }
   }
@@ -273,16 +270,22 @@ export class WorkspaceManager {
 function repositoryIdentity(repository: ProviderRepository): RepositoryIdentity {
   const host = normalizeHost(repository.host);
   const name = normalizePath(repository.name);
-  const clone = parseRemoteIdentity(repository.cloneUrl);
-  const pathMatches = repository.provider === "github"
-    ? samePath(clone.path, name, repository.provider)
-    : pathEndsWithRepository(clone.path, name);
-  if (clone.host !== host || !pathMatches) {
+  const cloneRoot = normalizeRepositoryUrl(repository.cloneRoot, "repository clone root");
+  const root = new URL(cloneRoot);
+  if (!root.pathname.endsWith("/") || root.host !== host) {
     throw new Error(
-      `repository identity mismatch: expected ${host}/.../${name}, received ${clone.host}/${clone.path}`,
+      `repository identity mismatch: clone root ${cloneRoot} does not match host ${host}`,
     );
   }
-  return { provider: repository.provider, host, name, remotePath: clone.path };
+  const expected = new URL(root);
+  expected.pathname += `${name}.git`;
+  const cloneUrl = normalizeRepositoryUrl(repository.cloneUrl, "repository clone URL");
+  if (cloneUrl !== expected.href) {
+    throw new Error(
+      `repository identity mismatch: expected ${expected.href}, received ${cloneUrl}`,
+    );
+  }
+  return { provider: repository.provider, host, name, cloneRoot, cloneUrl };
 }
 
 function assertTicket(repository: RepositoryIdentity, ticket: TicketRef): void {
@@ -296,19 +299,25 @@ function assertTicket(repository: RepositoryIdentity, ticket: TicketRef): void {
   }
 }
 
-function parseRemoteIdentity(remote: string): { host: string; path: string } {
-  const value = remote.trim();
-  const scp = /^(?:[^@/]+@)?([^:/]+):(.+)$/.exec(value);
-  if (scp && !value.includes("://")) {
-    return { host: normalizeHost(scp[1]!), path: normalizePath(scp[2]!) };
-  }
+function normalizeRepositoryUrl(value: string, label: string): string {
+  const trimmed = value.trim();
   let url: URL;
   try {
-    url = new URL(value);
+    url = new URL(trimmed);
   } catch (error) {
-    throw new Error(`invalid repository remote: ${value}`, { cause: error });
+    throw new Error(`invalid ${label}: ${trimmed}`, { cause: error });
   }
-  return { host: normalizeHost(url.host), path: normalizePath(decodeURIComponent(url.pathname)) };
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    !url.host ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(`invalid ${label}: ${trimmed}`);
+  }
+  return url.href;
 }
 
 function normalizeHost(host: string): string {
@@ -331,16 +340,9 @@ function normalizePath(path: string): string {
   return normalized;
 }
 
-function pathEndsWithRepository(
-  path: string,
-  repository: string,
-): boolean {
-  return path === repository || path.endsWith(`/${repository}`);
-}
-
 function repositoryKey(identity: RepositoryIdentity): string {
   return createHash("sha256")
-    .update(`${identity.provider}\0${identity.host}\0${identity.remotePath}`)
+    .update(`${identity.provider}\0${identity.cloneUrl}`)
     .digest("hex");
 }
 

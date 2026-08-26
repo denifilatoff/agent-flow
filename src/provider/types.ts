@@ -16,6 +16,7 @@ export interface ProviderRepository {
   provider: ProviderKind;
   name: string;
   host: string;
+  cloneRoot: string;
   cloneUrl: string;
 }
 

@@ -79,9 +79,30 @@ test("verifies auth and reads the encoded canonical project identity", async () 
     provider: "gitlab",
     name: REPOSITORY,
     host: "gitlab.example.test",
+    cloneRoot: "https://gitlab.example.test/",
     cloneUrl: "https://gitlab.example.test/group/project.git",
   });
   assert.deepEqual(client.calls.map(({ priority }) => priority), ["active", "active"]);
+});
+
+test("derives the GitLab clone root from a relative-root API URL", async () => {
+  const project = {
+    ...(fixture.project as Record<string, unknown>),
+    web_url: "https://gitlab.example.test/gitlab/group/project",
+    http_url_to_repo: "https://gitlab.example.test/gitlab/group/project.git",
+  };
+  const client = new FixtureClient().add("GET", PROJECT, { data: project });
+
+  assert.deepEqual(
+    await adapter(client, "https://gitlab.example.test/gitlab/api/v4").readRepository(REPOSITORY),
+    {
+      provider: "gitlab",
+      name: REPOSITORY,
+      host: "gitlab.example.test",
+      cloneRoot: "https://gitlab.example.test/gitlab/",
+      cloneUrl: "https://gitlab.example.test/gitlab/group/project.git",
+    },
+  );
 });
 
 test("uses updated_after and normalizes an issue snapshot", async () => {

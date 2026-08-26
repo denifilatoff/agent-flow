@@ -93,6 +93,7 @@ export function createGitHubAdapter(
       provider: "github",
       name,
       host: webUrl.host,
+      cloneRoot: new URL("/", webUrl).href,
       cloneUrl: string(value, "clone_url"),
     };
   }

@@ -74,6 +74,7 @@ test("verifies auth and reads canonical repository identity", async () => {
     provider: "github",
     name: REPOSITORY,
     host: "github.example.test",
+    cloneRoot: "https://github.example.test/",
     cloneUrl: "https://github.example.test/owner/repo.git",
   });
   assert.deepEqual(client.calls.map(({ priority }) => priority), ["active", "active"]);

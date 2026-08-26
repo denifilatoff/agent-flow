@@ -88,7 +88,7 @@ export function createGitLabAdapter(
   }
 
   async function readRepository(repository: string): Promise<ProviderRepository> {
-    return normalizeProject(await readProject(repository), repository);
+    return normalizeProject(await readProject(repository), repository, webBase);
   }
 
   async function readChangeRequest(
@@ -191,7 +191,7 @@ export function createGitLabAdapter(
     async readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot> {
       const path = ticketPath(ref);
       const project = await readProject(ref.repository);
-      const repository = normalizeProject(project, ref.repository);
+      const repository = normalizeProject(project, ref.repository, webBase);
       const issue = object((await request(path, "active")).data, "GitLab issue");
       const open = normalizeIssueState(issue);
       const labels = normalizeLabels(issue.labels);
@@ -359,16 +359,17 @@ function paginationFilters(url: URL): string {
 function normalizeProject(
   project: Record<string, unknown>,
   repository: string,
+  cloneRoot: URL,
 ): ProviderRepository {
   const name = string(project, "path_with_namespace");
   if (name !== repository) {
     throw new Error(`GitLab repository identity mismatch: expected ${repository}, received ${name}`);
   }
-  const webUrl = new URL(string(project, "web_url"));
   return {
     provider: "gitlab",
     name,
-    host: webUrl.host,
+    host: cloneRoot.host,
+    cloneRoot: cloneRoot.href,
     cloneUrl: string(project, "http_url_to_repo"),
   };
 }

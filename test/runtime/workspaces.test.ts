@@ -19,6 +19,7 @@ const REPOSITORY: ProviderRepository = {
   provider: "github",
   name: "owner/repo",
   host: "github.example.test",
+  cloneRoot: "https://github.example.test/",
   cloneUrl: "https://github.example.test/owner/repo.git",
 };
 
@@ -306,6 +307,7 @@ test("accepts a GitLab clone URL below a trusted instance path", async (t) => {
     provider: "gitlab",
     name: "group/project",
     host: "gitlab.example.test",
+    cloneRoot: "https://gitlab.example.test/gitlab/",
     cloneUrl: "https://gitlab.example.test/gitlab/group/project.git",
   };
 
@@ -348,6 +350,28 @@ test("rejects a prefixed GitHub clone path", async (t) => {
   assert.deepEqual(cloneCommands, []);
 });
 
+test("rejects a GitLab clone path outside the configured clone root", async (t) => {
+  const { root, data, run, cloneCommands } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository: ProviderRepository = {
+    provider: "gitlab",
+    name: "group/project",
+    host: "gitlab.example.test",
+    cloneRoot: "https://gitlab.example.test/gitlab/",
+    cloneUrl: "https://gitlab.example.test/attacker/group/project.git",
+  };
+
+  await assert.rejects(
+    new WorkspaceManager(data, run).prepareWorkspace(
+      repository,
+      { provider: "gitlab", repository: repository.name, number: 9 },
+      FLOW_1,
+    ),
+    /repository identity mismatch/,
+  );
+  assert.deepEqual(cloneCommands, []);
+});
+
 test("rejects noncanonical flow UUIDs", async (t) => {
   const { root, data, run } = await fixture();
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -366,6 +390,7 @@ test("uses glab for a GitLab repository", async (t) => {
     provider: "gitlab",
     name: "group/project",
     host: "gitlab.example.test",
+    cloneRoot: "https://gitlab.example.test/",
     cloneUrl: "https://gitlab.example.test/group/project.git",
   };
   const manager = new WorkspaceManager(data, run);
