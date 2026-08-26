@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { createGitHubAdapter } from "../../src/provider/github.ts";
+import { ProviderHttpError } from "../../src/provider/http.ts";
 import type {
   ProviderRequest,
   ProviderResponse,
@@ -19,6 +20,7 @@ const fixture = JSON.parse(
 interface Reply {
   data: unknown;
   next?: string | null;
+  error?: Error;
 }
 
 class FixtureClient implements RateLimitedHttpClient {
@@ -39,6 +41,7 @@ class FixtureClient implements RateLimitedHttpClient {
     const replies = this.#routes.get(key);
     const reply = replies?.shift();
     if (!reply) throw new Error(`unexpected GitHub fixture request: ${key}`);
+    if (reply.error) throw reply.error;
     return {
       status: 200,
       data: reply.data as T,
@@ -249,6 +252,44 @@ test("updates controller labels without replacing concurrently added repository 
   await assert.rejects(
     github.setControllerLabels(ref, ["bug"], []),
     /not controller-owned/,
+  );
+});
+
+test("continues a label transition when the old label is already absent", async () => {
+  const missing = new ProviderHttpError("label not found", 404, false, {
+    message: "Label does not exist",
+  }, {});
+  const client = new FixtureClient()
+    .add("DELETE", "repos/owner/repo/issues/17/labels/agent-stage%3Areview", {
+      data: null,
+      error: missing,
+    })
+    .add("POST", "repos/owner/repo/issues/17/labels", {
+      data: [{ name: "agent-stage:done" }],
+    })
+    .add("GET", "repos/owner/repo/issues/17", {
+      data: {
+        ...(fixture.issue as Record<string, unknown>),
+        labels: [{ name: "bug" }, { name: "agent-stage:done" }],
+      },
+    });
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  assert.deepEqual(
+    await adapter(client).setControllerLabels(ref, ["agent-stage:review"], ["agent-stage:done"]),
+    ["bug", "agent-stage:done"],
+  );
+  assert.deepEqual(client.calls.map(({ method }) => method ?? "GET"), ["DELETE", "POST", "GET"]);
+
+  const serverFailure = new ProviderHttpError("provider unavailable", 503, true, null, {});
+  const failingClient = new FixtureClient().add(
+    "DELETE",
+    "repos/owner/repo/issues/17/labels/agent-stage%3Areview",
+    { data: null, error: serverFailure },
+  );
+  await assert.rejects(
+    adapter(failingClient).setControllerLabels(ref, ["agent-stage:review"], ["agent-stage:done"]),
+    (error) => error === serverFailure,
   );
 });
 

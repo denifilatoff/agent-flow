@@ -1,4 +1,5 @@
 import type { ProviderConfig } from "../config/types.js";
+import { ProviderHttpError } from "./http.ts";
 import type {
   Actor,
   DiscoveryPage,
@@ -264,7 +265,11 @@ export function createGitHubAdapter(
       }
       const path = ticketPath(ref);
       for (const label of new Set(remove)) {
-        await request(`${path}/labels/${encodeURIComponent(label)}`, "active", { method: "DELETE" });
+        try {
+          await request(`${path}/labels/${encodeURIComponent(label)}`, "active", { method: "DELETE" });
+        } catch (error) {
+          if (!(error instanceof ProviderHttpError) || error.status !== 404) throw error;
+        }
       }
       const labels = [...new Set(add)];
       if (labels.length > 0) {
