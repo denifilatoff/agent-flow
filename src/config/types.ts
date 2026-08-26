@@ -39,7 +39,7 @@ export interface RetryConfig {
 export interface ControllerConfig {
   apiVersion: "agent-flow/v1alpha1";
   kind: "ControllerConfig";
-  configuration: { repository: string; flow: string; catalog: "config/agents.yaml" };
+  configuration: { repository: string; flow: string; catalog: string };
   providers: Partial<Record<"github" | "gitlab", ProviderConfig>>;
   polling: { intervalSeconds: number; maxCallsPerMinute: number; quotaReservePercent: number };
   runtime: { concurrency: number; dataDirectory: string; healthPort: number };

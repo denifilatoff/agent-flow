@@ -1,0 +1,31 @@
+apiVersion: agent-flow/v1alpha1
+kind: AgentCatalog
+agents:
+  architect:
+    package: agent-packages/architect
+    target: codex
+    retry:
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 2700
+  planner:
+    package: agent-packages/planner
+    target: codex
+    retry:
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 2700
+  developer:
+    package: agent-packages/developer
+    target: codex
+    retry:
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 7200
+  reviewer:
+    package: agent-packages/reviewer
+    target: codex
+    retry:
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 2700

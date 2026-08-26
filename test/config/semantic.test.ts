@@ -38,6 +38,16 @@ test("accepts the shipped bundle", async () => {
   await assert.doesNotReject(validateSemantics(bundle));
 });
 
+test("accepts the all-Codex catalog without changing the mixed default", async () => {
+  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
+  assert.deepEqual(Object.values(bundle.catalog.agents).map((agent) => agent.target), [
+    "claude", "claude", "codex", "codex",
+  ]);
+  bundle.catalog = validateDocument("AgentCatalog", await parseYaml("config/agents-codex.yaml"));
+  assert.deepEqual(new Set(Object.values(bundle.catalog.agents).map((agent) => agent.target)), new Set(["codex"]));
+  await assert.doesNotReject(validateSemantics(bundle));
+});
+
 test("uses and requires schemas from the pinned root", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-flow-pinned-schema-"));
   try {

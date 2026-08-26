@@ -4,10 +4,10 @@ import test from "node:test";
 import { parse } from "yaml";
 
 const PACKAGE_TARGETS = {
-  architect: "claude",
-  planner: "claude",
-  developer: "codex",
-  reviewer: "codex",
+  architect: ["claude", "codex"],
+  planner: ["claude", "codex"],
+  developer: ["codex"],
+  reviewer: ["codex"],
 } as const;
 
 function parsePrimitive(source: string): { frontmatter: Record<string, unknown>; body: string } {
@@ -22,7 +22,7 @@ async function assertAgentPackage(packageName: keyof typeof PACKAGE_TARGETS, art
 
   assert.equal(manifest.name, packageName);
   assert.equal(manifest.version, "1.0.0");
-  assert.deepEqual(manifest.targets, [PACKAGE_TARGETS[packageName]]);
+  assert.deepEqual(manifest.targets, PACKAGE_TARGETS[packageName]);
   await readFile(new URL("apm.lock.yaml", packageRoot), "utf8");
 
   const agentFiles = (await readdir(new URL(".apm/agents/", packageRoot))).filter((file) => file.endsWith(".agent.md"));

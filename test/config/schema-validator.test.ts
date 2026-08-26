@@ -13,7 +13,23 @@ test("rejects unknown fields and unsupported versions", async () => {
 test("accepts every shipped YAML document", async () => {
   validateDocument("Flow", await parseYaml("config/flows/development.yaml"));
   validateDocument("AgentCatalog", await parseYaml("config/agents.yaml"));
+  validateDocument("AgentCatalog", await parseYaml("config/agents-codex.yaml"));
   validateDocument("ControllerConfig", await parseYaml("config/controller.example.yaml"));
+});
+
+test("accepts a target-specific catalog and rejects unsafe catalog paths", async () => {
+  const value = await parseYaml("config/controller.example.yaml") as Record<string, unknown>;
+  const configuration = value.configuration as Record<string, unknown>;
+  validateDocument("ControllerConfig", {
+    ...value,
+    configuration: { ...configuration, catalog: "config/agents-codex.yaml" },
+  });
+  for (const catalog of ["../agents.yaml", "config/../agents.yaml", "/config/agents.yaml", "agents.yaml"]) {
+    assert.throws(() => validateDocument("ControllerConfig", {
+      ...value,
+      configuration: { ...configuration, catalog },
+    }));
+  }
 });
 
 test("accepts credential-free Git configuration URLs", async () => {

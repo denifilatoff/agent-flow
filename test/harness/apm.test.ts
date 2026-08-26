@@ -229,7 +229,7 @@ test("rejects package symlinks and overlapping output", async (t) => {
   );
 });
 
-test("compiles one real pinned package with the local APM CLI", async (t) => {
+test("compiles the architect and planner packages for Claude and Codex", async (t) => {
   try {
     await execFile("apm", ["--version"]);
   } catch (error) {
@@ -241,16 +241,18 @@ test("compiles one real pinned package with the local APM CLI", async (t) => {
   }
   const root = await mkdtemp(join(tmpdir(), "agent-flow-apm-real-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const outputDirectory = join(root, "output");
-  await mkdir(outputDirectory);
-
-  const result = await compileAgentContext(
-    "architect",
-    join(process.cwd(), "agent-packages/architect"),
-    "claude",
-    outputDirectory,
-  );
-
-  assert.match(result.instructions, /Assess only the ticket/);
-  assert.match(result.instructions, /only entry agent/);
+  for (const [agentId, expected] of [["architect", /Assess only the ticket/], ["planner", /complete plan/]] as const) {
+    for (const target of ["claude", "codex"] as const) {
+      const outputDirectory = join(root, `${agentId}-${target}`);
+      await mkdir(outputDirectory);
+      const result = await compileAgentContext(
+        agentId,
+        join(process.cwd(), `agent-packages/${agentId}`),
+        target,
+        outputDirectory,
+      );
+      assert.match(result.instructions, expected);
+      assert.match(result.instructions, /only entry agent/);
+    }
+  }
 });

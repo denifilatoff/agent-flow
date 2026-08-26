@@ -43,6 +43,9 @@ fields and unsupported versions before reconciliation starts.
 The initial schemas use `v1alpha1` because the prototype may change them incompatibly. A running flow still pins the
 configuration repository commit SHA, so a schema change cannot alter an existing instance without explicit migration.
 
+`config/agents.yaml` is the mixed Claude/Codex catalog. For a local acceptance run that uses the authenticated Codex
+harness for every stage, set `configuration.catalog` to `config/agents-codex.yaml`.
+
 ## Fixed flow vocabulary
 
 Flow YAML may use only these controller events:
@@ -102,7 +105,7 @@ JSON Schema validates file shape. Before polling, the controller also verifies t
 
 - the initial state and every transition target exist;
 - every `resumeTarget` exists and is used only for a transition into `needs-human` or `blocked`;
-- every agent reference exists in the catalog and its package contains one `apm.yml`;
+- every agent reference exists in the catalog and its package contains one `apm.yml` that supports the selected target;
 - every final state has no transitions and every non-final state has at least one transition;
 - every referenced action and guard is implemented by the controller;
 - configured repositories are unique across provider entries; and

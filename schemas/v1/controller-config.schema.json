@@ -15,7 +15,7 @@
       "properties": {
         "repository": { "$ref": "#/$defs/configurationRepository" },
         "flow": { "type": "string", "pattern": "^config/flows/[a-z][a-z0-9-]*\\.ya?ml$" },
-        "catalog": { "type": "string", "const": "config/agents.yaml" }
+        "catalog": { "type": "string", "pattern": "^config/agents(?:-[a-z][a-z0-9-]*)?\\.ya?ml$" }
       }
     },
     "providers": {

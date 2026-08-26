@@ -96,7 +96,7 @@ async function validatePackage(
   } else {
     try {
       const manifest = await parseYaml(resolve(packageRoot, "apm.yml")) as Record<string, unknown>;
-      if (!Array.isArray(manifest.targets) || manifest.targets.length !== 1 || manifest.targets[0] !== agent.target) {
+      if (!Array.isArray(manifest.targets) || !manifest.targets.includes(agent.target)) {
         errors.push({
           path: `catalog.agents.${agentId}.target`,
           message: `target ${agent.target} does not match the package manifest`,
