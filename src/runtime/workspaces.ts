@@ -59,6 +59,7 @@ export class WorkspaceManager {
   readonly #configuredDataDirectory: string;
   readonly #run: CommandRunner;
   readonly #baseClonePreparations = new Map<string, Promise<void>>();
+  readonly #flowPreparations = new Map<string, Promise<void>>();
 
   constructor(dataDirectory: string, run: CommandRunner = runCommand) {
     this.#configuredDataDirectory = resolve(dataDirectory);
@@ -73,6 +74,18 @@ export class WorkspaceManager {
     assertCanonicalUuid(flowInstanceId, "flow instance ID");
     const identity = repositoryIdentity(repository);
     assertTicket(identity, ticket);
+    return this.#withFlowLock(
+      flowInstanceId,
+      () => this.#prepareWorkspace(repository, ticket, flowInstanceId, identity),
+    );
+  }
+
+  async #prepareWorkspace(
+    repository: ProviderRepository,
+    ticket: TicketRef,
+    flowInstanceId: string,
+    identity: RepositoryIdentity,
+  ): Promise<Workspace> {
     const dataRoot = await prepareDataRoot(this.#configuredDataDirectory);
     const repositoriesRoot = await ensureSafeDirectory(
       dataRoot,
@@ -105,39 +118,57 @@ export class WorkspaceManager {
 
     const worktreeExists = await pathExists(worktree);
     const bindingExists = await pathExists(bindingPath);
-    if (!worktreeExists && bindingExists) {
-      throw new Error(`workspace binding mismatch for flow ${flowInstanceId}`);
-    }
     if (worktreeExists) {
       await assertSafeDirectory(dataRoot, worktree, "worktree");
-      if (bindingExists) {
-        assertBinding(await readBinding(dataRoot, bindingPath), expectedBinding);
-      } else {
-        await this.#prepareBaseClone(dataRoot, baseClone, repository, identity);
-        await this.#assertOrigin(worktree, identity);
-        await this.#assertWorktreeBase(dataRoot, worktree, baseClone);
-        await writeBinding(dataRoot, bindingPath, expectedBinding);
-      }
+      if (!bindingExists) throw new Error(`workspace binding mismatch for flow ${flowInstanceId}`);
+      assertBinding(await readBinding(dataRoot, bindingPath), expectedBinding);
       await this.#assertOrigin(worktree, identity);
       return workspace;
     }
 
     await this.#prepareBaseClone(dataRoot, baseClone, repository, identity);
-    let created = false;
+    let bindingCreated = false;
+    if (bindingExists) {
+      assertBinding(await readBinding(dataRoot, bindingPath), expectedBinding);
+    }
+    let worktreeCreated = false;
     try {
+      if (!bindingExists) {
+        await writeBinding(dataRoot, bindingPath, expectedBinding);
+        bindingCreated = true;
+      }
       await this.#run("git", ["worktree", "add", "--detach", worktree, "HEAD"], { cwd: baseClone });
-      created = true;
+      worktreeCreated = true;
       await assertSafeDirectory(dataRoot, worktree, "worktree");
       await this.#assertOrigin(worktree, identity);
       await this.#assertWorktreeBase(dataRoot, worktree, baseClone);
-      await writeBinding(dataRoot, bindingPath, expectedBinding);
       return workspace;
     } catch (error) {
-      if (created) {
-        await this.#removeCreatedWorktree(dataRoot, worktree, baseClone).catch(() => undefined);
+      let worktreeRemoved = !worktreeCreated;
+      if (worktreeCreated) {
+        worktreeRemoved = await this.#removeCreatedWorktree(dataRoot, worktree, baseClone)
+          .then(() => true, () => false);
       }
-      await removeSafeFile(dataRoot, bindingPath, "workspace binding").catch(() => undefined);
+      if (bindingCreated && worktreeRemoved) {
+        await removeSafeFile(dataRoot, bindingPath, "workspace binding").catch(() => undefined);
+      }
       throw error;
+    }
+  }
+
+  async #withFlowLock<T>(flowInstanceId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.#flowPreparations.get(flowInstanceId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.#flowPreparations.set(flowInstanceId, current);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.#flowPreparations.get(flowInstanceId) === current) {
+        this.#flowPreparations.delete(flowInstanceId);
+      }
     }
   }
 
@@ -243,7 +274,10 @@ function repositoryIdentity(repository: ProviderRepository): RepositoryIdentity 
   const host = normalizeHost(repository.host);
   const name = normalizePath(repository.name);
   const clone = parseRemoteIdentity(repository.cloneUrl);
-  if (clone.host !== host || !pathEndsWithRepository(clone.path, name, repository.provider)) {
+  const pathMatches = repository.provider === "github"
+    ? samePath(clone.path, name, repository.provider)
+    : pathEndsWithRepository(clone.path, name);
+  if (clone.host !== host || !pathMatches) {
     throw new Error(
       `repository identity mismatch: expected ${host}/.../${name}, received ${clone.host}/${clone.path}`,
     );
@@ -300,11 +334,8 @@ function normalizePath(path: string): string {
 function pathEndsWithRepository(
   path: string,
   repository: string,
-  provider: ProviderRepository["provider"],
 ): boolean {
-  const left = provider === "github" ? path.toLowerCase() : path;
-  const right = provider === "github" ? repository.toLowerCase() : repository;
-  return left === right || left.endsWith(`/${right}`);
+  return path === repository || path.endsWith(`/${repository}`);
 }
 
 function repositoryKey(identity: RepositoryIdentity): string {
@@ -343,8 +374,15 @@ async function readBinding(dataRoot: string, path: string): Promise<WorkspaceBin
 
 async function writeBinding(dataRoot: string, path: string, binding: WorkspaceBinding): Promise<void> {
   await assertSafeWritableFile(dataRoot, path, "workspace binding path");
-  await writeFile(path, `${JSON.stringify(binding)}\n`, { flag: "wx", mode: 0o600 });
-  await assertSafeFile(dataRoot, path, "workspace binding");
+  let written = false;
+  try {
+    await writeFile(path, `${JSON.stringify(binding)}\n`, { flag: "wx", mode: 0o600 });
+    written = true;
+    await assertSafeFile(dataRoot, path, "workspace binding");
+  } catch (error) {
+    if (written) await removeSafeFile(dataRoot, path, "workspace binding").catch(() => undefined);
+    throw error;
+  }
 }
 
 function assertBinding(actual: WorkspaceBinding, expected: WorkspaceBinding): void {

@@ -96,6 +96,52 @@ test("concurrent tickets create one base clone", async (t) => {
   assert.equal(cloneCommands.length, 1);
 });
 
+test("concurrent prepares for one flow share the bound worktree", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = new WorkspaceManager(data, run);
+
+  const [first, second] = await Promise.all([
+    manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1),
+    manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1),
+  ]);
+
+  assert.equal(second.worktree, first.worktree);
+  assert.equal(JSON.parse(await readFile(`${first.worktree}.json`, "utf8")).ticketNumber, 7);
+});
+
+test("a concurrent different-ticket loser preserves the winner binding", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = new WorkspaceManager(data, run);
+
+  const [winner, loser] = await Promise.allSettled([
+    manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1),
+    manager.prepareWorkspace(REPOSITORY, ticket(8), FLOW_1),
+  ]);
+
+  assert.equal(winner.status, "fulfilled");
+  assert.equal(loser.status, "rejected");
+  const workspace = await manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1);
+  assert.equal(JSON.parse(await readFile(`${workspace.worktree}.json`, "utf8")).ticketNumber, 7);
+});
+
+test("reserves exact ticket identity before adding the worktree", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const checkingRun: CommandRunner = async (file, args, options = {}) => {
+    if (file === "git" && args.slice(0, 3).join(" ") === "worktree add --detach") {
+      const binding = JSON.parse(await readFile(`${args[3]}.json`, "utf8"));
+      assert.equal(binding.ticketNumber, 7);
+      assert.equal(binding.name, REPOSITORY.name);
+      assert.equal(binding.flowInstanceId, FLOW_1);
+    }
+    return run(file, args, options);
+  };
+
+  await new WorkspaceManager(data, checkingRun).prepareWorkspace(REPOSITORY, ticket(7), FLOW_1);
+});
+
 test("sequential attempts for one flow reuse its bound worktree", async (t) => {
   const { root, data, run } = await fixture();
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -161,7 +207,20 @@ test("recovers after post-create validation fails", async (t) => {
   assert.equal(await git(workspace.worktree, "remote", "get-url", "origin"), REPOSITORY.cloneUrl);
 });
 
-test("repairs an exact orphaned worktree after a crash", async (t) => {
+test("resumes an exact binding reservation after a crash", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = new WorkspaceManager(data, run);
+  const first = await manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1);
+  await git(first.baseClone, "worktree", "remove", "--force", first.worktree);
+
+  const recovered = await new WorkspaceManager(data, run).prepareWorkspace(REPOSITORY, ticket(7), FLOW_1);
+
+  assert.equal(recovered.worktree, first.worktree);
+  assert.equal(JSON.parse(await readFile(`${recovered.worktree}.json`, "utf8")).ticketNumber, 7);
+});
+
+test("rejects a missing-binding orphan for another ticket", async (t) => {
   const { root, data, run } = await fixture();
   t.after(() => rm(root, { recursive: true, force: true }));
   const manager = new WorkspaceManager(data, run);
@@ -169,10 +228,12 @@ test("repairs an exact orphaned worktree after a crash", async (t) => {
   const bindingPath = `${first.worktree}.json`;
   await rm(bindingPath);
 
-  const recovered = await manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1);
-
-  assert.equal(recovered.worktree, first.worktree);
-  assert.equal(JSON.parse(await readFile(bindingPath, "utf8")).ticketNumber, 7);
+  await assert.rejects(
+    manager.prepareWorkspace(REPOSITORY, ticket(8), FLOW_1),
+    /workspace binding mismatch/,
+  );
+  await assert.rejects(readFile(bindingPath), { code: "ENOENT" });
+  assert.equal(await readFile(join(first.worktree, ".git"), "utf8").then(() => true), true);
 });
 
 test("rejects a symlinked worktree root without writing through it", async (t) => {
@@ -255,6 +316,36 @@ test("accepts a GitLab clone URL below a trusted instance path", async (t) => {
   );
 
   assert.equal(await git(workspace.worktree, "remote", "get-url", "origin"), repository.cloneUrl);
+  await git(
+    workspace.worktree,
+    "remote",
+    "set-url",
+    "origin",
+    "https://gitlab.example.test/other/group/project.git",
+  );
+  await assert.rejects(
+    new WorkspaceManager(data, run).prepareWorkspace(
+      repository,
+      { provider: "gitlab", repository: repository.name, number: 9 },
+      FLOW_1,
+    ),
+    /repository identity mismatch/,
+  );
+});
+
+test("rejects a prefixed GitHub clone path", async (t) => {
+  const { root, data, run, cloneCommands } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository: ProviderRepository = {
+    ...REPOSITORY,
+    cloneUrl: "https://github.example.test/attacker/owner/repo.git",
+  };
+
+  await assert.rejects(
+    new WorkspaceManager(data, run).prepareWorkspace(repository, ticket(7), FLOW_1),
+    /repository identity mismatch/,
+  );
+  assert.deepEqual(cloneCommands, []);
 });
 
 test("rejects noncanonical flow UUIDs", async (t) => {
