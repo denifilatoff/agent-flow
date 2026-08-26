@@ -91,6 +91,37 @@ test("remembers the source state and resolves the needs-human resume target", as
   });
 });
 
+test("prefers an explicit resume target over the paused source state", async () => {
+  const machine = compileFlow(await loadDevelopmentFlow());
+  const paused = machine.transition({
+    stateId: "awaiting-merge",
+    resumeStateId: null,
+    event: event("change-request-closed"),
+  });
+
+  assert.deepEqual(paused, {
+    changed: true,
+    stateId: "needs-human",
+    resumeStateId: "review",
+    actions: ["remember-resume-state"],
+  });
+  assert.deepEqual(machine.transition({
+    stateId: paused.stateId,
+    resumeStateId: paused.resumeStateId,
+    event: event("human-answer-accepted", {
+      authorizedActor: true,
+      activationPresent: true,
+      ticketOpen: true,
+      receiptValid: true,
+    }),
+  }), {
+    changed: true,
+    stateId: "review",
+    resumeStateId: null,
+    actions: ["record-receipt", "clear-resume-state"],
+  });
+});
+
 test("resumes a blocked stage and returns the retry reset action", async () => {
   const machine = compileFlow(await loadDevelopmentFlow());
 
