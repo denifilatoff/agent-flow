@@ -31,6 +31,7 @@ import type { HarnessResult } from "./types.ts";
 const MAX_PROMPT_BYTES = 1_048_576;
 const MAX_ENVIRONMENT_VALUE_BYTES = 4_096;
 const POST_EXIT_DRAIN_MS = 1_000;
+const SIGNAL_FAILURE_SETTLE_MS = 1_000;
 const TERMINATION_GRACE_MS = 10_000;
 const INHERITED_ENVIRONMENT = [
   "PATH",
@@ -48,11 +49,13 @@ export interface SpawnedProcess {
   readonly stdin: Writable;
   readonly stdout: Readable;
   readonly stderr: Readable;
+  readonly pid?: number;
   exitCode: number | null;
   signalCode: NodeJS.Signals | null;
   kill(signal: NodeJS.Signals): boolean;
   once(event: "exit" | "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
   once(event: "error", listener: (error: Error) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
   removeListener(
     event: "exit" | "close",
     listener: (code: number | null, signal: NodeJS.Signals | null) => void,
@@ -172,6 +175,7 @@ export async function copyRegularFile(source: string, destination: string, label
   // file boundary without introducing a separate filesystem sandbox.
   const sourceHandle = await openRegularSource(source, label);
   let destinationHandle: FileHandle | undefined;
+  let destinationCreated = false;
   let copied = false;
   try {
     await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
@@ -180,6 +184,7 @@ export async function copyRegularFile(source: string, destination: string, label
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
       0o600,
     );
+    destinationCreated = true;
     await pipeline(
       sourceHandle.createReadStream(),
       destinationHandle.createWriteStream(),
@@ -188,7 +193,7 @@ export async function copyRegularFile(source: string, destination: string, label
   } finally {
     await sourceHandle.close().catch(() => undefined);
     if (destinationHandle) await destinationHandle.close().catch(() => undefined);
-    if (!copied) await unlink(destination).catch(() => undefined);
+    if (destinationCreated && !copied) await unlink(destination).catch(() => undefined);
   }
 }
 
@@ -305,6 +310,7 @@ export async function runHarnessProcess(
   }
 
   return new Promise<HarnessResult>((resolveResult, rejectResult) => {
+    const processStarted = child.pid !== undefined;
     let settled = false;
     let timedOut = false;
     let terminating = false;
@@ -312,31 +318,38 @@ export async function runHarnessProcess(
     let failure: HarnessProcessError | undefined;
     let graceTimer: TimerHandle | undefined;
     let drainTimer: TimerHandle | undefined;
+    let terminalTimer: TimerHandle | undefined;
     const timeoutTimer = dependencies.setTimeout(() => terminate(true), spec.timeoutSeconds * 1_000);
 
-    const cleanup = (): void => {
+    const stopLifecycle = (): void => {
       dependencies.clearTimeout(timeoutTimer);
       if (graceTimer) dependencies.clearTimeout(graceTimer);
       if (drainTimer) dependencies.clearTimeout(drainTimer);
+      if (terminalTimer) dependencies.clearTimeout(terminalTimer);
       spec.signal.removeEventListener("abort", abort);
       child.removeListener("exit", exit);
       child.removeListener("close", close);
-      child.removeListener("error", processError);
-      child.stdin.removeListener("error", streamError);
-      child.stdout.removeListener("error", streamError);
-      child.stderr.removeListener("error", streamError);
-      log.removeListener("error", streamError);
       child.stdout.unpipe(log);
       child.stderr.unpipe(log);
+    };
+
+    const guardLateErrors = (): void => {
+      child.removeListener("error", processError);
+      child.on("error", ignoreError);
+      for (const stream of [child.stdin, child.stdout, child.stderr, log]) {
+        stream.removeListener("error", streamError);
+        stream.on("error", ignoreError);
+      }
     };
 
     const complete = async (exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> => {
       if (settled) return;
       settled = true;
-      cleanup();
+      stopLifecycle();
       log.end();
       await logFinished;
       if (logFailed) failure = new HarnessProcessError(target, false);
+      guardLateErrors();
       if (failure) rejectResult(failure);
       else resolveResult({ exitCode, signal, timedOut });
     };
@@ -350,10 +363,29 @@ export async function runHarnessProcess(
       terminating = true;
       timedOut = forTimeout;
       dependencies.clearTimeout(timeoutTimer);
-      child.kill("SIGTERM");
-      graceTimer = dependencies.setTimeout(() => {
-        if (!settled && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      }, TERMINATION_GRACE_MS);
+      graceTimer = dependencies.setTimeout(escalate, TERMINATION_GRACE_MS);
+      signalChild("SIGTERM");
+    }
+
+    function escalate(): void {
+      if (settled) return;
+      if (exited || child.exitCode !== null || child.signalCode !== null) {
+        exit(child.exitCode, child.signalCode);
+        return;
+      }
+      terminalTimer = dependencies.setTimeout(() => {
+        failure ??= new HarnessProcessError(target, false);
+        void complete(child.exitCode, child.signalCode);
+      }, SIGNAL_FAILURE_SETTLE_MS);
+      signalChild("SIGKILL");
+    }
+
+    function signalChild(signal: NodeJS.Signals): void {
+      try {
+        if (!child.kill(signal)) failure ??= new HarnessProcessError(target, false);
+      } catch {
+        failure ??= new HarnessProcessError(target, false);
+      }
     }
 
     function abort(): void {
@@ -364,6 +396,7 @@ export async function runHarnessProcess(
       exited = true;
       dependencies.clearTimeout(timeoutTimer);
       if (graceTimer) dependencies.clearTimeout(graceTimer);
+      if (terminalTimer) dependencies.clearTimeout(terminalTimer);
       if (!drainTimer) {
         drainTimer = dependencies.setTimeout(() => { void complete(exitCode, signal); }, POST_EXIT_DRAIN_MS);
       }
@@ -374,8 +407,12 @@ export async function runHarnessProcess(
     }
 
     function processError(error: Error): void {
-      failure = new HarnessProcessError(target, !isMissingBinary(error));
-      void complete(null, null);
+      failure = new HarnessProcessError(target, processStarted ? false : !isMissingBinary(error));
+      if (!processStarted) {
+        void complete(null, null);
+      } else if (!terminating && !exited) {
+        terminate(false);
+      }
     }
 
     function streamError(): void {
@@ -385,7 +422,7 @@ export async function runHarnessProcess(
 
     child.once("exit", exit);
     child.once("close", close);
-    child.once("error", processError);
+    child.on("error", processError);
     child.stdin.on("error", streamError);
     child.stdout.on("error", streamError);
     child.stderr.on("error", streamError);
@@ -451,6 +488,8 @@ function safeEnvironmentValue(value: string): boolean {
 function cancelledResult(): HarnessResult {
   return { exitCode: null, signal: "SIGTERM", timedOut: false };
 }
+
+function ignoreError(): void {}
 
 function isMissingBinary(error: unknown): boolean {
   return isNodeError(error) && error.code === "ENOENT";

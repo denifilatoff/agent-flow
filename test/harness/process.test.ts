@@ -23,6 +23,7 @@ import { createCodexAdapter } from "../../src/harness/codex.ts";
 import {
   HarnessPreflightError,
   HarnessProcessError,
+  copyRegularFile,
   runHarnessProcess,
   type CommandRunner,
   type ProcessDependencies,
@@ -52,6 +53,8 @@ class FakeChild extends EventEmitter implements SpawnedProcess {
     },
   });
   readonly kills: NodeJS.Signals[] = [];
+  readonly killBehavior = new Map<NodeJS.Signals, "false" | "throw" | "error">();
+  pid: number | undefined = 42;
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   exitOnTerm = true;
@@ -59,6 +62,13 @@ class FakeChild extends EventEmitter implements SpawnedProcess {
 
   kill(signal: NodeJS.Signals): boolean {
     this.kills.push(signal);
+    const behavior = this.killBehavior.get(signal);
+    if (behavior === "false") return false;
+    if (behavior === "throw") throw new Error(`kill ${signal} threw`);
+    if (behavior === "error") {
+      this.emit("error", new Error(`kill ${signal} emitted an error`));
+      return false;
+    }
     if (signal === "SIGKILL" || this.exitOnTerm) {
       queueMicrotask(() => this.finish(null, signal));
     }
@@ -241,6 +251,24 @@ test("runs Codex in the worktree with private attempt paths", async (t) => {
   assert.equal(await readFile(join(call.env.CODEX_HOME!, "config.toml"), "utf8"), "{}\n");
 });
 
+test("keeps late stdio errors guarded after a normal close", async (t) => {
+  const fixture = await runFixture("codex");
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const processes = processFixture();
+  const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+
+  const pending = adapter.run(fixture.input);
+  await waitForSpawn(processes.calls);
+  const child = processes.children[0]!;
+  child.finish(0, null);
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
+
+  for (const stream of [child.stdin, child.stdout, child.stderr]) {
+    assert.doesNotThrow(() => stream.emit("error", new Error("late stdio error")));
+    assert.ok(stream.listenerCount("error") > 0);
+  }
+});
+
 test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
   const fixture = await runFixture("claude");
   t.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -312,6 +340,38 @@ test("kills a timed-out process after one ten-second grace period", async (t) =>
   assert.deepEqual(await pending, { exitCode: null, signal: "SIGKILL", timedOut: true });
   assert.deepEqual(child.kills, ["SIGTERM", "SIGKILL"]);
   assert.equal(processes.clock.timers.size, 0);
+});
+
+test("bounds TERM and KILL signaling failures without leaking timers", async (t) => {
+  for (const { name, signal, behavior } of [
+    { name: "TERM false", signal: "SIGTERM", behavior: "false" },
+    { name: "TERM throw", signal: "SIGTERM", behavior: "throw" },
+    { name: "TERM synchronous error", signal: "SIGTERM", behavior: "error" },
+    { name: "KILL false", signal: "SIGKILL", behavior: "false" },
+    { name: "KILL throw", signal: "SIGKILL", behavior: "throw" },
+    { name: "KILL synchronous error", signal: "SIGKILL", behavior: "error" },
+  ] as const) {
+    const fixture = await runFixture("codex");
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    fixture.input.timeoutSeconds = 3;
+    const processes = processFixture();
+    const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+    const pending = adapter.run(fixture.input);
+    await waitForSpawn(processes.calls);
+    const child = processes.children[0]!;
+    child.exitOnTerm = false;
+    child.killBehavior.set(signal, behavior);
+
+    processes.clock.fire(3_000);
+    assert.equal([...processes.clock.timers.values()].filter((timer) => timer.delay === 10_000).length, 1, name);
+    processes.clock.fire(10_000);
+    if (signal === "SIGKILL") processes.clock.fire(1_000);
+
+    await assert.rejects(pending, HarnessProcessError, name);
+    assert.equal(processes.clock.timers.size, 0, name);
+    child.emit("close", null, "SIGKILL");
+    assert.doesNotThrow(() => child.emit("error", new Error("late process error")), name);
+  }
 });
 
 test("settles after direct-child exit when a descendant retains output descriptors", async (t) => {
@@ -575,4 +635,17 @@ test("rejects symlinked authentication sources and runtime layout as non-retryab
     return true;
   });
   assert.equal(processes.calls.length, 0);
+});
+
+test("preserves an existing destination when exclusive auth copy collides", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "agent-flow-copy-collision-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, "source");
+  const destination = join(root, "destination");
+  await writeFile(source, "new credential\n");
+  await writeFile(destination, "existing credential\n");
+
+  await assert.rejects(copyRegularFile(source, destination, "authentication file"), { code: "EEXIST" });
+
+  assert.equal(await readFile(destination, "utf8"), "existing credential\n");
 });
