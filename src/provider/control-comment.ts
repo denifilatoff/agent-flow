@@ -76,6 +76,10 @@ export function advanceControlState(
   patch: ControlStatePatch,
   now: string,
 ): ControlState {
+  const nextSequence = current.sequence + 1;
+  if (!Number.isSafeInteger(current.sequence) || !Number.isSafeInteger(nextSequence)) {
+    throw new Error("control state sequence must increment to a safe integer");
+  }
   for (const field of Object.keys(patch)) {
     if (!PATCH_FIELDS.has(field as keyof ControlStatePatch)) {
       throw new Error(`unsupported control state patch field: ${field}`);
@@ -84,7 +88,7 @@ export function advanceControlState(
   return validateDocument<ControlState>("ControlState", {
     ...current,
     ...patch,
-    sequence: current.sequence + 1,
+    sequence: nextSequence,
     updatedAt: now,
   });
 }

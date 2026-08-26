@@ -133,3 +133,18 @@ test("advances only the declared patch surface and preserves identity", () => {
     /unsupported control state patch field/,
   );
 });
+
+test("rejects sequences that cannot be incremented safely", () => {
+  assert.throws(
+    () => advanceControlState(controlState({ sequence: Number.MAX_SAFE_INTEGER }), {}, NOW),
+    /safe integer/,
+  );
+
+  const unsafeBody = renderControlComment(controlState()).replace(
+    '"sequence": 0',
+    '"sequence": 9007199254740992',
+  );
+  const unsafe = parseControlComment(unsafeBody)!;
+  assert.equal(Number.isSafeInteger(unsafe.sequence), false);
+  assert.throws(() => advanceControlState(unsafe, {}, NOW), /safe integer/);
+});
