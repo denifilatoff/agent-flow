@@ -16,6 +16,7 @@ import type {
   ProviderTicketSnapshot,
   TicketRef,
 } from "../provider/types.js";
+import { ProviderHttpError } from "../provider/http.ts";
 
 const MAX_RECEIPT_BYTES = 1024 * 1024;
 const MAX_ERROR_MESSAGE = 240;
@@ -36,6 +37,16 @@ export class InvalidReceiptError extends Error {
   constructor(message: string) {
     super(message.slice(0, MAX_ERROR_MESSAGE));
     this.name = "InvalidReceiptError";
+  }
+}
+
+export class ReceiptReadbackError extends Error {
+  readonly code = "RECEIPT_READBACK_FAILED";
+  readonly retryable = true;
+
+  constructor() {
+    super("provider receipt readback failed transiently");
+    this.name = "ReceiptReadbackError";
   }
 }
 
@@ -368,7 +379,8 @@ async function providerRead<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
   } catch (error) {
-    if (error instanceof InvalidReceiptError) throw error;
+    if (error instanceof InvalidReceiptError || error instanceof ReceiptReadbackError) throw error;
+    if (error instanceof ProviderHttpError && error.transient) throw new ReceiptReadbackError();
     invalid("provider publication could not be verified");
   }
 }

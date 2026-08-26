@@ -18,8 +18,10 @@ import type {
   ProviderTicketSnapshot,
   TicketRef,
 } from "../../src/provider/types.ts";
+import { ProviderHttpError } from "../../src/provider/http.ts";
 import {
   InvalidReceiptError,
+  ReceiptReadbackError,
   readAndVerifyReceipt,
   type ReceiptExpectation,
 } from "../../src/runtime/receipts.ts";
@@ -573,6 +575,37 @@ test("sanitizes provider exceptions", async () => {
     assert.ok(error instanceof InvalidReceiptError);
     assert.doesNotMatch(error.message, /top-secret|raw provider body|token=/);
     assert.equal(error.cause, undefined);
+    return true;
+  });
+});
+
+test("preserves only the retryable classification for transient provider readback", async () => {
+  const provider = new FakeProvider();
+  provider.failure = new ProviderHttpError(
+    "token=top-secret",
+    503,
+    true,
+    { token: "top-secret" },
+    { authorization: "top-secret" },
+  );
+
+  await assert.rejects(verify(receipt([commentArtifact()]), "assessment", provider), (error: unknown) => {
+    assert.ok(error instanceof ReceiptReadbackError);
+    assert.equal(error.retryable, true);
+    assert.doesNotMatch(error.message, /top-secret|token=/);
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+});
+
+test("keeps a nontransient missing publication non-retryable", async () => {
+  const provider = new FakeProvider();
+  provider.failure = new ProviderHttpError("missing token=top-secret", 404, false, null, {});
+
+  await assert.rejects(verify(receipt([commentArtifact()]), "assessment", provider), (error: unknown) => {
+    assert.ok(error instanceof InvalidReceiptError);
+    assert.equal(error.retryable, false);
+    assert.doesNotMatch(error.message, /top-secret|token=/);
     return true;
   });
 });

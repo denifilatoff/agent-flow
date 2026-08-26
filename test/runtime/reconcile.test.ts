@@ -25,6 +25,10 @@ import type {
   TicketRef,
 } from "../../src/provider/types.ts";
 import {
+  createAttemptRunner,
+  type AttemptRunnerDependencies,
+} from "../../src/runtime/attempt-runner.ts";
+import {
   reconcileTicket,
   type AttemptLauncher,
   type AttemptRequest,
@@ -355,6 +359,44 @@ function dependencies(provider = new FakeProvider(), launcher = new FakeLauncher
   };
 }
 
+async function assertRunnerAccepts(request: AttemptRequest, provider: ProviderAdapter): Promise<void> {
+  let current = request.control;
+  const runner = createAttemptRunner({
+    dataDirectory: "/data",
+    provider,
+    workspaceManager: { async prepareWorkspace() { return {
+      baseClone: "/data/repository", worktree: "/data/worktree", repository: request.ref.repository,
+      ticketNumber: request.ref.number, flowInstanceId: request.control.flowInstanceId,
+    }; } },
+    harnesses: { [request.bundle.catalog.agents[request.agentId]!.target]: {
+      target: request.bundle.catalog.agents[request.agentId]!.target,
+      async preflight() {},
+      async run(input) {
+        return new Promise((resolve) => input.signal.addEventListener("abort", () => resolve({
+          exitCode: null, signal: "SIGTERM", timedOut: false,
+        }), { once: true }));
+      },
+    } },
+    async writeControl(_ref, expected, next) {
+      assert.equal(expected.sequence, current.sequence);
+      current = structuredClone(next);
+      return structuredClone(current);
+    },
+    async createSession(_data, _flow, attemptId) { return {
+      root: `/data/${attemptId}`, contextPath: `/data/${attemptId}/context.json`,
+      receiptPath: `/data/${attemptId}/receipt.json`, logPath: `/data/${attemptId}/harness.log`,
+      harnessSessionDirectory: `/data/${attemptId}/harness-session`,
+    }; },
+    async compileAgent(agentId, _package, target) {
+      return { agentId, target, instructions: "test", runtimeDirectory: "/runtime" };
+    },
+    now: () => NOW,
+  } satisfies AttemptRunnerDependencies);
+  await runner.start(request);
+  assert.equal(runner.isRunning(request.control.flowInstanceId), true);
+  await runner.cancel(request.control.flowInstanceId);
+}
+
 function installControl(provider: FakeProvider, state: ControlState): void {
   provider.snapshot.comments.push(controlComment(state));
   provider.snapshot.labels.push(`agent-stage:${state.stateId}`, "agent-flow:managed");
@@ -416,6 +458,107 @@ for (const scenario of [
     );
   });
 }
+
+test("cancellation has one provider-state owner after the process settles", async () => {
+  const provider = new FakeProvider();
+  const started = attemptSeries({ current: { attemptId: ATTEMPT, status: "started", startedAt: NOW } });
+  installControl(provider, controlState({ attemptSeries: started }));
+  provider.snapshot.open = false;
+  class OrderedLauncher extends FakeLauncher {
+    override async cancel(flowInstanceId: string): Promise<void> {
+      provider.events.push("launcher:cancel");
+      await super.cancel(flowInstanceId);
+    }
+  }
+  const launcher = new OrderedLauncher();
+  launcher.running.add(FLOW_1);
+
+  await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  const final = parseControlComment(provider.snapshot.comments.find((item) => item.id.startsWith("control-"))!.body)!;
+  assert.equal(final.stateId, "cancelled");
+  assert.equal(final.sequence, 1);
+  assert.equal(final.attemptSeries?.current?.status, "cancelled");
+  assert.equal(provider.updated, 1);
+  const cancelledAt = provider.events.indexOf("launcher:cancel");
+  const updatedAt = provider.events.indexOf("provider:update-control");
+  const readBeforeUpdate = provider.events.findIndex((event, index) => index > cancelledAt && event === "provider:read-control");
+  assert.ok(cancelledAt < readBeforeUpdate && readBeforeUpdate < updatedAt);
+  assert.ok(updatedAt < provider.events.lastIndexOf("provider:read-control"));
+});
+
+test("cancellation fails closed if process settlement replaced the control identity", async () => {
+  const provider = new FakeProvider();
+  installControl(provider, controlState({ attemptSeries: attemptSeries({
+    current: { attemptId: ATTEMPT, status: "started", startedAt: NOW },
+  }) }));
+  provider.snapshot.open = false;
+  class ConflictingLauncher extends FakeLauncher {
+    override async cancel(flowInstanceId: string): Promise<void> {
+      await super.cancel(flowInstanceId);
+      const index = provider.snapshot.comments.findIndex((item) => item.id.startsWith("control-"));
+      provider.snapshot.comments[index] = controlComment(
+        controlState({ flowInstanceId: FLOW_2 }),
+        provider.snapshot.comments[index]!.id,
+      );
+    }
+  }
+
+  await assert.rejects(
+    reconcileTicket(dependencies(provider, new ConflictingLauncher()), TICKET),
+    /readback mismatch after cancellation/,
+  );
+  assert.equal(provider.updated, 0);
+  assert.equal(provider.events.includes("provider:set-labels"), false);
+});
+
+test("reconciler owns terminal cancellation for an actual running attempt", async () => {
+  const provider = new FakeProvider();
+  installControl(provider, controlState());
+  const runner = createAttemptRunner({
+    dataDirectory: "/data",
+    provider,
+    workspaceManager: { async prepareWorkspace() { return {
+      baseClone: "/data/repository", worktree: "/data/worktree", repository: TICKET.repository,
+      ticketNumber: TICKET.number, flowInstanceId: FLOW_1,
+    }; } },
+    harnesses: { claude: { target: "claude", async preflight() {}, async run(input) {
+      return new Promise((resolve) => input.signal.addEventListener("abort", () => resolve({
+        exitCode: null, signal: "SIGTERM", timedOut: false,
+      }), { once: true }));
+    } } },
+    async writeControl(_ref, expected, next) {
+      const existing = provider.snapshot.comments.find((item) => item.id.startsWith("control-"))!;
+      const parsed = parseControlComment(existing.body)!;
+      assert.equal(expected.flowInstanceId, parsed.flowInstanceId);
+      assert.equal(expected.sequence, parsed.sequence);
+      await provider.updateComment(TICKET, existing.id, renderControlComment(next));
+      return parseControlComment((await provider.readComment(TICKET, existing.id)).body)!;
+    },
+    async createSession(_data, _flow, attemptId) { return {
+      root: `/data/${attemptId}`, contextPath: `/data/${attemptId}/context.json`,
+      receiptPath: `/data/${attemptId}/receipt.json`, logPath: `/data/${attemptId}/harness.log`,
+      harnessSessionDirectory: `/data/${attemptId}/harness-session`,
+    }; },
+    async compileAgent(agentId, _package, target) {
+      return { agentId, target, instructions: "test", runtimeDirectory: "/runtime" };
+    },
+    now: () => NOW,
+  });
+
+  await reconcileTicket(dependencies(provider, runner), TICKET);
+  assert.equal(runner.isRunning(FLOW_1), true);
+  let persisted = parseControlComment(provider.snapshot.comments.find((item) => item.id.startsWith("control-"))!.body)!;
+  assert.equal(persisted.attemptSeries?.current?.status, "started");
+
+  provider.snapshot.open = false;
+  await reconcileTicket(dependencies(provider, runner), TICKET);
+
+  persisted = parseControlComment(provider.snapshot.comments.find((item) => item.id.startsWith("control-"))!.body)!;
+  assert.equal(runner.isRunning(FLOW_1), false);
+  assert.equal(persisted.stateId, "cancelled");
+  assert.equal(persisted.attemptSeries?.current?.status, "cancelled");
+});
 
 test("merge completion wins over ticket closure", async () => {
   const provider = new FakeProvider();
@@ -558,6 +701,7 @@ test("enters needs-human for a closed change and reviews a new head", async (t) 
     const index = provider.snapshot.comments.findIndex((candidate) => candidate.id.startsWith("control-"));
     const state = parseControlComment(provider.snapshot.comments[index]!.body)!;
     const request = launcher.requests[0]!;
+    await assertRunnerAccepts(request, provider);
     provider.snapshot.comments[index] = controlComment({
       ...state,
       sequence: state.sequence + 1,
@@ -667,6 +811,7 @@ test("needs-human question stays paused until a later authorized comment", async
   assert.equal(launcher.requests.length, 1);
   assert.equal(launcher.requests[0]?.mode, "human-input");
   assert.equal(launcher.requests[0]?.sourceComment?.id, later.id);
+  await assertRunnerAccepts(launcher.requests[0]!, provider);
 });
 
 test("human cancellation reaches terminal cancelled without relaunching reviewer", async () => {
@@ -767,6 +912,7 @@ test("selects the first later unmarked authorized human comment", async () => {
   assert.equal(launcher.requests[0]?.mode, "human-input");
   assert.equal(launcher.requests[0]?.sourceComment?.id, "answer");
   assert.equal(launcher.requests[0]?.resultContract, "human-gate");
+  await assertRunnerAccepts(launcher.requests[0]!, provider);
 });
 
 test("keeps an unclear human verdict at the gate without relaunching the same input", async () => {
@@ -1014,7 +1160,8 @@ test("uses stable semantic attempt input revisions", async (t) => {
 
     await reconcileTicket(dependencies(provider, secondLauncher), TICKET);
 
-    assert.deepEqual(secondLauncher.requests, []);
+    assert.equal(secondLauncher.requests.length, 1);
+    assert.equal(secondLauncher.requests[0]!.inputRevision, request.inputRevision);
   });
 
   await t.test("persisting a failed current attempt", async () => {
@@ -1048,7 +1195,8 @@ test("uses stable semantic attempt input revisions", async (t) => {
 
     await reconcileTicket(dependencies(provider, secondLauncher), TICKET);
 
-    assert.deepEqual(secondLauncher.requests, []);
+    assert.equal(secondLauncher.requests.length, 1);
+    assert.equal(secondLauncher.requests[0]!.inputRevision, request.inputRevision);
     const unchanged = parseControlComment(provider.snapshot.comments[index]!.body)!;
     assert.equal(unchanged.attemptSeries?.inputRevision, request.inputRevision);
   });

@@ -93,7 +93,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       active.set(flowId, running);
       const job = runSeries(request, config, running);
       running.completion = job.catch((error: unknown) => {
-        if (!running.launched) running.rejectReady(error);
+        if (!running.launched) running.rejectReady(classifyAttemptError(error));
       }).finally(() => {
         if (!running.launched) running.resolveReady();
         if (active.get(flowId) === running) active.delete(flowId);
@@ -124,6 +124,48 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       ? control.attemptSeries!
       : newSeries(request, config.retry.maxAttempts, newId());
 
+    if (series.current?.status === "started") {
+      const interrupted: AttemptSeries = {
+        ...series,
+        current: {
+          ...series.current,
+          status: "failed",
+          finishedAt: now(),
+          error: {
+            code: "CONTROLLER_RESTARTED",
+            message: "attempt was interrupted by a controller restart",
+          },
+        },
+      };
+      if (interrupted.consumed >= interrupted.maxAttempts) {
+        await persistBlocked(
+          dependencies,
+          now(),
+          request,
+          running,
+          control,
+          interrupted,
+          interrupted.current!.error!,
+        );
+        running.resolveReady();
+        return;
+      }
+      control = await persist(
+        dependencies,
+        now(),
+        request,
+        running,
+        control,
+        { attemptSeries: interrupted },
+      );
+      series = interrupted;
+      await cancellableDelay(config.retry.delaySeconds * 1_000, running, delay);
+      if (running.cancelled) return;
+    } else if (series.current?.status === "failed" && series.consumed < series.maxAttempts) {
+      await cancellableDelay(config.retry.delaySeconds * 1_000, running, delay);
+      if (running.cancelled) return;
+    }
+
     if (series.current?.status === "failed" && series.consumed >= series.maxAttempts) {
       await persistBlocked(
         dependencies,
@@ -152,10 +194,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       series = { ...series, consumed: series.consumed + 1, current: attempt };
       control = await persist(dependencies, now(), request, running, control, { attemptSeries: series });
 
-      if (running.cancelled) {
-        await persistCancelled(dependencies, now(), request, running, control, series, attempt);
-        return;
-      }
+      if (running.cancelled) return;
 
       try {
         const workspace = await dependencies.workspaceManager.prepareWorkspace(
@@ -196,10 +235,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           running.resolveReady();
         }
         const result = await resultPromise;
-        if (running.cancelled || running.abort.signal.aborted) {
-          await persistCancelled(dependencies, now(), request, running, control, series, attempt);
-          return;
-        }
+        if (running.cancelled || running.abort.signal.aborted) return;
         assertProcessResult(result);
         const receipt = await verifyReceipt(
           session.receiptPath,
@@ -213,10 +249,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           dependencies.provider,
           running.cancelled,
         );
-        if (running.cancelled || running.abort.signal.aborted) {
-          await persistCancelled(dependencies, now(), request, running, control, series, attempt);
-          return;
-        }
+        if (running.cancelled || running.abort.signal.aborted) return;
         if (receipt.outcome === "failed") {
           throw new AttemptError("AGENT_REPORTED_FAILURE", "agent reported a technical failure", true);
         }
@@ -234,10 +267,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         );
         return;
       } catch (error) {
-        if (running.cancelled || running.abort.signal.aborted) {
-          await persistCancelled(dependencies, now(), request, running, control, series, attempt);
-          return;
-        }
+        if (running.cancelled || running.abort.signal.aborted) return;
         const classified = classifyAttemptError(error);
         const failedSeries: AttemptSeries = {
           ...series,
@@ -292,7 +322,7 @@ function validateRequest(request: AttemptRequest, dependencies: AttemptRunnerDep
   if (control.configRevision !== bundle.revision
     || control.flowId !== bundle.flow.metadata.id
     || request.stateId !== control.stateId
-    || bundle.flow.spec.states[control.stateId] !== request.state
+    || selectedState(bundle, control) !== request.state
     || request.state.agent !== request.agentId) {
     throw new AttemptError("CONFIGURATION_INVALID", "attempt does not match pinned configuration", false);
   }
@@ -305,8 +335,37 @@ function validateRequest(request: AttemptRequest, dependencies: AttemptRunnerDep
   }
   const agent = bundle.catalog.agents[request.agentId];
   if (!agent) throw new AttemptError("AGENT_NOT_CONFIGURED", "agent is not configured", false);
+  assertModeContract(request);
   const packageDirectory = safePackageDirectory(bundle, agent.package);
   return { ...agent, packageDirectory };
+}
+
+function selectedState(bundle: ConfigBundle, control: ControlState) {
+  if (control.stateId !== "needs-human") return bundle.flow.spec.states[control.stateId];
+  return control.resumeStateId ? bundle.flow.spec.states[control.resumeStateId] : undefined;
+}
+
+function assertModeContract(request: AttemptRequest): void {
+  if (request.control.stateId === "needs-human") {
+    if (!request.control.resumeStateId) {
+      throw new AttemptError("CONFIGURATION_INVALID", "paused attempt has no resume state", false);
+    }
+    if (request.mode === "human-input") {
+      if (!request.sourceComment || request.resultContract !== "human-gate") {
+        throw new AttemptError("CONFIGURATION_INVALID", "human input attempt contract is invalid", false);
+      }
+    } else if (request.sourceComment || request.resultContract !== request.state.resultContract) {
+      throw new AttemptError("CONFIGURATION_INVALID", "paused stage attempt contract is invalid", false);
+    }
+    return;
+  }
+  if (request.state.kind === "human-gate") {
+    if (request.mode !== "human-input" || !request.sourceComment || request.resultContract !== "human-gate") {
+      throw new AttemptError("CONFIGURATION_INVALID", "human gate attempt contract is invalid", false);
+    }
+  } else if (request.mode !== "stage" || request.sourceComment || request.resultContract !== request.state.resultContract) {
+    throw new AttemptError("CONFIGURATION_INVALID", "agent stage attempt contract is invalid", false);
+  }
 }
 
 function safePackageDirectory(bundle: ConfigBundle, packagePath: string): string {
@@ -325,8 +384,7 @@ function shouldNotStart(request: AttemptRequest, maxAttempts: number): boolean {
   if (series!.maxAttempts !== maxAttempts) {
     throw new AttemptError("RETRY_POLICY_MISMATCH", "persisted retry policy does not match configuration", false);
   }
-  return series!.current?.status === "started"
-    || series!.current?.status === "succeeded"
+  return series!.current?.status === "succeeded"
     || series!.current?.status === "cancelled";
 }
 
@@ -460,24 +518,6 @@ async function persistBlocked(
     stateId: "blocked",
     resumeStateId: request.stateId,
     attemptSeries: { ...series, current: failed },
-  });
-}
-
-async function persistCancelled(
-  dependencies: AttemptRunnerDependencies,
-  timestamp: string,
-  request: AttemptRequest,
-  running: ActiveAttempt,
-  control: ControlState,
-  series: AttemptSeries,
-  attempt: Attempt,
-): Promise<void> {
-  if (series.current?.attemptId !== attempt.attemptId || running.attemptId !== attempt.attemptId) return;
-  await persist(dependencies, timestamp, request, running, control, {
-    attemptSeries: {
-      ...series,
-      current: { ...attempt, status: "cancelled", finishedAt: timestamp },
-    },
   });
 }
 

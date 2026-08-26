@@ -215,13 +215,34 @@ async function cancel(
   snapshot: ProviderTicketSnapshot,
   current: LoadedControl,
 ): Promise<ReconcileOutcome> {
-  const control = advanceControlState(current.parsed.state, {
+  await dependencies.launcher.cancel(current.parsed.state.flowInstanceId);
+  const readback = await providerCall(
+    "provider control comment readback failed",
+    () => dependencies.provider.readComment(snapshot.ref, current.parsed.comment.id),
+  );
+  const latest = parseControlComment(readback.body);
+  if (readback.id !== current.parsed.comment.id
+    || !latest
+    || latest.flowInstanceId !== current.parsed.state.flowInstanceId
+    || latest.flowId !== current.parsed.state.flowId
+    || latest.configRevision !== current.parsed.state.configRevision
+    || latest.activationEventId !== current.parsed.state.activationEventId
+    || latest.sequence < current.parsed.state.sequence) {
+    throw new Error("control comment readback mismatch after cancellation");
+  }
+  const timestamp = now(dependencies);
+  const currentAttempt = latest.attemptSeries?.current;
+  const attemptSeries = latest.attemptSeries && currentAttempt?.status === "started" ? {
+    ...latest.attemptSeries,
+    current: { ...currentAttempt, status: "cancelled" as const, finishedAt: timestamp },
+  } : latest.attemptSeries;
+  const control = advanceControlState(latest, {
     stateId: "cancelled",
     resumeStateId: null,
-    changeRequest: normalizedChange(snapshot.changeRequest) ?? current.parsed.state.changeRequest,
-  }, now(dependencies));
+    attemptSeries,
+    changeRequest: normalizedChange(snapshot.changeRequest) ?? latest.changeRequest,
+  }, timestamp);
   await writeControl(dependencies.provider, snapshot.ref, current.parsed.comment.id, control);
-  await dependencies.launcher.cancel(control.flowInstanceId);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, current.bundle, "cancelled", true);
   return outcome(control, true, false);
 }
@@ -412,7 +433,8 @@ function hasAcceptedAttempt(
   const series = control.attemptSeries;
   const current = series?.current;
   if (!series || !current || series.agentId !== agentId || series.stateId !== control.stateId) return false;
-  return series.inputRevision === inputRevision;
+  return series.inputRevision === inputRevision
+    && (current.status === "succeeded" || current.status === "cancelled");
 }
 
 function attemptInputRevision(

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { inspect } from "node:util";
 
 import type { ConfigBundle } from "../../src/config/load.ts";
 import type { AgentReceipt, ControlState } from "../../src/config/types.ts";
@@ -9,7 +10,7 @@ import type { HarnessAdapter, HarnessResult } from "../../src/harness/types.ts";
 import { ProviderHttpError } from "../../src/provider/http.ts";
 import type { ProviderAdapter, ProviderTicketSnapshot } from "../../src/provider/types.ts";
 import { createAttemptRunner, type AttemptRunnerDependencies } from "../../src/runtime/attempt-runner.ts";
-import { InvalidReceiptError } from "../../src/runtime/receipts.ts";
+import { InvalidReceiptError, ReceiptReadbackError } from "../../src/runtime/receipts.ts";
 import type { AttemptRequest } from "../../src/runtime/reconcile.ts";
 
 const FLOW = "11111111-1111-4111-8111-111111111111";
@@ -178,14 +179,14 @@ test("retries with injected delay and a fresh session", async () => {
   assert.equal(subject.controls.at(-1)!.attemptSeries?.consumed, 2);
 });
 
-test("retries timeout, retryable harness, and transient provider failures", async () => {
+test("retries timeout, retryable harness, and transient receipt readback failures", async () => {
   const cases: Array<HarnessResult | Error> = [
     { exitCode: null, signal: "SIGTERM", timedOut: true }, new HarnessProcessError("codex", true),
-    new ProviderHttpError("token=secret", 503, true, { token: "secret" }, { authorization: "secret" }),
+    new ReceiptReadbackError(),
   ];
   for (const first of cases) {
     let verifyCalls = 0;
-    const providerCase = first instanceof ProviderHttpError;
+    const providerCase = first instanceof ReceiptReadbackError;
     const subject = fixture({ results: providerCase ? [OK, OK] : [first, OK], verify: async (attemptId) => {
       verifyCalls += 1; if (providerCase && verifyCalls === 1) throw first; return receipt(attemptId);
     } });
@@ -267,26 +268,30 @@ test("blocked reset reuses series ID; new input creates a fresh series", async (
   assert.equal(changed.controls[0]!.attemptSeries?.consumed, 1);
 });
 
-test("cancel aborts the live job, persists cancelled, and is idempotent", async () => {
+test("cancel aborts the live job without owning provider state", async () => {
   const subject = fixture(); await subject.runner.start(subject.request);
   const cancelling = subject.runner.cancel(FLOW);
   subject.process.resolve({ exitCode: null, signal: "SIGTERM", timedOut: false });
   await cancelling;
   assert.equal(subject.runner.isRunning(FLOW), false);
-  assert.equal(subject.controls.at(-1)!.attemptSeries?.current?.status, "cancelled");
+  assert.equal(subject.controls.at(-1)!.attemptSeries?.current?.status, "started");
   await subject.runner.cancel(FLOW);
 });
 
 test("rejects started-control CAS conflict before workspace and spawn", async () => {
   const subject = fixture({ write: async () => { throw new Error("sequence conflict token=secret"); } });
-  await assert.rejects(subject.runner.start(subject.request), /sequence conflict/);
+  await assert.rejects(subject.runner.start(subject.request), (error: unknown) => {
+    assert.equal((error as { code: string }).code, "ATTEMPT_CONFIGURATION_FAILED");
+    assert.equal(inspect(error).includes("secret"), false);
+    return true;
+  });
   assert.equal(subject.runner.isRunning(FLOW), false);
   assert.equal(subject.events.includes("workspace:prepare"), false);
   assert.equal(subject.events.includes("harness:spawn"), false);
 });
 
-test("does not relaunch persisted started, succeeded, or cancelled attempts", async () => {
-  for (const status of ["started", "succeeded", "cancelled"] as const) {
+test("does not relaunch persisted succeeded or cancelled attempts", async () => {
+  for (const status of ["succeeded", "cancelled"] as const) {
     const existing = control({ attemptSeries: { seriesId: SERIES, agentId: "developer", stateId: "development",
       inputRevision: "input:one", maxAttempts: 3, consumed: 1,
       current: { attemptId: ATTEMPT_1, status, startedAt: NOW } } });
@@ -294,4 +299,57 @@ test("does not relaunch persisted started, succeeded, or cancelled attempts", as
     await subject.runner.start(subject.request);
     assert.equal(subject.events.length, 0); assert.equal(subject.runner.isRunning(FLOW), false);
   }
+});
+
+test("recovers a persisted started attempt in the same retry series", async () => {
+  const existing = control({ attemptSeries: { seriesId: SERIES, agentId: "developer", stateId: "development",
+    inputRevision: "input:one", maxAttempts: 3, consumed: 1,
+    current: { attemptId: ATTEMPT_1, status: "started", startedAt: NOW } } });
+  const subject = fixture({ request: request({ control: existing }), ids: [ATTEMPT_2], results: [OK] });
+  await subject.runner.start(subject.request); await waitIdle(subject);
+  assert.equal(subject.controls[0]!.attemptSeries?.seriesId, SERIES);
+  assert.equal(subject.controls[0]!.attemptSeries?.consumed, 1);
+  assert.equal(subject.controls[0]!.attemptSeries?.current?.status, "failed");
+  assert.equal(subject.controls[0]!.attemptSeries?.current?.error?.code, "CONTROLLER_RESTARTED");
+  assert.deepEqual(subject.delays, [7_000]);
+  assert.equal(subject.controls.at(-1)!.attemptSeries?.consumed, 2);
+});
+
+test("resumes a persisted retryable failure after delay without resetting budget", async () => {
+  const existing = control({ attemptSeries: { seriesId: SERIES, agentId: "developer", stateId: "development",
+    inputRevision: "input:one", maxAttempts: 3, consumed: 1,
+    current: { attemptId: ATTEMPT_1, status: "failed", startedAt: NOW, finishedAt: NOW,
+      error: { code: "HARNESS_TIMEOUT", message: "harness timed out" } } } });
+  const subject = fixture({ request: request({ control: existing }), ids: [ATTEMPT_2], results: [OK] });
+  await subject.runner.start(subject.request); await waitIdle(subject);
+  assert.deepEqual(subject.delays, [7_000]);
+  assert.equal(subject.controls[0]!.attemptSeries?.seriesId, SERIES);
+  assert.equal(subject.controls[0]!.attemptSeries?.consumed, 2);
+});
+
+test("blocks an exhausted persisted started attempt without spawning", async () => {
+  const configured = bundle(1);
+  const existing = control({ attemptSeries: { seriesId: SERIES, agentId: "developer", stateId: "development",
+    inputRevision: "input:one", maxAttempts: 1, consumed: 1,
+    current: { attemptId: ATTEMPT_1, status: "started", startedAt: NOW } } });
+  const subject = fixture({ request: request({ bundle: configured, control: existing }) });
+  await subject.runner.start(subject.request); await waitIdle(subject);
+  assert.equal(subject.controls.at(-1)!.stateId, "blocked");
+  assert.equal(subject.controls.at(-1)!.attemptSeries?.current?.error?.code, "CONTROLLER_RESTARTED");
+  assert.equal(subject.events.includes("harness:spawn"), false);
+});
+
+test("sanitizes a transient initial control persistence failure", async () => {
+  const raw = new ProviderHttpError("token=secret", 503, true, { token: "secret" }, { authorization: "secret" });
+  const subject = fixture({ write: async () => { throw raw; } });
+  await assert.rejects(subject.runner.start(subject.request), (error: unknown) => {
+    assert.equal((error as { code: string }).code, "PROVIDER_TRANSIENT");
+    assert.equal((error as { retryable: boolean }).retryable, true);
+    assert.equal(inspect(error, { showHidden: true }).includes("secret"), false);
+    assert.equal(JSON.stringify(error).includes("secret"), false);
+    assert.equal(inspect(Object.getOwnPropertyDescriptors(error as object), { showHidden: true }).includes("secret"), false);
+    assert.equal("cause" in (error as object), false);
+    return true;
+  });
+  assert.equal(subject.runner.isRunning(FLOW), false);
 });

@@ -2,7 +2,7 @@ import { ApmPreflightError } from "../harness/apm.ts";
 import { HarnessPreflightError, HarnessProcessError } from "../harness/process.ts";
 import { ProviderHttpError } from "../provider/http.ts";
 import type { ReceiptError } from "../config/types.js";
-import { InvalidReceiptError } from "./receipts.ts";
+import { InvalidReceiptError, ReceiptReadbackError } from "./receipts.ts";
 
 export class AttemptError extends Error {
   readonly code: string;
@@ -40,6 +40,9 @@ export function classifyAttemptError(error: unknown): AttemptError {
   }
   if (error instanceof InvalidReceiptError) {
     return new AttemptError(error.code, "agent receipt could not be verified", false);
+  }
+  if (error instanceof ReceiptReadbackError) {
+    return new AttemptError(error.code, "provider receipt readback failed transiently", true);
   }
   return new AttemptError("ATTEMPT_CONFIGURATION_FAILED", "attempt configuration failed", false);
 }
