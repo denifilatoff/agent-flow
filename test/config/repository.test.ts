@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -61,4 +61,19 @@ test("rejects malformed and missing revisions before materialization", async (t)
   await assert.rejects(loadPinnedConfig(repo.path, data, "not-a-sha"));
   await assert.rejects(loadPinnedConfig(repo.path, data, "0000000000000000000000000000000000000000"));
   await assert.rejects(access(join(data, "config")));
+});
+
+test("rejects a symlinked materialization root without writing through it", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  const outside = await mkdtemp(join(tmpdir(), "agent-flow-config-outside-"));
+  t.after(async () => Promise.all([
+    rm(repo.path, { recursive: true, force: true }),
+    rm(data, { recursive: true, force: true }),
+    rm(outside, { recursive: true, force: true }),
+  ]));
+  await symlink(outside, join(data, "config"));
+
+  await assert.rejects(loadPinnedConfig(repo.path, data), /config/i);
+  assert.deepEqual(await readdir(outside), []);
 });

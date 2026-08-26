@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 
 import { loadConfigBundle } from "./load.ts";
 import type { ConfigBundle } from "./load.ts";
+import { ensureSafeDirectory, prepareDataRoot } from "../runtime/filesystem.ts";
 
 const exec = promisify(execFile);
 const SHA = /^[0-9a-f]{40}$/i;
@@ -79,7 +80,9 @@ export async function resolveRevision(repository: string, requested?: string): P
 
 export async function materializeRevision(repository: string, revision: string, dataDirectory: string): Promise<string> {
   const sha = await resolveRevision(repository, revision);
-  const target = resolve(dataDirectory, "config", sha);
+  const dataRoot = await prepareDataRoot(dataDirectory);
+  const configRoot = await ensureSafeDirectory(dataRoot, resolve(dataRoot, "config"), "configuration directory");
+  const target = resolve(configRoot, sha);
   if (await completeDirectory(target, sha)) return target;
 
   try {
@@ -90,9 +93,7 @@ export async function materializeRevision(repository: string, revision: string, 
   }
 
   const entries = treeEntries(await git(repository, ["ls-tree", "-r", "-z", "--full-tree", sha, "--", "config", "schemas/v1", "agent-packages"]));
-  const parent = dirname(target);
-  await mkdir(parent, { recursive: true });
-  const temporary = await mkdtemp(resolve(parent, `.${sha}.`));
+  const temporary = await mkdtemp(resolve(configRoot, `.${sha}.`));
 
   try {
     for (const entry of entries) {

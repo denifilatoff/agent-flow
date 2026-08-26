@@ -3,74 +3,100 @@ import type { Server } from "node:http";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { loadConfigBundle, type ConfigBundle } from "./config/load.js";
-import { materializeRevision, resolveRevision } from "./config/repository.js";
-import { validateSemantics } from "./config/semantic.js";
-import { createClaudeAdapter } from "./harness/claude.js";
-import { createCodexAdapter } from "./harness/codex.js";
-import type { HarnessAdapter } from "./harness/types.js";
-import { createHealthServer, createReadiness } from "./health.js";
-import { createGitHubAdapter } from "./provider/github.js";
-import { createGitLabAdapter } from "./provider/gitlab.js";
-import { createRateLimitedHttpClient } from "./provider/http.js";
-import { listControlComments, parseControlComment, renderControlComment } from "./provider/control-comment.js";
-import type { ProviderAdapter, ProviderKind } from "./provider/types.js";
-import { runPreflight } from "./preflight.js";
-import { createAttemptRunner } from "./runtime/attempt-runner.js";
-import type { ControlWriter } from "./runtime/control-state.js";
-import { createController, type Controller } from "./runtime/controller.js";
-import { RateLimiter } from "./runtime/rate-limiter.js";
-import { reconcileTicket, type AttemptLauncher } from "./runtime/reconcile.js";
-import { WorkspaceManager } from "./runtime/workspaces.js";
+import { loadConfigBundle, type ConfigBundle } from "./config/load.ts";
+import { materializeRevision, resolveRevision } from "./config/repository.ts";
+import { validateSemantics } from "./config/semantic.ts";
+import { createClaudeAdapter } from "./harness/claude.ts";
+import { createCodexAdapter } from "./harness/codex.ts";
+import type { HarnessAdapter } from "./harness/types.ts";
+import { createHealthServer, createReadiness } from "./health.ts";
+import { createGitHubAdapter } from "./provider/github.ts";
+import { createGitLabAdapter } from "./provider/gitlab.ts";
+import { createRateLimitedHttpClient } from "./provider/http.ts";
+import { listControlComments, parseControlComment, renderControlComment } from "./provider/control-comment.ts";
+import type { ProviderAdapter, ProviderKind } from "./provider/types.ts";
+import { runPreflight, type PreflightDependencies, type ReadyDependencies } from "./preflight.ts";
+import { createAttemptRunner } from "./runtime/attempt-runner.ts";
+import type { ControlWriter } from "./runtime/control-state.ts";
+import { createController, type Controller } from "./runtime/controller.ts";
+import { RateLimiter } from "./runtime/rate-limiter.ts";
+import { reconcileTicket, type AttemptLauncher } from "./runtime/reconcile.ts";
+import { WorkspaceManager } from "./runtime/workspaces.ts";
 
 type Providers = Partial<Record<ProviderKind, ProviderAdapter>>;
 type Harnesses = Partial<Record<"claude" | "codex", HarnessAdapter>>;
 
-export async function main(environment: NodeJS.ProcessEnv = process.env): Promise<number> {
+interface SignalSource {
+  once(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+  removeListener(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+}
+
+export interface MainDependencies {
+  createHealthServer: typeof createHealthServer;
+  createPreflightDependencies(environment: NodeJS.ProcessEnv, healthPort: number): PreflightDependencies;
+  runPreflight(dependencies: PreflightDependencies): Promise<ReadyDependencies>;
+  signals: SignalSource;
+  reportError(message: string): void;
+}
+
+const DEFAULT_MAIN_DEPENDENCIES: MainDependencies = {
+  createHealthServer,
+  createPreflightDependencies: productionDependencies,
+  runPreflight,
+  signals: process,
+  reportError: (message) => console.error(message),
+};
+
+export async function main(
+  environment: NodeJS.ProcessEnv = process.env,
+  dependencies: MainDependencies = DEFAULT_MAIN_DEPENDENCIES,
+): Promise<number> {
   let port: number;
   try {
     port = positiveInteger(environment.AGENT_FLOW_HEALTH_PORT ?? "8080", "health port");
   } catch {
-    console.error("agent-flow startup failed: invalid health port");
+    dependencies.reportError("agent-flow startup failed: invalid health port");
     return 1;
   }
   const readiness = createReadiness();
-  const server = createHealthServer(port, readiness);
+  const server = dependencies.createHealthServer(port, readiness);
   try {
     await listening(server);
   } catch {
-    console.error("agent-flow startup failed: health server failed");
-    return 1;
-  }
-
-  let ready;
-  try {
-    ready = await runPreflight(productionDependencies(environment, port));
-    readiness.markReady();
-  } catch (error) {
-    console.error(`agent-flow startup failed: ${boundedMessage(error)}`);
-    await close(server).catch(() => undefined);
+    dependencies.reportError("agent-flow startup failed: health server failed");
     return 1;
   }
 
   const abort = new AbortController();
   const stop = () => abort.abort();
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
+  dependencies.signals.once("SIGINT", stop);
+  dependencies.signals.once("SIGTERM", stop);
   let exitCode = 0;
+  let ready: ReadyDependencies | undefined;
   try {
-    await ready.controller.run(abort.signal);
-  } catch {
-    console.error("agent-flow runtime failed");
-    exitCode = 1;
+    try {
+      ready = await dependencies.runPreflight(dependencies.createPreflightDependencies(environment, port));
+    } catch (error) {
+      dependencies.reportError(`agent-flow startup failed: ${boundedMessage(error)}`);
+      exitCode = 1;
+    }
+    if (ready) {
+      if (!abort.signal.aborted) readiness.markReady();
+      try {
+        await ready.controller.run(abort.signal);
+      } catch {
+        dependencies.reportError("agent-flow runtime failed");
+        exitCode = 1;
+      }
+    }
   } finally {
     readiness.markNotReady();
-    process.removeListener("SIGINT", stop);
-    process.removeListener("SIGTERM", stop);
+    dependencies.signals.removeListener("SIGINT", stop);
+    dependencies.signals.removeListener("SIGTERM", stop);
     try {
       await close(server);
     } catch {
-      console.error("agent-flow health server shutdown failed");
+      dependencies.reportError("agent-flow health server shutdown failed");
       exitCode = 1;
     }
   }
