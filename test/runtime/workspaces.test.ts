@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -134,6 +134,95 @@ test("rejects a reused worktree whose origin identity changed", async (t) => {
   );
 });
 
+test("recovers after post-create validation fails", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let failWorktreeOrigin = true;
+  const failingRun: CommandRunner = async (file, args, options = {}) => {
+    if (
+      failWorktreeOrigin &&
+      file === "git" &&
+      args.join(" ") === "remote get-url origin" &&
+      options.cwd?.includes(`/worktrees/${FLOW_1}`)
+    ) {
+      failWorktreeOrigin = false;
+      return { stdout: "https://github.example.test/other/repo.git\n", stderr: "" };
+    }
+    return run(file, args, options);
+  };
+  const manager = new WorkspaceManager(data, failingRun);
+
+  await assert.rejects(
+    manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1),
+    /repository identity mismatch/,
+  );
+  const workspace = await manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1);
+
+  assert.equal(await git(workspace.worktree, "remote", "get-url", "origin"), REPOSITORY.cloneUrl);
+});
+
+test("repairs an exact orphaned worktree after a crash", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = new WorkspaceManager(data, run);
+  const first = await manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1);
+  const bindingPath = `${first.worktree}.json`;
+  await rm(bindingPath);
+
+  const recovered = await manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1);
+
+  assert.equal(recovered.worktree, first.worktree);
+  assert.equal(JSON.parse(await readFile(bindingPath, "utf8")).ticketNumber, 7);
+});
+
+test("rejects a symlinked worktree root without writing through it", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const outside = join(root, "outside");
+  await mkdir(data, { recursive: true });
+  await mkdir(outside);
+  await symlink(outside, join(data, "worktrees"), "dir");
+
+  await assert.rejects(
+    new WorkspaceManager(data, run).prepareWorkspace(REPOSITORY, ticket(7), FLOW_1),
+    /symbolic link/,
+  );
+  assert.deepEqual(await readdir(outside), []);
+});
+
+test("cleanup rejects a symlinked binding before deleting the worktree", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = new WorkspaceManager(data, run);
+  const workspace = await manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1);
+  const bindingPath = `${workspace.worktree}.json`;
+  const outsideBinding = join(root, "outside-binding.json");
+  await writeFile(outsideBinding, await readFile(bindingPath));
+  await rm(bindingPath);
+  await symlink(outsideBinding, bindingPath);
+
+  await assert.rejects(
+    manager.removeWorkspace(workspace, true, false),
+    /symbolic link/,
+  );
+  assert.equal(await readFile(outsideBinding, "utf8").then(() => true), true);
+  assert.equal(await readFile(join(workspace.worktree, ".git"), "utf8").then(() => true), true);
+});
+
+test("cleanup rejects a changed repository identity before forced removal", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = new WorkspaceManager(data, run);
+  const workspace = await manager.prepareWorkspace(REPOSITORY, ticket(7), FLOW_1);
+  await git(workspace.worktree, "remote", "set-url", "origin", "https://github.example.test/other/repo.git");
+
+  await assert.rejects(
+    manager.removeWorkspace(workspace, true, false),
+    /repository identity mismatch/,
+  );
+  assert.equal(await readFile(join(workspace.worktree, ".git"), "utf8").then(() => true), true);
+});
+
 test("removes a worktree only after terminal state with no running process", async (t) => {
   const { root, data, run } = await fixture();
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -144,8 +233,39 @@ test("removes a worktree only after terminal state with no running process", asy
   assert.equal(await readFile(join(workspace.worktree, ".git"), "utf8").then(() => true), true);
   await manager.removeWorkspace(workspace, true, true);
   assert.equal(await readFile(join(workspace.worktree, ".git"), "utf8").then(() => true), true);
+  await writeFile(join(workspace.worktree, "untracked.txt"), "terminal diagnostic\n");
   await manager.removeWorkspace(workspace, true, false);
   await assert.rejects(readFile(join(workspace.worktree, ".git")), { code: "ENOENT" });
+});
+
+test("accepts a GitLab clone URL below a trusted instance path", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository: ProviderRepository = {
+    provider: "gitlab",
+    name: "group/project",
+    host: "gitlab.example.test",
+    cloneUrl: "https://gitlab.example.test/gitlab/group/project.git",
+  };
+
+  const workspace = await new WorkspaceManager(data, run).prepareWorkspace(
+    repository,
+    { provider: "gitlab", repository: repository.name, number: 9 },
+    FLOW_1,
+  );
+
+  assert.equal(await git(workspace.worktree, "remote", "get-url", "origin"), repository.cloneUrl);
+});
+
+test("rejects noncanonical flow UUIDs", async (t) => {
+  const { root, data, run } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manager = new WorkspaceManager(data, run);
+
+  await assert.rejects(
+    manager.prepareWorkspace(REPOSITORY, ticket(7), "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".toUpperCase()),
+    /flow instance ID must be a canonical UUID/,
+  );
 });
 
 test("uses glab for a GitLab repository", async (t) => {

@@ -1,10 +1,19 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import type { ProviderRepository, TicketRef } from "../provider/types.js";
+import {
+  assertCanonicalUuid,
+  assertSafeDirectory,
+  assertSafeFile,
+  assertSafeWritableFile,
+  ensureSafeDirectory,
+  prepareDataRoot,
+  removeSafeFile,
+} from "./filesystem.ts";
 
 export interface Workspace {
   baseClone: string;
@@ -29,6 +38,7 @@ interface RepositoryIdentity {
   provider: ProviderRepository["provider"];
   host: string;
   name: string;
+  remotePath: string;
 }
 
 interface WorkspaceBinding extends RepositoryIdentity {
@@ -39,7 +49,6 @@ interface WorkspaceBinding extends RepositoryIdentity {
 }
 
 const execFile = promisify(execFileCallback);
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const runCommand: CommandRunner = async (file, args, options = {}) => {
   const result = await execFile(file, args, { cwd: options.cwd, encoding: "utf8" });
@@ -47,12 +56,12 @@ const runCommand: CommandRunner = async (file, args, options = {}) => {
 };
 
 export class WorkspaceManager {
-  readonly #dataDirectory: string;
+  readonly #configuredDataDirectory: string;
   readonly #run: CommandRunner;
   readonly #baseClonePreparations = new Map<string, Promise<void>>();
 
   constructor(dataDirectory: string, run: CommandRunner = runCommand) {
-    this.#dataDirectory = resolve(dataDirectory);
+    this.#configuredDataDirectory = resolve(dataDirectory);
     this.#run = run;
   }
 
@@ -61,15 +70,23 @@ export class WorkspaceManager {
     ticket: TicketRef,
     flowInstanceId: string,
   ): Promise<Workspace> {
-    assertUuid(flowInstanceId, "flow instance ID");
+    assertCanonicalUuid(flowInstanceId, "flow instance ID");
     const identity = repositoryIdentity(repository);
     assertTicket(identity, ticket);
+    const dataRoot = await prepareDataRoot(this.#configuredDataDirectory);
+    const repositoriesRoot = await ensureSafeDirectory(
+      dataRoot,
+      join(dataRoot, "repositories"),
+      "repositories directory",
+    );
+    const worktreesRoot = await ensureSafeDirectory(
+      dataRoot,
+      join(dataRoot, "worktrees"),
+      "worktrees directory",
+    );
 
-    const repositoryKey = createHash("sha256")
-      .update(`${identity.provider}\0${identity.host}\0${identity.name}`)
-      .digest("hex");
-    const baseClone = join(this.#dataDirectory, "repositories", repositoryKey);
-    const worktree = join(this.#dataDirectory, "worktrees", flowInstanceId);
+    const baseClone = join(repositoriesRoot, repositoryKey(identity));
+    const worktree = join(worktreesRoot, flowInstanceId);
     const bindingPath = `${worktree}.json`;
     const workspace: Workspace = {
       baseClone,
@@ -86,51 +103,85 @@ export class WorkspaceManager {
       worktree,
     };
 
-    await mkdir(join(this.#dataDirectory, "repositories"), { recursive: true, mode: 0o700 });
-    await mkdir(join(this.#dataDirectory, "worktrees"), { recursive: true, mode: 0o700 });
-
     const worktreeExists = await pathExists(worktree);
     const bindingExists = await pathExists(bindingPath);
-    if (worktreeExists !== bindingExists) {
+    if (!worktreeExists && bindingExists) {
       throw new Error(`workspace binding mismatch for flow ${flowInstanceId}`);
     }
     if (worktreeExists) {
-      await assertDirectory(worktree, "worktree");
-      assertBinding(await readBinding(bindingPath), expectedBinding);
+      await assertSafeDirectory(dataRoot, worktree, "worktree");
+      if (bindingExists) {
+        assertBinding(await readBinding(dataRoot, bindingPath), expectedBinding);
+      } else {
+        await this.#prepareBaseClone(dataRoot, baseClone, repository, identity);
+        await this.#assertOrigin(worktree, identity);
+        await this.#assertWorktreeBase(dataRoot, worktree, baseClone);
+        await writeBinding(dataRoot, bindingPath, expectedBinding);
+      }
       await this.#assertOrigin(worktree, identity);
       return workspace;
     }
 
-    await this.#prepareBaseClone(baseClone, repository, identity);
-    await this.#run("git", ["worktree", "add", "--detach", worktree, "HEAD"], { cwd: baseClone });
-    await this.#assertOrigin(worktree, identity);
-    await writeFile(bindingPath, `${JSON.stringify(expectedBinding)}\n`, { flag: "wx", mode: 0o600 });
-    return workspace;
+    await this.#prepareBaseClone(dataRoot, baseClone, repository, identity);
+    let created = false;
+    try {
+      await this.#run("git", ["worktree", "add", "--detach", worktree, "HEAD"], { cwd: baseClone });
+      created = true;
+      await assertSafeDirectory(dataRoot, worktree, "worktree");
+      await this.#assertOrigin(worktree, identity);
+      await this.#assertWorktreeBase(dataRoot, worktree, baseClone);
+      await writeBinding(dataRoot, bindingPath, expectedBinding);
+      return workspace;
+    } catch (error) {
+      if (created) {
+        await this.#removeCreatedWorktree(dataRoot, worktree, baseClone).catch(() => undefined);
+      }
+      await removeSafeFile(dataRoot, bindingPath, "workspace binding").catch(() => undefined);
+      throw error;
+    }
   }
 
   async removeWorkspace(workspace: Workspace, terminal: boolean, processRunning: boolean): Promise<void> {
     if (!terminal || processRunning) return;
-    assertUuid(workspace.flowInstanceId, "flow instance ID");
-    const expectedWorktree = join(this.#dataDirectory, "worktrees", workspace.flowInstanceId);
+    assertCanonicalUuid(workspace.flowInstanceId, "flow instance ID");
+    const dataRoot = await prepareDataRoot(this.#configuredDataDirectory);
+    const worktreesRoot = await assertSafeDirectory(
+      dataRoot,
+      join(dataRoot, "worktrees"),
+      "worktrees directory",
+    );
+    const repositoriesRoot = await assertSafeDirectory(
+      dataRoot,
+      join(dataRoot, "repositories"),
+      "repositories directory",
+    );
+    const expectedWorktree = join(worktreesRoot, workspace.flowInstanceId);
     if (resolve(workspace.worktree) !== expectedWorktree) {
       throw new Error(`workspace path mismatch for flow ${workspace.flowInstanceId}`);
     }
+    await assertSafeDirectory(dataRoot, expectedWorktree, "worktree");
+    await assertSafeDirectory(dataRoot, workspace.baseClone, "base clone");
     const bindingPath = `${expectedWorktree}.json`;
-    const binding = await readBinding(bindingPath);
+    const binding = await readBinding(dataRoot, bindingPath);
+    const expectedBaseClone = join(repositoriesRoot, repositoryKey(binding));
     if (
       binding.flowInstanceId !== workspace.flowInstanceId ||
       binding.name !== workspace.repository ||
       binding.ticketNumber !== workspace.ticketNumber ||
-      resolve(binding.baseClone) !== resolve(workspace.baseClone) ||
+      resolve(binding.baseClone) !== expectedBaseClone ||
+      resolve(workspace.baseClone) !== expectedBaseClone ||
       resolve(binding.worktree) !== expectedWorktree
     ) {
       throw new Error(`workspace binding mismatch for flow ${workspace.flowInstanceId}`);
     }
-    await this.#run("git", ["worktree", "remove", expectedWorktree], { cwd: workspace.baseClone });
-    await rm(bindingPath);
+    await this.#assertOrigin(expectedWorktree, binding);
+    await this.#assertWorktreeBase(dataRoot, expectedWorktree, workspace.baseClone);
+    await this.#run("git", ["worktree", "remove", "--force", expectedWorktree], { cwd: workspace.baseClone });
+    await removeSafeFile(dataRoot, bindingPath, "workspace binding");
   }
 
   async #prepareBaseClone(
+    dataRoot: string,
     baseClone: string,
     repository: ProviderRepository,
     identity: RepositoryIdentity,
@@ -139,6 +190,7 @@ export class WorkspaceManager {
     if (!preparation) {
       preparation = (async () => {
         if (!(await pathExists(baseClone))) {
+          await assertSafeWritableFile(dataRoot, baseClone, "base clone path");
           const executable = identity.provider === "github" ? "gh" : "glab";
           await this.#run(executable, ["repo", "clone", repository.cloneUrl, baseClone]);
         }
@@ -152,16 +204,36 @@ export class WorkspaceManager {
     } else {
       await preparation;
     }
-    await assertDirectory(baseClone, "base clone");
+    await assertSafeDirectory(dataRoot, baseClone, "base clone");
     await this.#assertOrigin(baseClone, identity);
+  }
+
+  async #removeCreatedWorktree(dataRoot: string, worktree: string, baseClone: string): Promise<void> {
+    await assertSafeDirectory(dataRoot, worktree, "worktree");
+    await this.#assertWorktreeBase(dataRoot, worktree, baseClone);
+    await this.#run("git", ["worktree", "remove", "--force", worktree], { cwd: baseClone });
+  }
+
+  async #assertWorktreeBase(dataRoot: string, worktree: string, baseClone: string): Promise<void> {
+    await assertSafeDirectory(dataRoot, worktree, "worktree");
+    const result = await this.#run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      cwd: worktree,
+    });
+    const actual = await realpath(result.stdout.trim());
+    const expected = await assertSafeDirectory(dataRoot, join(baseClone, ".git"), "base clone Git directory");
+    if (actual !== expected) throw new Error(`worktree is not registered to base clone: ${worktree}`);
   }
 
   async #assertOrigin(directory: string, expected: RepositoryIdentity): Promise<void> {
     const result = await this.#run("git", ["remote", "get-url", "origin"], { cwd: directory });
     const actual = parseRemoteIdentity(result.stdout);
-    if (actual.host !== expected.host || !sameRepository(actual.name, expected.name, expected.provider)) {
+    if (
+      actual.host !== expected.host ||
+      !samePath(actual.path, expected.remotePath, expected.provider)
+    ) {
       throw new Error(
-        `repository identity mismatch: expected ${expected.host}/${expected.name}, received ${actual.host}/${actual.name}`,
+        `repository identity mismatch: expected ${expected.host}/${expected.remotePath}, ` +
+        `received ${actual.host}/${actual.path}`,
       );
     }
   }
@@ -169,20 +241,20 @@ export class WorkspaceManager {
 
 function repositoryIdentity(repository: ProviderRepository): RepositoryIdentity {
   const host = normalizeHost(repository.host);
-  const name = normalizeName(repository.name);
+  const name = normalizePath(repository.name);
   const clone = parseRemoteIdentity(repository.cloneUrl);
-  if (clone.host !== host || !sameRepository(clone.name, name, repository.provider)) {
+  if (clone.host !== host || !pathEndsWithRepository(clone.path, name, repository.provider)) {
     throw new Error(
-      `repository identity mismatch: expected ${host}/${name}, received ${clone.host}/${clone.name}`,
+      `repository identity mismatch: expected ${host}/.../${name}, received ${clone.host}/${clone.path}`,
     );
   }
-  return { provider: repository.provider, host, name };
+  return { provider: repository.provider, host, name, remotePath: clone.path };
 }
 
 function assertTicket(repository: RepositoryIdentity, ticket: TicketRef): void {
   if (
     ticket.provider !== repository.provider ||
-    !sameRepository(ticket.repository, repository.name, repository.provider) ||
+    !samePath(ticket.repository, repository.name, repository.provider) ||
     !Number.isSafeInteger(ticket.number) ||
     ticket.number < 1
   ) {
@@ -190,11 +262,11 @@ function assertTicket(repository: RepositoryIdentity, ticket: TicketRef): void {
   }
 }
 
-function parseRemoteIdentity(remote: string): { host: string; name: string } {
+function parseRemoteIdentity(remote: string): { host: string; path: string } {
   const value = remote.trim();
   const scp = /^(?:[^@/]+@)?([^:/]+):(.+)$/.exec(value);
   if (scp && !value.includes("://")) {
-    return { host: normalizeHost(scp[1]!), name: normalizeName(scp[2]!) };
+    return { host: normalizeHost(scp[1]!), path: normalizePath(scp[2]!) };
   }
   let url: URL;
   try {
@@ -202,7 +274,7 @@ function parseRemoteIdentity(remote: string): { host: string; name: string } {
   } catch (error) {
     throw new Error(`invalid repository remote: ${value}`, { cause: error });
   }
-  return { host: normalizeHost(url.host), name: normalizeName(decodeURIComponent(url.pathname)) };
+  return { host: normalizeHost(url.host), path: normalizePath(decodeURIComponent(url.pathname)) };
 }
 
 function normalizeHost(host: string): string {
@@ -213,25 +285,36 @@ function normalizeHost(host: string): string {
   return normalized;
 }
 
-function normalizeName(name: string): string {
-  const normalized = name.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+function normalizePath(path: string): string {
+  const normalized = path.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
   const segments = normalized.split("/");
   if (
-    normalized !== name.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "") ||
     segments.length < 2 ||
     segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("\\"))
   ) {
-    throw new Error(`invalid repository name: ${name}`);
+    throw new Error(`invalid repository path: ${path}`);
   }
   return normalized;
 }
 
-function sameRepository(left: string, right: string, provider: ProviderRepository["provider"]): boolean {
-  return provider === "github" ? left.toLowerCase() === right.toLowerCase() : left === right;
+function pathEndsWithRepository(
+  path: string,
+  repository: string,
+  provider: ProviderRepository["provider"],
+): boolean {
+  const left = provider === "github" ? path.toLowerCase() : path;
+  const right = provider === "github" ? repository.toLowerCase() : repository;
+  return left === right || left.endsWith(`/${right}`);
 }
 
-function assertUuid(value: string, label: string): void {
-  if (!UUID.test(value)) throw new Error(`${label} must be a UUID`);
+function repositoryKey(identity: RepositoryIdentity): string {
+  return createHash("sha256")
+    .update(`${identity.provider}\0${identity.host}\0${identity.remotePath}`)
+    .digest("hex");
+}
+
+function samePath(left: string, right: string, provider: ProviderRepository["provider"]): boolean {
+  return provider === "github" ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -244,12 +327,8 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function assertDirectory(path: string, label: string): Promise<void> {
-  const info = await lstat(path);
-  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${label} is not a directory: ${path}`);
-}
-
-async function readBinding(path: string): Promise<WorkspaceBinding> {
+async function readBinding(dataRoot: string, path: string): Promise<WorkspaceBinding> {
+  await assertSafeFile(dataRoot, path, "workspace binding");
   let value: unknown;
   try {
     value = JSON.parse(await readFile(path, "utf8"));
@@ -260,6 +339,12 @@ async function readBinding(path: string): Promise<WorkspaceBinding> {
     throw new Error(`invalid workspace binding: ${path}`);
   }
   return value as WorkspaceBinding;
+}
+
+async function writeBinding(dataRoot: string, path: string, binding: WorkspaceBinding): Promise<void> {
+  await assertSafeWritableFile(dataRoot, path, "workspace binding path");
+  await writeFile(path, `${JSON.stringify(binding)}\n`, { flag: "wx", mode: 0o600 });
+  await assertSafeFile(dataRoot, path, "workspace binding");
 }
 
 function assertBinding(actual: WorkspaceBinding, expected: WorkspaceBinding): void {
