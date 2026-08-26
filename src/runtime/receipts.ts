@@ -12,6 +12,7 @@ import type {
 import type {
   NormalizedChangeRequest,
   ProviderAdapter,
+  ProviderComment,
   ProviderTicketSnapshot,
   TicketRef,
 } from "../provider/types.js";
@@ -68,21 +69,23 @@ export async function readAndVerifyReceipt(
   assertUniqueArtifacts(receipt.artifacts);
   assertResultContract(receipt, expected.resultContract);
 
+  const verifiedComments: ProviderComment[] = [];
   for (const artifact of receipt.artifacts) {
     if (artifact.kind === "comment") {
-      await verifyComment(artifact, expected, provider);
+      verifiedComments.push(await verifyComment(artifact, expected, provider));
     }
   }
 
+  let development: { artifact: ReceiptChangeRequest; published: NormalizedChangeRequest } | null = null;
   if (receipt.outcome === "succeeded" && expected.resultContract === "development") {
     const artifact = receipt.artifacts[0] as ReceiptChangeRequest;
-    const linked = await readLinkedChange(expected, provider);
-    assertChange(artifact, linked, expected.ticket);
     const published = await providerRead(() =>
       provider.readChangeRequest(expected.ticket, artifact.number));
     assertChange(artifact, published, expected.ticket);
+    development = { artifact, published };
   }
 
+  let reviewedChange: NormalizedChangeRequest | null = null;
   if (receipt.outcome === "succeeded" && expected.resultContract === "review") {
     const artifact = receipt.artifacts[0] as ReceiptReview;
     if (expected.pinnedHeadSha === null) invalid("review requires a pinned head SHA");
@@ -93,9 +96,33 @@ export async function readAndVerifyReceipt(
     const published = await providerRead(() =>
       provider.readReview(expected.ticket, linked.number, artifact.id));
     assertReview(artifact, published, expected);
+    reviewedChange = linked;
   }
 
-  if (receipt.humanGate) await verifyHumanGate(receipt, expected, provider);
+  if (receipt.humanGate) {
+    verifiedComments.push(await verifyHumanGate(receipt, expected, provider));
+  }
+
+  if (verifiedComments.length > 0 || development || reviewedChange) {
+    const finalTicket = await providerRead(() => provider.readTicket(expected.ticket));
+    assertTicketSnapshot(finalTicket, expected.ticket);
+    assertCommentMembership(verifiedComments, finalTicket.comments);
+
+    if (development) {
+      const linked = requireLinkedChange(finalTicket, expected.ticket);
+      assertChange(development.artifact, linked, expected.ticket);
+      assertSameChange(linked, development.published);
+    }
+
+    if (reviewedChange) {
+      const linked = requireLinkedChange(finalTicket, expected.ticket);
+      assertSameChange(linked, reviewedChange);
+      if (linked.state !== "open") invalid("linked change request state is not open for review");
+      if (linked.headSha !== expected.pinnedHeadSha) {
+        invalid("linked change request head SHA does not match the pinned head SHA");
+      }
+    }
+  }
   return receipt;
 }
 
@@ -178,7 +205,12 @@ function assertResultContract(receipt: AgentReceipt, contract: ResultContract): 
       if (!receipt.humanGate
         || receipt.artifacts.length > 1
         || receipt.artifacts.some((artifact) => artifact.kind !== "comment" || artifact.artifactKind !== "question")) {
-        invalid("human-gate success requires one human gate and at most one question artifact");
+        invalid("human-gate success requires one human gate and a valid question artifact set");
+      }
+      if ((receipt.humanGate.verdict === "approved" || receipt.humanGate.verdict === "changes-requested")
+        ? receipt.artifacts.length !== 0
+        : receipt.artifacts.length !== 1) {
+        invalid("human-gate question does not match its verdict");
       }
       break;
     case "none":
@@ -209,7 +241,7 @@ async function verifyComment(
   artifact: ReceiptComment,
   expected: ReceiptExpectation,
   provider: ProviderAdapter,
-): Promise<void> {
+): Promise<ProviderComment> {
   const expectedMarker = marker(expected, artifact.artifactKind);
   if (artifact.marker !== expectedMarker) invalid("receipt comment marker does not match its artifact kind");
   const published = await providerRead(() => provider.readComment(expected.ticket, artifact.id));
@@ -220,6 +252,7 @@ async function verifyComment(
   if (lines[1]?.startsWith("<!-- agent-flow-review:")) {
     invalid("non-review comment contains review metadata");
   }
+  return published;
 }
 
 async function readLinkedChange(
@@ -228,11 +261,7 @@ async function readLinkedChange(
 ): Promise<NormalizedChangeRequest> {
   const ticket = await providerRead(() => provider.readTicket(expected.ticket));
   assertTicketSnapshot(ticket, expected.ticket);
-  if (!ticket.changeRequest) invalid("ticket does not have one linked change request");
-  const linked = ticket.changeRequest;
-  if (linked.provider !== expected.ticket.provider) invalid("linked change request provider does not match the ticket");
-  if (linked.repository !== expected.ticket.repository) invalid("linked change request repository does not match the ticket");
-  return linked;
+  return requireLinkedChange(ticket, expected.ticket);
 }
 
 function assertTicketSnapshot(snapshot: ProviderTicketSnapshot, expected: TicketRef): void {
@@ -247,6 +276,17 @@ function assertTicketSnapshot(snapshot: ProviderTicketSnapshot, expected: Ticket
   }
 }
 
+function requireLinkedChange(
+  ticket: ProviderTicketSnapshot,
+  expected: TicketRef,
+): NormalizedChangeRequest {
+  if (!ticket.changeRequest) invalid("ticket does not have one linked change request");
+  const linked = ticket.changeRequest;
+  if (linked.provider !== expected.provider) invalid("linked change request provider does not match the ticket");
+  if (linked.repository !== expected.repository) invalid("linked change request repository does not match the ticket");
+  return linked;
+}
+
 function assertChange(
   artifact: ReceiptChangeRequest,
   published: NormalizedChangeRequest,
@@ -258,6 +298,34 @@ function assertChange(
   if (published.url !== artifact.url) invalid("change request URL does not match the receipt");
   if (published.headSha !== artifact.headSha) invalid("change request head SHA does not match the receipt");
   if (published.state !== artifact.state) invalid("change request state does not match the receipt");
+}
+
+function assertSameChange(left: NormalizedChangeRequest, right: NormalizedChangeRequest): void {
+  if (left.provider !== right.provider
+    || left.repository !== right.repository
+    || left.number !== right.number
+    || left.url !== right.url
+    || left.headSha !== right.headSha
+    || left.state !== right.state) {
+    invalid("linked change request changed during receipt verification");
+  }
+}
+
+function assertCommentMembership(
+  verified: ProviderComment[],
+  ticketComments: ProviderComment[],
+): void {
+  for (const comment of verified) {
+    const matches = ticketComments.filter((candidate) =>
+      candidate.id === comment.id
+      && candidate.url === comment.url
+      && candidate.body === comment.body
+      && candidate.actor.login === comment.actor.login
+      && candidate.actor.providerId === comment.actor.providerId
+      && candidate.createdAt === comment.createdAt
+      && candidate.updatedAt === comment.updatedAt);
+    if (matches.length !== 1) invalid("verified comment does not belong to the expected ticket");
+  }
 }
 
 function assertReview(
@@ -282,7 +350,7 @@ async function verifyHumanGate(
   receipt: AgentReceipt,
   expected: ReceiptExpectation,
   provider: ProviderAdapter,
-): Promise<void> {
+): Promise<ProviderComment> {
   const gate = receipt.humanGate!;
   const source = await providerRead(() => provider.readComment(expected.ticket, gate.sourceCommentId));
   if (source.id !== gate.sourceCommentId) invalid("human-gate source comment ID does not match");
@@ -291,6 +359,7 @@ async function verifyHumanGate(
   }
   const permission = await providerRead(() => provider.permission(expected.ticket.repository, source.actor));
   if (!AUTHORIZED_PERMISSIONS.has(permission)) invalid("human-gate source actor lacks write permission");
+  return source;
 }
 
 async function providerRead<T>(operation: () => Promise<T>): Promise<T> {

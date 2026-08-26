@@ -155,7 +155,8 @@ class FakeProvider implements ProviderAdapter {
   readonly kind = "github" as const;
   calls: string[] = [];
   comment = providerComment();
-  ticket = snapshot();
+  ticket: ProviderTicketSnapshot | null = null;
+  ticketAfterArtifactRead: ProviderTicketSnapshot | null = null;
   changeRequest = change();
   review = review();
   sourceComment = providerComment({ id: "201", url: HUMAN_URL, body: "Approved with one note." });
@@ -176,7 +177,10 @@ class FakeProvider implements ProviderAdapter {
   async readRepository(_repository: string): Promise<ProviderRepository> { throw new Error("unused"); }
   async readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot> {
     assert.deepEqual(ref, TICKET);
-    return this.record("readTicket", this.ticket);
+    return this.record("readTicket", this.ticket ?? snapshot({
+      comments: [this.comment, this.sourceComment],
+      changeRequest: this.changeRequest,
+    }));
   }
   async permission(repository: string, actor: Actor): Promise<Permission> {
     assert.equal(repository, TICKET.repository);
@@ -197,13 +201,17 @@ class FakeProvider implements ProviderAdapter {
   async readChangeRequest(ref: TicketRef, number: number): Promise<NormalizedChangeRequest> {
     assert.deepEqual(ref, TICKET);
     assert.equal(number, 31);
-    return this.record(`readChangeRequest:${number}`, this.changeRequest);
+    const result = this.record(`readChangeRequest:${number}`, this.changeRequest);
+    if (this.ticketAfterArtifactRead) this.ticket = this.ticketAfterArtifactRead;
+    return result;
   }
   async readReview(ref: TicketRef, changeNumber: number, id: string): Promise<NormalizedReview> {
     assert.deepEqual(ref, TICKET);
     assert.equal(changeNumber, 31);
     assert.equal(id, "701");
-    return this.record(`readReview:${changeNumber}:${id}`, this.review);
+    const result = this.record(`readReview:${changeNumber}:${id}`, this.review);
+    if (this.ticketAfterArtifactRead) this.ticket = this.ticketAfterArtifactRead;
+    return result;
   }
 }
 
@@ -247,7 +255,7 @@ test("accepts only a marked assessment that the provider reads back", async () =
   const result = await verify(receipt([commentArtifact()]), "assessment", provider);
 
   assert.equal(result.attemptId, ATTEMPT_ID);
-  assert.deepEqual(provider.calls, ["readComment:101"]);
+  assert.deepEqual(provider.calls, ["readComment:101", "readTicket"]);
 });
 
 test("rejects malformed, oversized, and schema-invalid receipt JSON", async (context) => {
@@ -280,24 +288,24 @@ test("accepts each successful result contract", async (context) => {
       body: `${marker("plan")}\nComplete plan.`,
     });
     await verify(receipt([commentArtifact("plan")]), "plan", provider);
-    assert.deepEqual(provider.calls, ["readComment:101"]);
+    assert.deepEqual(provider.calls, ["readComment:101", "readTicket"]);
   });
   await context.test("development", async () => {
     const provider = new FakeProvider();
     await verify(receipt([changeArtifact()]), "development", provider);
-    assert.deepEqual(provider.calls, ["readTicket", "readChangeRequest:31"]);
+    assert.deepEqual(provider.calls, ["readChangeRequest:31", "readTicket"]);
   });
   await context.test("review", async () => {
     const provider = new FakeProvider();
     await verify(receipt([reviewArtifact()]), "review", provider);
-    assert.deepEqual(provider.calls, ["readTicket", "readReview:31:701"]);
+    assert.deepEqual(provider.calls, ["readTicket", "readReview:31:701", "readTicket"]);
   });
   await context.test("human gate without duplicating the source comment artifact", async () => {
     const provider = new FakeProvider();
     await verify(receipt([], {
       humanGate: { sourceCommentId: "201", verdict: "approved", notes: ["One nonblocking note."] },
     }), "human-gate", provider);
-    assert.deepEqual(provider.calls, ["readComment:201", "permission"]);
+    assert.deepEqual(provider.calls, ["readComment:201", "permission", "readTicket"]);
   });
   await context.test("none", async () => {
     const provider = new FakeProvider();
@@ -311,7 +319,7 @@ test("accepts one verified question for needs-human agent outcomes", async () =>
     const provider = new FakeProvider();
     provider.comment = providerComment({ body: `${marker("question")}\nWhich API should be used?` });
     await verify(receipt([commentArtifact("question")], { outcome: "needs-human" }), contract, provider);
-    assert.deepEqual(provider.calls, ["readComment:101"]);
+    assert.deepEqual(provider.calls, ["readComment:101", "readTicket"]);
   }
 });
 
@@ -327,7 +335,7 @@ test("accepts failed receipts with only an optional verified diagnostic", async 
       outcome: "failed",
       error: { code: "TEST_FAILED", message: "The test suite failed." },
     }), "development", provider);
-    assert.deepEqual(provider.calls, ["readComment:101"]);
+    assert.deepEqual(provider.calls, ["readComment:101", "readTicket"]);
   });
 });
 
@@ -395,6 +403,26 @@ test("rejects missing or mismatched comment publications", async (context) => {
   });
 });
 
+test("rejects comments that do not belong to the final expected ticket snapshot", async (context) => {
+  await context.test("receipt artifact from another ticket", () => {
+    const provider = new FakeProvider();
+    provider.ticket = snapshot({ comments: [] });
+    return invalid(verify(receipt([commentArtifact()]), "assessment", provider), /expected ticket/);
+  });
+  await context.test("same identity with different body", () => {
+    const provider = new FakeProvider();
+    provider.ticket = snapshot({ comments: [providerComment({ body: `${marker("assessment")}\nOther body.` })] });
+    return invalid(verify(receipt([commentArtifact()]), "assessment", provider), /expected ticket/);
+  });
+  await context.test("authorized human source from another ticket", () => {
+    const provider = new FakeProvider();
+    provider.ticket = snapshot({ comments: [] });
+    return invalid(verify(receipt([], {
+      humanGate: { sourceCommentId: "201", verdict: "approved", notes: [] },
+    }), "human-gate", provider), /expected ticket/);
+  });
+});
+
 test("rejects an unlinked or mismatched development change request", async (context) => {
   await context.test("unlinked", () => {
     const provider = new FakeProvider();
@@ -455,6 +483,25 @@ test("rejects stale or mismatched review publications", async (context) => {
   }
 });
 
+test("rejects linked change mutations after artifact readback", async (context) => {
+  for (const [name, overrides] of [
+    ["number", { number: 32 }],
+    ["head", { headSha: OLD_HEAD }],
+    ["state", { state: "closed" as const }],
+  ] as const) {
+    await context.test(`development ${name}`, () => {
+      const provider = new FakeProvider();
+      provider.ticketAfterArtifactRead = snapshot({ changeRequest: change(overrides) });
+      return invalid(verify(receipt([changeArtifact()]), "development", provider), /change request/);
+    });
+    await context.test(`review ${name}`, () => {
+      const provider = new FakeProvider();
+      provider.ticketAfterArtifactRead = snapshot({ changeRequest: change(overrides) });
+      return invalid(verify(receipt([reviewArtifact()]), "review", provider), /change request/);
+    });
+  }
+});
+
 test("verifies human-gate source identity, content, and permission", async (context) => {
   const humanReceipt = receipt([], {
     humanGate: { sourceCommentId: "201", verdict: "approved", notes: [] },
@@ -486,8 +533,36 @@ test("verifies human-gate source identity, content, and permission", async (cont
     await verify(receipt([commentArtifact("question")], {
       humanGate: { sourceCommentId: "201", verdict: "unclear", notes: ["The intent is unclear."] },
     }), "human-gate", provider);
-    assert.deepEqual(provider.calls, ["readComment:101", "readComment:201", "permission"]);
+    assert.deepEqual(provider.calls, ["readComment:101", "readComment:201", "permission", "readTicket"]);
   });
+});
+
+test("enforces the human-gate verdict and question matrix", async (context) => {
+  const humanReceipt = (
+    verdict: "approved" | "changes-requested" | "question" | "unclear",
+    withQuestion: boolean,
+  ) => receipt(withQuestion ? [commentArtifact("question")] : [], {
+    humanGate: { sourceCommentId: "201", verdict, notes: [] },
+  });
+
+  for (const verdict of ["approved", "changes-requested"] as const) {
+    await context.test(`accepts ${verdict} without a question`, () =>
+      verify(humanReceipt(verdict, false), "human-gate"));
+    await context.test(`rejects ${verdict} with a question`, () => {
+      const provider = new FakeProvider();
+      provider.comment = providerComment({ body: `${marker("question")}\nCould you clarify?` });
+      return invalid(verify(humanReceipt(verdict, true), "human-gate", provider), /question/);
+    });
+  }
+  for (const verdict of ["question", "unclear"] as const) {
+    await context.test(`accepts ${verdict} with one question`, () => {
+      const provider = new FakeProvider();
+      provider.comment = providerComment({ body: `${marker("question")}\nCould you clarify?` });
+      return verify(humanReceipt(verdict, true), "human-gate", provider);
+    });
+    await context.test(`rejects ${verdict} without a question`, () =>
+      invalid(verify(humanReceipt(verdict, false), "human-gate"), /question/));
+  }
 });
 
 test("sanitizes provider exceptions", async () => {
