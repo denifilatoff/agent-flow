@@ -35,6 +35,11 @@ async function loadFixture(name: "invalid-target" | "duplicate-repository"): Pro
 
 test("accepts the shipped bundle", async () => {
   const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
+  assert.deepEqual(bundle.flow.spec.states["needs-human"].on?.["agent-needs-human"], {
+    target: "needs-human",
+    guards: ["receipt-valid"],
+    actions: ["record-receipt"],
+  });
   await assert.doesNotReject(validateSemantics(bundle));
 });
 

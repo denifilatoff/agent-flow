@@ -147,6 +147,10 @@ spec:
     needs-human:
       kind: paused
       "on":
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt]
         human-answer-cancelled:
           target: cancelled
           guards: [authorized-actor, receipt-valid]
