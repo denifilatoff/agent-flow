@@ -33,52 +33,70 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
     controlState: { attemptSeries: { agentId: string; current: { attemptId: string } } };
   };
   const endpoint = new URL("/__fixture/attempt", context.ticket.repository.cloneRoot);
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-fixture-target": target },
-    body: JSON.stringify(context),
-  });
-  if (!response.ok) {
-    console.error(await response.text());
-    return 2;
-  }
-  const result = await response.json() as { mode: string; receipt?: unknown };
-  const completed = () => fetch(new URL("/__fixture/completed", endpoint), {
+  const cancellation = waitForCancellation();
+  let completion: Promise<unknown> | undefined;
+  const completed = () => completion ??= fetch(new URL("/__fixture/completed", endpoint), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ attemptId: context.controlState.attemptSeries.current.attemptId }),
-  }).catch(() => undefined);
+  }).then(async (response) => {
+    if (!response.ok) throw new Error(await response.text());
+  });
   try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-fixture-target": target },
+      body: JSON.stringify(context),
+    });
+    if (!response.ok) {
+      console.error(await response.text());
+      return 2;
+    }
+    const result = await response.json() as { mode: string; receipt?: unknown };
+    const ready = await fetch(new URL("/__fixture/ready", endpoint), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ attemptId: context.controlState.attemptSeries.current.attemptId }),
+    });
+    if (!ready.ok) throw new Error(await ready.text());
     if (result.mode === "exit-failure") return 1;
     if (result.mode === "late") {
-      await terminated(async () => {
-        const late = await fetch(new URL("/__fixture/late", endpoint), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(context),
-        });
-        if (!late.ok) throw new Error(await late.text());
-        const published = await late.json() as { receipt: unknown };
-        await writeFile(receiptPath, `${JSON.stringify(published.receipt)}\n`, { mode: 0o600 });
+      await cancellation.signal;
+      const late = await fetch(new URL("/__fixture/late", endpoint), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(context),
       });
+      if (!late.ok) throw new Error(await late.text());
+      const published = await late.json() as { receipt: unknown };
+      await writeFile(receiptPath, `${JSON.stringify(published.receipt)}\n`, { mode: 0o600 });
       return 0;
     }
     if (result.receipt) await writeFile(receiptPath, `${JSON.stringify(result.receipt)}\n`, { mode: 0o600 });
-    if (result.mode === "block") await terminated();
+    if (result.mode === "block") await cancellation.signal;
     return 0;
   } finally {
+    cancellation.close();
     await completed();
   }
 }
 
-function terminated(onSignal: () => Promise<void> = async () => undefined): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const keepAlive = setInterval(() => undefined, 1_000);
-    process.once("SIGTERM", () => {
+function waitForCancellation(): { signal: Promise<void>; close(): void } {
+  let resolveSignal!: () => void;
+  const signal = new Promise<void>((resolve) => { resolveSignal = resolve; });
+  const keepAlive = setInterval(() => undefined, 1_000);
+  const onSignal = () => {
+    clearInterval(keepAlive);
+    resolveSignal();
+  };
+  process.once("SIGTERM", onSignal);
+  return {
+    signal,
+    close() {
       clearInterval(keepAlive);
-      void onSignal().then(resolve, reject);
-    });
-  });
+      process.removeListener("SIGTERM", onSignal);
+    },
+  };
 }
 
 async function record(event: Record<string, string>): Promise<void> {

@@ -6,15 +6,20 @@ import test from "node:test";
 
 import { startFixture } from "../fixtures/provider-server.ts";
 
-test("a persisted started attempt resumes with its finite retry budget", async (t) => {
-  const run = await startFixture("github", { firstAttempt: "block" });
-  t.after(() => run.close());
-  await run.untilAttempt("started");
-  await run.restart();
-  await run.untilState("assessment-review");
-  assert.equal((await run.control()).attemptSeries?.consumed, 2);
-  assert.equal(await run.activeProcesses(), 0);
-  assert.equal(await run.maximumConcurrentAttempts(), 1);
+test("persisted started attempts repeatedly resume with their finite retry budget", async () => {
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    const run = await startFixture("github", { firstAttempt: "block" });
+    try {
+      await run.untilAttempt("started");
+      await run.restart();
+      await run.untilState("assessment-review");
+      assert.equal((await run.control()).attemptSeries?.consumed, 2);
+      assert.equal(await run.activeProcesses(), 0);
+      assert.equal(await run.maximumConcurrentAttempts(), 1);
+    } finally {
+      await run.close();
+    }
+  }
 });
 
 test("a transient exit consumes budget and retries in a new session", async (t) => {
@@ -27,26 +32,31 @@ test("a transient exit consumes budget and retries in a new session", async (t) 
   assert.equal(await run.maximumConcurrentAttempts(), 1);
 });
 
-test("activation removal cancels a live process and ignores its late receipt", async (t) => {
-  const run = await startFixture("github", { firstAttempt: "late" });
-  t.after(() => run.close());
-  await run.untilAttempt("started");
-  assert.equal(await run.latestAgentComment(), null);
-  assert.deepEqual(await run.receipts(), []);
-  await run.removeActivation();
-  await run.reconcile();
-  const control = await run.control();
-  const [receipt] = await run.receipts();
-  assert.equal(receipt?.outcome, "succeeded");
-  assert.equal(receipt?.artifacts[0]?.kind, "comment");
-  assert.match((await run.latestAgentComment())!.body, /artifact=assessment/);
-  assert.equal(control.stateId, "cancelled");
-  assert.equal(control.latestReceipt, null);
-  assert.equal(control.changeRequest, null);
-  assert.equal(control.humanGate, null);
-  assert.equal(control.attemptSeries?.current?.status, "cancelled");
-  assert.equal(await run.activeProcesses(), 0);
-  assert.equal(await run.maximumConcurrentAttempts(), 1);
+test("activation removal repeatedly cancels a ready process and ignores its late receipt", async () => {
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    const run = await startFixture("github", { firstAttempt: "late" });
+    try {
+      await run.untilAttempt("started");
+      assert.equal(await run.latestAgentComment(), null);
+      assert.deepEqual(await run.receipts(), []);
+      await run.removeActivation();
+      await run.reconcile();
+      const control = await run.control();
+      const [receipt] = await run.receipts();
+      assert.equal(receipt?.outcome, "succeeded");
+      assert.equal(receipt?.artifacts[0]?.kind, "comment");
+      assert.match((await run.latestAgentComment())!.body, /artifact=assessment/);
+      assert.equal(control.stateId, "cancelled");
+      assert.equal(control.latestReceipt, null);
+      assert.equal(control.changeRequest, null);
+      assert.equal(control.humanGate, null);
+      assert.equal(control.attemptSeries?.current?.status, "cancelled");
+      assert.equal(await run.activeProcesses(), 0);
+      assert.equal(await run.maximumConcurrentAttempts(), 1);
+    } finally {
+      await run.close();
+    }
+  }
 });
 
 test("a changed review head invalidates the old result", async (t) => {

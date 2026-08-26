@@ -292,7 +292,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
         const current = control?.attemptSeries?.current;
         return control?.attemptSeries?.stateId === control?.stateId
           && current?.status === status
-          && (status !== "started" || state.activeAttempts.has(current.attemptId));
+          && (status !== "started" || state.readyAttempts.has(current.attemptId));
       });
     },
     untilState,
@@ -320,6 +320,7 @@ class FixtureState {
   readonly reviews = new Map<string, StoredReview>();
   readonly nextModes = new Map<string, AttemptMode[]>();
   readonly activeAttempts = new Set<string>();
+  readonly readyAttempts = new Set<string>();
   readonly routing: Array<Omit<RoutingEvent, "kind">> = [];
   labels = ["agent-flow:development"];
   open = true;
@@ -419,7 +420,16 @@ class FixtureState {
       return this.attempt(body as AttemptContext, request.headers["x-fixture-target"], response);
     }
     if (url.pathname === "/__fixture/completed" && request.method === "POST") {
-      this.activeAttempts.delete(String((body as { attemptId: string }).attemptId));
+      const attemptId = String((body as { attemptId: string }).attemptId);
+      if (!this.activeAttempts.has(attemptId)) return json(response, 409, { message: "attempt is not active" });
+      this.activeAttempts.delete(attemptId);
+      this.readyAttempts.delete(attemptId);
+      return json(response, 200, { ok: true });
+    }
+    if (url.pathname === "/__fixture/ready" && request.method === "POST") {
+      const attemptId = String((body as { attemptId: string }).attemptId);
+      if (!this.activeAttempts.has(attemptId)) return json(response, 409, { message: "attempt is not active" });
+      this.readyAttempts.add(attemptId);
       return json(response, 200, { ok: true });
     }
     if (url.pathname === "/__fixture/late" && request.method === "POST") {
