@@ -206,8 +206,10 @@ class FakeProvider implements ProviderAdapter {
   ticketReads: ProviderTicketSnapshot[] = [];
   comments = new Map<string, ProviderComment>();
   changeRequest = change();
+  changeReadError: Error | null = null;
   foundReview: NormalizedReview | null = review();
   reviewReadback = review();
+  reviewReadError: Error | null = null;
   actorPermission: Permission = "write";
   failure: Error | null = null;
   duplicateReview = false;
@@ -252,7 +254,7 @@ class FakeProvider implements ProviderAdapter {
   }
   async readChangeRequest(ref: TicketRef, number: number): Promise<NormalizedChangeRequest> {
     assert.deepEqual(ref, this.expectedTicket);
-    assert.equal(number, this.changeRequest.number);
+    if (this.changeReadError) throw this.changeReadError;
     return this.record(`readChangeRequest:${number}`, this.changeRequest);
   }
   async findReview(ref: TicketRef, number: number, reviewMarker: string): Promise<NormalizedReview | null> {
@@ -267,6 +269,7 @@ class FakeProvider implements ProviderAdapter {
   async readReview(ref: TicketRef, number: number, id: string): Promise<NormalizedReview> {
     assert.deepEqual(ref, this.expectedTicket);
     assert.equal(number, this.changeRequest.number);
+    if (this.reviewReadError) throw this.reviewReadError;
     return this.record(`readReview:${number}:${id}`, this.reviewReadback);
   }
 }
@@ -491,12 +494,67 @@ test("treats missing fresh evidence as retryable", async (context) => {
       stateId: "development", resultContract: "development",
     }), provider), /change request/);
   });
+  await context.test("stale development change request", async () => {
+    const provider = new FakeProvider();
+    const stale = change({ updatedAt: "2026-08-27T09:59:59.999Z" });
+    provider.ticket = snapshot({ changeRequest: stale });
+    provider.changeRequest = stale;
+    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
+      stateId: "development", resultContract: "development",
+    }), provider), /change request/);
+    assert.deepEqual(provider.calls, ["readTicket"]);
+  });
   await context.test("review", async () => {
     const provider = new FakeProvider();
     provider.foundReview = null;
     await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
       stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
     }), provider), /review/);
+  });
+  await context.test("stale provider review", async () => {
+    const provider = new FakeProvider();
+    const stale = review({ submittedAt: "2026-08-27T09:59:59.999Z" });
+    provider.foundReview = stale;
+    provider.reviewReadback = stale;
+    await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
+      stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
+    }), provider), /review/);
+    assert.deepEqual(provider.calls, ["readTicket", "findReview:31"]);
+  });
+});
+
+test("treats evidence disappearing after discovery as a trust violation", async (context) => {
+  const missing = () => new ProviderHttpError("missing token=top-secret", 404, false, null, {});
+
+  await context.test("marked comment", async () => {
+    const provider = new FakeProvider();
+    provider.ticket = snapshot({ comments: [comment()] });
+    await trustFailure(readDecision({ event: "agent-succeeded" }, expectation(), provider));
+  });
+  await context.test("linked change request", async () => {
+    const provider = new FakeProvider();
+    provider.changeReadError = missing();
+    await trustFailure(readDecision({ event: "agent-succeeded" }, expectation({
+      stateId: "development", resultContract: "development",
+    }), provider));
+  });
+  await context.test("provider review", async () => {
+    const provider = new FakeProvider();
+    provider.reviewReadError = missing();
+    await trustFailure(readDecision({ event: "review-approved" }, expectation({
+      stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
+    }), provider));
+  });
+  await context.test("human source comment", async () => {
+    const provider = new FakeProvider();
+    const human = source();
+    provider.ticket = snapshot({ comments: [human] });
+    await trustFailure(readDecision({ event: "human-approved" }, expectation({
+      stateId: "assessment-review",
+      mode: "human-input",
+      resultContract: "human-gate",
+      sourceComment: human,
+    }), provider));
   });
 });
 
@@ -678,6 +736,67 @@ test("rejects mismatched or unauthorized human source comments", async (context)
       installComments(provider, [human]);
       provider.actorPermission = permission;
       await trustFailure(run(provider, human), /permission/);
+    });
+  }
+});
+
+test("rejects provider boundary contradictions after decision evidence", async (context) => {
+  await context.test("changed final comment body", async () => {
+    const provider = new FakeProvider();
+    const published = comment();
+    installComments(provider, [published]);
+    provider.ticketReads = [
+      snapshot({ comments: [published] }),
+      snapshot({ comments: [{ ...published, body: `${marker("assessment")}\nChanged body.` }] }),
+    ];
+    await trustFailure(readDecision({ event: "agent-succeeded" }, expectation(), provider), /expected ticket/);
+  });
+
+  await context.test("human source removed from final ticket", async () => {
+    const provider = new FakeProvider();
+    const human = source();
+    installComments(provider, [human]);
+    provider.ticketReads = [snapshot({ comments: [human] }), snapshot({ comments: [] })];
+    await trustFailure(readDecision({ event: "human-approved" }, expectation({
+      stateId: "assessment-review",
+      mode: "human-input",
+      resultContract: "human-gate",
+      sourceComment: human,
+    }), provider), /expected ticket/);
+  });
+
+  for (const [name, overrides] of [
+    ["provider", { provider: "gitlab" as const }],
+    ["repository", { repository: "other/repo" }],
+    ["number", { number: 32 }],
+  ] as const) {
+    await context.test(`development readback ${name}`, async () => {
+      const provider = new FakeProvider();
+      provider.changeRequest = change(overrides);
+      await trustFailure(readDecision({ event: "agent-succeeded" }, expectation({
+        stateId: "development", resultContract: "development",
+      }), provider), /identity/);
+    });
+  }
+
+  for (const [name, overrides] of [
+    ["number", { number: 32 }],
+    ["head", { headSha: OLD_HEAD }],
+    ["state", { state: "closed" as const }],
+  ] as const) {
+    await context.test(`final development ${name}`, async () => {
+      const provider = new FakeProvider();
+      provider.ticketReads = [snapshot(), snapshot({ changeRequest: change(overrides) })];
+      await trustFailure(readDecision({ event: "agent-succeeded" }, expectation({
+        stateId: "development", resultContract: "development",
+      }), provider), /change request/);
+    });
+    await context.test(`final review ${name}`, async () => {
+      const provider = new FakeProvider();
+      provider.ticketReads = [snapshot(), snapshot({ changeRequest: change(overrides) })];
+      await trustFailure(readDecision({ event: "review-approved" }, expectation({
+        stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
+      }), provider), /change request/);
     });
   }
 });

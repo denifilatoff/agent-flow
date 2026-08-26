@@ -213,7 +213,10 @@ export async function readDecisionAndBuildReceipt(
     }
   }
 
-  const finalTicket = await decisionProviderRead(() => provider.readTicket(expected.ticket));
+  const finalTicket = await decisionProviderReadback(
+    () => provider.readTicket(expected.ticket),
+    "provider ticket disappeared during final readback",
+  );
   assertDecisionTicket(finalTicket, expected.ticket);
   assertDecisionCommentMembership(verifiedComments, finalTicket, expected, provider.kind);
   if (verifiedChange) assertFinalDecisionChange(finalTicket, verifiedChange, expected);
@@ -253,7 +256,10 @@ async function discoverDecisionComment(
   if (matches.length > 1) decisionTrust("duplicate marked comment evidence was published");
 
   const discovered = matches[0]!;
-  const published = await decisionProviderRead(() => provider.readComment(expected.ticket, discovered.id));
+  const published = await decisionProviderReadback(
+    () => provider.readComment(expected.ticket, discovered.id),
+    "marked comment disappeared during readback",
+  );
   if (published.id !== discovered.id) decisionTrust("provider comment ID changed during readback");
   if (!sameCommentUrl(published.url, discovered.url, expected, provider.kind, discovered.id)) {
     decisionTrust("provider comment URL changed during readback");
@@ -282,9 +288,14 @@ async function readDecisionChange(
     decisionTrust("linked change request identity does not match the pinned change request");
   }
   if (linked.state !== "open") decisionTrust("linked change request state is not open");
+  if (linked.updatedAt < expected.startedAt) {
+    evidenceUnavailable("linked change request was not updated during the attempt");
+  }
 
-  const published = await decisionProviderRead(() =>
-    provider.readChangeRequest(expected.ticket, linked.number));
+  const published = await decisionProviderReadback(
+    () => provider.readChangeRequest(expected.ticket, linked.number),
+    "linked change request disappeared during readback",
+  );
   assertChangeTicketIdentity(published, expected.ticket);
   assertSameDecisionChange(linked, published);
   return published;
@@ -315,8 +326,13 @@ async function readDecisionReview(
     "provider review evidence could not be verified",
   );
   if (!discovered) evidenceUnavailable("provider review evidence is unavailable");
-  const published = await decisionProviderRead(() =>
-    provider.readReview(expected.ticket, linked.number, discovered.id));
+  if (discovered.submittedAt < expected.startedAt) {
+    evidenceUnavailable("provider review was not submitted during the attempt");
+  }
+  const published = await decisionProviderReadback(
+    () => provider.readReview(expected.ticket, linked.number, discovered.id),
+    "provider review disappeared during readback",
+  );
 
   if (published.id !== discovered.id) decisionTrust("provider review ID changed during readback");
   if (published.url !== discovered.url) decisionTrust("provider review URL changed during readback");
@@ -342,7 +358,10 @@ async function readHumanSource(
 ): Promise<ProviderComment> {
   const pinned = expected.sourceComment;
   if (!pinned) decisionTrust("human decision requires a pinned source comment");
-  const published = await decisionProviderRead(() => provider.readComment(expected.ticket, pinned.id));
+  const published = await decisionProviderReadback(
+    () => provider.readComment(expected.ticket, pinned.id),
+    "human source comment disappeared during readback",
+  );
   if (published.body.split(/\r?\n/, 1)[0]?.startsWith("<!-- agent-flow:")) {
     decisionTrust("human source comment must be unmarked");
   }
@@ -352,8 +371,10 @@ async function readHumanSource(
   if (!ticket.comments.some((comment) => sameProviderComment(comment, published, expected, provider.kind))) {
     decisionTrust("human source comment does not belong to the expected ticket");
   }
-  const permission = await decisionProviderRead(() =>
-    provider.permission(expected.ticket.repository, published.actor));
+  const permission = await decisionProviderReadback(
+    () => provider.permission(expected.ticket.repository, published.actor),
+    "human source permission could not be verified",
+  );
   if (!AUTHORIZED_PERMISSIONS.has(permission)) {
     decisionTrust("human source actor lacks write permission");
   }
@@ -524,13 +545,28 @@ async function decisionProviderRead<T>(
   operation: () => Promise<T>,
   trustMessage = "provider decision evidence could not be verified",
 ): Promise<T> {
+  return decisionProviderOperation(operation, trustMessage, false);
+}
+
+async function decisionProviderReadback<T>(
+  operation: () => Promise<T>,
+  trustMessage: string,
+): Promise<T> {
+  return decisionProviderOperation(operation, trustMessage, true);
+}
+
+async function decisionProviderOperation<T>(
+  operation: () => Promise<T>,
+  trustMessage: string,
+  missingIsTrustViolation: boolean,
+): Promise<T> {
   try {
     return await operation();
   } catch (error) {
     if (error instanceof DecisionError) throw error;
     if (error instanceof ProviderHttpError) {
       if (error.transient) throw new DecisionReadbackError();
-      if (error.status === 404 || error.status === 410) {
+      if (!missingIsTrustViolation && (error.status === 404 || error.status === 410)) {
         throw new DecisionEvidenceUnavailableError("provider decision evidence is unavailable");
       }
     }
