@@ -4,35 +4,19 @@ import test from "node:test";
 
 import { parse } from "yaml";
 
-const requiredMounts: Record<string, boolean> = {
-  "/config": true,
-  "/data": false,
-  "/home/agent/.config/gh": true,
-  "/home/agent/.config/glab-cli": true,
-  "/home/agent/.codex": true,
-  "/home/agent/.claude": true,
-  "/home/agent/.claude.json": true,
-};
+const requiredMounts = [
+  { source: "${AGENT_FLOW_CONFIG_PATH:-.}", target: "/config", readOnly: true },
+  { source: "${AGENT_FLOW_DATA_PATH:-./.agent-flow-data}", target: "/data", readOnly: false },
+  { source: "${HOME}/.config/gh", target: "/home/agent/.config/gh", readOnly: true },
+  { source: "${HOME}/.config/glab-cli", target: "/home/agent/.config/glab-cli", readOnly: true },
+  { source: "${HOME}/.codex", target: "/home/agent/.codex", readOnly: true },
+  { source: "${HOME}/.claude", target: "/home/agent/.claude", readOnly: true },
+  { source: "${HOME}/.claude.json", target: "/home/agent/.claude.json", readOnly: true },
+];
 
 test("locks the runtime image, tools, and controller service", async () => {
   const dockerfile = uncomment(await readFile("Dockerfile", "utf8"));
-  const from = dockerfile.match(/^FROM .+$/gm) ?? [];
-  assert.ok(from.length >= 2);
-  for (const instruction of from) assert.match(instruction, /@sha256:[a-f0-9]{64}(?:\s|$)/);
-  assert.match(dockerfile, /snapshot\.debian\.org\/archive\/debian\/\d{8}T\d{6}Z/);
-  assert.match(dockerfile, /snapshot\.debian\.org\/archive\/debian-security\/\d{8}T\d{6}Z/);
-  assert.match(dockerfile, /docker\/tools\/package-lock\.json/);
-  assert.match(dockerfile, /npm ci --omit=dev/);
-  assert.match(dockerfile, /docker\/apm-requirements\.txt/);
-  assert.match(dockerfile, /pip install .+--require-hashes/);
-  assert.match(dockerfile, /^COPY .+schemas .+schemas$/m);
-  assert.match(dockerfile, /^EXPOSE 8080$/m);
-  assert.match(dockerfile, /^CMD \["node", "dist\/main\.js"\]$/m);
-
-  const finalStage = dockerfile.slice(dockerfile.lastIndexOf("\nFROM ") + 1);
-  const users = finalStage.match(/^USER .+$/gm) ?? [];
-  assert.ok(users.length > 0);
-  assert.match(users.at(-1)!, /^USER (?!0(?:\D|$)|root(?:\D|$))\S+/);
+  assertDockerfileContract(dockerfile);
 
   const toolsLock = JSON.parse(await readFile("docker/tools/package-lock.json", "utf8")) as {
     packages: Record<string, { version?: string }>;
@@ -61,8 +45,32 @@ test("locks the runtime image, tools, and controller service", async () => {
   ]);
   assert.match(JSON.stringify(controller.healthcheck), /health\/ready/);
   assert.doesNotMatch(JSON.stringify(controller), /docker\.sock/);
-  const mounts = Object.fromEntries((controller.volumes ?? []).map(parseMount));
-  assert.deepEqual(mounts, requiredMounts);
+  assertMountContract(controller.volumes ?? []);
+});
+
+test("rejects runtime instructions placed only in a build stage", () => {
+  const digest = "a".repeat(64);
+  const dockerfile = `FROM node@sha256:${digest} AS build
+COPY docker/apm-requirements.txt /tmp/apm-requirements.txt
+RUN pip install --require-hashes --requirement /tmp/apm-requirements.txt
+COPY --from=tools /tools/node_modules /opt/tools/node_modules
+COPY schemas ./schemas
+USER 10001:10001
+EXPOSE 8080
+CMD ["node", "dist/main.js"]
+FROM node@sha256:${digest}
+USER 10001:10001`;
+
+  assert.throws(() => assertRuntimeStage(dockerStages(dockerfile).at(-1)!));
+});
+
+test("rejects a volume mounted from the wrong host source", () => {
+  const volumes = requiredMounts.map(({ source, target, readOnly }) =>
+    `${source}:${target}${readOnly ? ":ro" : ""}`,
+  );
+  volumes[0] = `./fake-config:${requiredMounts[0]!.target}:ro`;
+
+  assert.throws(() => assertMountContract(volumes));
 });
 
 interface ControllerService {
@@ -77,8 +85,46 @@ function uncomment(source: string): string {
   return source.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n");
 }
 
-function parseMount(value: string): [string, boolean] {
-  const parts = value.split(":");
-  const target = parts.at(-1) === "ro" ? parts.at(-2)! : parts.at(-1)!;
-  return [target, parts.at(-1) === "ro"];
+function assertDockerfileContract(dockerfile: string): void {
+  const stages = dockerStages(dockerfile);
+  assert.ok(stages.length >= 2);
+  for (const stage of stages) assert.match(stage, /^FROM .+@sha256:[a-f0-9]{64}(?:\s|$)/);
+
+  const toolsStage = stages.find((stage) => /^FROM .+ AS tools$/m.test(stage));
+  assert.ok(toolsStage);
+  assert.match(toolsStage, /^COPY docker\/tools\/package\.json docker\/tools\/package-lock\.json \.\/$/m);
+  assert.match(toolsStage, /^RUN npm ci --omit=dev/m);
+  assertRuntimeStage(stages.at(-1)!);
+}
+
+function assertRuntimeStage(stage: string): void {
+  assert.match(stage, /snapshot\.debian\.org\/archive\/debian\/\d{8}T\d{6}Z/);
+  assert.match(stage, /snapshot\.debian\.org\/archive\/debian-security\/\d{8}T\d{6}Z/);
+  assert.match(stage, /^COPY docker\/apm-requirements\.txt \/tmp\/apm-requirements\.txt$/m);
+  assert.match(stage, /python3 -m pip install[\s\\]+--break-system-packages[\s\S]*--require-hashes[\s\\]+--requirement \/tmp\/apm-requirements\.txt/);
+  assert.match(stage, /^COPY --from=tools .+\/tools\/node_modules \/opt\/tools\/node_modules$/m);
+  assert.match(stage, /^COPY .+schemas .+schemas$/m);
+  assert.match(stage, /^EXPOSE 8080$/m);
+  assert.deepEqual(stage.match(/^CMD .+$/gm), ['CMD ["node", "dist/main.js"]']);
+
+  const users = stage.match(/^USER .+$/gm) ?? [];
+  assert.ok(users.length > 0);
+  assert.match(users.at(-1)!, /^USER (?!0(?:\D|$)|root(?:\D|$))\S+/);
+}
+
+function dockerStages(source: string): string[] {
+  const starts = [...source.matchAll(/^FROM .+$/gm)].map((match) => match.index);
+  return starts.map((start, index) => source.slice(start, starts[index + 1]));
+}
+
+function assertMountContract(volumes: string[]): void {
+  assert.deepEqual(volumes.map(parseMount), requiredMounts);
+}
+
+function parseMount(value: string): { source: string; target: string; readOnly: boolean } {
+  const readOnly = value.endsWith(":ro");
+  const mount = readOnly ? value.slice(0, -3) : value;
+  const separator = mount.lastIndexOf(":");
+  assert.ok(separator > 0, `invalid volume: ${value}`);
+  return { source: mount.slice(0, separator), target: mount.slice(separator + 1), readOnly };
 }
