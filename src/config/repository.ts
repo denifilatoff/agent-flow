@@ -169,6 +169,10 @@ async function completeDirectory(path: string, sha: string): Promise<boolean> {
     const repository = resolve(path, ".source.git");
     const repositoryEntry = await lstat(repository);
     if (!repositoryEntry.isDirectory() || repositoryEntry.isSymbolicLink()) return false;
+    await git(repository, [
+      "-c", "fsck.skipList=/dev/null",
+      "fsck", "--strict", "--full", "--no-dangling", "--no-reflogs", sha,
+    ]);
     if (await resolveRevision(repository, sha) !== sha) return false;
     const entries = treeEntries(await git(repository, ["ls-tree", "-r", "-z", "--full-tree", sha, "--", ...ROOTS]));
     const expectedPaths = entries.map((entry) => entry.path).sort();

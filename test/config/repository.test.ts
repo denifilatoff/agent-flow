@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { deflateSync } from "node:zlib";
 import test from "node:test";
 
 import {
@@ -204,6 +205,30 @@ test("rejects a materialization rewritten through a Git replacement ref", async 
   await exec("git", ["-C", objectStore, "fetch", repo.path, replacement]);
   await exec("git", ["-C", objectStore, "replace", pinned.revision, replacement]);
   await cp(join(repo.path, "config/flows/development.yaml"), join(materialized, "config/flows/development.yaml"));
+
+  await assert.rejects(loadPinnedConfig(repo.path, data, pinned.revision));
+});
+
+test("rejects a loose Git object whose bytes do not match its object ID", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  const pinned = await loadPinnedConfig(repo.path, data);
+  const materialized = join(data, "config", pinned.revision);
+  const objectStore = join(materialized, ".source.git");
+  const path = "config/controller.example.yaml";
+  const objectId = (await exec("git", ["--no-replace-objects", "-C", objectStore, "rev-parse", `${pinned.revision}:${path}`])).stdout.trim();
+  const original = await readFile(join(materialized, path), "utf8");
+  const spoofed = original.replace("intervalSeconds: 300", "intervalSeconds: 600");
+  assert.notEqual(spoofed, original);
+  const loose = join(objectStore, "objects", objectId.slice(0, 2), objectId.slice(2));
+  await mkdir(join(objectStore, "objects", objectId.slice(0, 2)), { recursive: true });
+  await rm(loose, { force: true });
+  await writeFile(loose, deflateSync(Buffer.concat([
+    Buffer.from(`blob ${Buffer.byteLength(spoofed)}\0`),
+    Buffer.from(spoofed),
+  ])));
+  await writeFile(join(materialized, path), spoofed);
 
   await assert.rejects(loadPinnedConfig(repo.path, data, pinned.revision));
 });
