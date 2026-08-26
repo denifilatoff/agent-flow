@@ -89,8 +89,9 @@ test("human-input receipts always use the schema-compatible outcome", async () =
     );
     assert.match(
       agent.body,
-      /set `notes` to an array of one or more nonempty strings, never to a string/,
+      /set `humanGate\.notes` to an array of one or more nonempty strings, never to a string/,
     );
+    assert.match(agent.body, /Do not add a top-level `notes` field/);
     assert.match(agent.body, HUMAN_INPUT_ARTIFACT_MATRIX);
   }
 });

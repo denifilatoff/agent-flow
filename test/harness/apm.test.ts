@@ -271,8 +271,9 @@ test("compiles every package with explicit receipt artifact discriminators", asy
       );
       assert.match(
         result.instructions,
-        /set `notes` to an array of one or more nonempty strings, never to a string/,
+        /set `humanGate\.notes` to an array of one or more nonempty strings, never to a string/,
       );
+      assert.match(result.instructions, /Do not add a top-level `notes` field/);
       if (agentId === "developer") {
         assert.match(
           result.instructions,

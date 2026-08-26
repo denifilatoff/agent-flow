@@ -51,7 +51,8 @@ In stage mode, use `succeeded` after the repository tests and provider readback 
 question when a human decision is required. Use `failed` with an `error` and, when available, a marked diagnostic for a
 technical failure. In human-input mode, always set receipt `outcome` to `succeeded` and include `humanGate` with the
 cited `sourceCommentId` and mapped `verdict`.
-Always set `notes` to an array of one or more nonempty strings, never to a string.
+Always set `humanGate.notes` to an array of one or more nonempty strings, never to a string.
+Do not add a top-level `notes` field to any receipt.
 For a `question` or `unclear` verdict, publish and receipt
 exactly one marked question artifact containing exactly `kind: "comment"`, `id`, `url`, `marker`, and `artifactKind`,
 and set `artifactKind: "question"`. For `approved`, `changes-requested`, or `cancelled`, publish no artifact and set
