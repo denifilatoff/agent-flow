@@ -221,6 +221,10 @@ async function cancel(
   const hadActiveProcess = dependencies.launcher.isRunning(beforeCancel.flowInstanceId);
   const activeAttemptId = hadActiveProcess ? beforeCancel.attemptSeries?.current?.attemptId ?? null : null;
   const activeSeriesId = activeAttemptId ? beforeCancel.attemptSeries?.seriesId ?? null : null;
+  const persistedStartedId = beforeCancel.attemptSeries?.current?.status === "started"
+    ? beforeCancel.attemptSeries.current.attemptId
+    : null;
+  const persistedStartedSeriesId = persistedStartedId ? beforeCancel.attemptSeries?.seriesId ?? null : null;
   await dependencies.launcher.cancel(beforeCancel.flowInstanceId);
   const readback = await providerCall(
     "provider control comment readback failed",
@@ -242,7 +246,13 @@ async function cancel(
     || latest.attemptSeries?.seriesId !== activeSeriesId)) {
     throw new Error("active attempt changed during cancellation");
   }
-  const attemptSeries = activeAttemptId && latest.attemptSeries && currentAttempt ? {
+  if (!activeAttemptId && persistedStartedId && (currentAttempt?.attemptId !== persistedStartedId
+    || latest.attemptSeries?.seriesId !== persistedStartedSeriesId)) {
+    throw new Error("persisted started attempt changed during cancellation");
+  }
+  const cancelAttempt = activeAttemptId !== null
+    || (persistedStartedId !== null && currentAttempt?.status === "started");
+  const attemptSeries = cancelAttempt && latest.attemptSeries && currentAttempt ? {
     ...latest.attemptSeries,
     current: { ...currentAttempt, status: "cancelled" as const, finishedAt: timestamp },
   } : latest.attemptSeries;

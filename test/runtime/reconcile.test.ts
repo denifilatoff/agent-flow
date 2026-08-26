@@ -506,6 +506,24 @@ test("cancellation has one provider-state owner after the process settles", asyn
   assert.ok(updatedAt < provider.events.lastIndexOf("provider:read-control"));
 });
 
+test("a fresh controller cancels a persisted started attempt without a local process", async () => {
+  const provider = new FakeProvider();
+  installControl(provider, controlState({ attemptSeries: attemptSeries({
+    current: { attemptId: ATTEMPT, status: "started", startedAt: NOW },
+  }) }));
+  provider.snapshot.open = false;
+  const freshLauncher = new FakeLauncher();
+
+  await reconcileTicket(dependencies(provider, freshLauncher), TICKET);
+
+  const final = parseControlComment(provider.snapshot.comments.find((item) => item.id.startsWith("control-"))!.body)!;
+  assert.equal(freshLauncher.isRunning(FLOW_1), false);
+  assert.deepEqual(freshLauncher.cancelled, [FLOW_1]);
+  assert.equal(final.stateId, "cancelled");
+  assert.equal(final.attemptSeries?.current?.status, "cancelled");
+  assert.equal(final.attemptSeries?.current?.attemptId, ATTEMPT);
+});
+
 test("cancellation fails closed if process settlement replaced the control identity", async () => {
   const provider = new FakeProvider();
   installControl(provider, controlState({ attemptSeries: attemptSeries({
