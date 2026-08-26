@@ -46,7 +46,13 @@ const expected = JSON.stringify(["agent-flow:managed", "agent-stage:done"]);
 const deadline = Date.now() + 120_000;
 let labels;
 while (Date.now() < deadline) {
-  const response = await fetch(`https://localhost:${process.argv[1]}/api/github/repos/owner/repo/issues/17`);
+  const response = await fetch(`https://localhost:${process.argv[1]}/api/github/repos/owner/repo/issues/17`, {
+    headers: {
+      authorization: "Bearer fixture",
+      accept: "application/vnd.github+json",
+      "x-github-api-version": "2022-11-28",
+    },
+  });
   if (response.ok) {
     const issue = await response.json();
     labels = issue.labels.map(({ name }) => name).sort();

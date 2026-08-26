@@ -28,6 +28,7 @@ type AttemptMode = "success" | "exit-failure" | "block" | "late";
 
 interface FixtureOptions {
   firstAttempt?: AttemptMode;
+  forceStartupFailure?: boolean;
 }
 
 interface StoredComment {
@@ -53,36 +54,97 @@ interface StoredReview {
   createdAt: string;
 }
 
+interface RoutingEvent {
+  kind: "compile" | "run";
+  agentId: string;
+  target: "claude" | "codex";
+}
+
+interface RunningController {
+  ready: ReadyDependencies;
+  abort: AbortController;
+  run: Promise<void>;
+}
+
 export interface FixtureRun {
   activate(): Promise<void>;
   activeProcesses(): Promise<number>;
   answer(body: string): Promise<void>;
+  blockNextAttempt(state: string): Promise<void>;
   changeHead(): Promise<void>;
   changeRequest(): Promise<NormalizedChangeRequest | null>;
   close(): Promise<void>;
   closeChangeRequest(): Promise<void>;
   control(): Promise<ControlState>;
+  controlComments(): Promise<ProviderComment[]>;
+  controlStates(): Promise<ControlState[]>;
   controllerLabels(): Promise<string[]>;
+  compilations(): Promise<Array<Omit<RoutingEvent, "kind">>>;
   finish(): Promise<void>;
   latestAgentComment(): Promise<ProviderComment | null>;
   maximumConcurrentAttempts(): Promise<number>;
   mergeChangeRequest(): Promise<void>;
   reconcile(): Promise<void>;
+  receipts(): Promise<AgentReceipt[]>;
   removeActivation(): Promise<void>;
   restart(): Promise<void>;
+  routing(): Promise<Array<Omit<RoutingEvent, "kind">>>;
   sessions(): Promise<string[]>;
   untilAttempt(status: "started" | "succeeded"): Promise<void>;
   untilState(state: string): Promise<void>;
+  unauthenticatedProviderStatus(): Promise<number>;
 }
 
 export async function startFixture(provider: ProviderKind, options: FixtureOptions = {}): Promise<FixtureRun> {
   const root = await realpath(await mkdtemp(join(tmpdir(), `agent-flow-e2e-${provider}-`)));
+  const originalCertificates = getCACertificates("default");
+  const previous = { PATH: process.env.PATH, NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS };
+  let server: Server | undefined;
+  let running: RunningController | undefined;
+  let cleanupPromise: Promise<void> | undefined;
+  let certificatesChanged = false;
+  let environmentChanged = false;
+
+  const cleanup = (): Promise<void> => cleanupPromise ??= performCleanup();
+  async function performCleanup(): Promise<void> {
+    const operations: Promise<unknown>[] = [];
+    if (running) {
+      running.abort.abort();
+      operations.push(running.run);
+    }
+    if (server?.listening) operations.push(closeServer(server));
+    const results = await Promise.allSettled(operations);
+    if (environmentChanged) {
+      if (previous.PATH === undefined) delete process.env.PATH;
+      else process.env.PATH = previous.PATH;
+      if (previous.NODE_EXTRA_CA_CERTS === undefined) delete process.env.NODE_EXTRA_CA_CERTS;
+      else process.env.NODE_EXTRA_CA_CERTS = previous.NODE_EXTRA_CA_CERTS;
+    }
+    if (certificatesChanged) {
+      try {
+        setDefaultCACertificates(originalCertificates);
+      } catch (error) {
+        results.push({ status: "rejected", reason: error });
+      }
+    }
+    try {
+      await rm(root, { recursive: true, force: true });
+    } catch (error) {
+      results.push({ status: "rejected", reason: error });
+    }
+    const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "fixture shutdown failed");
+  }
+
+  try {
   const certificate = join(root, "fixture.crt");
   const key = join(root, "fixture.key");
   await createCertificate(certificate, key);
-  setDefaultCACertificates([...getCACertificates("default"), await readFile(certificate, "utf8")]);
+  certificatesChanged = true;
+  setDefaultCACertificates([...originalCertificates, await readFile(certificate, "utf8")]);
   const state = new FixtureState(provider, options.firstAttempt);
-  const server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
+  server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
     void state.handle(request, response).catch((error: unknown) => {
       response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: error instanceof Error ? error.message : "fixture failed" }));
@@ -97,6 +159,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   const dataDirectory = join(root, "data");
   const bin = join(root, "bin");
   const home = join(root, "home");
+  const eventsPath = join(root, "events.ndjson");
   await Promise.all([mkdir(dataDirectory, { mode: 0o700 }), mkdir(bin), mkdir(home)]);
   const controllerPath = await createConfiguration(
     provider,
@@ -108,7 +171,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   await createTools(bin);
   await createAuth(home);
 
-  const previous = { PATH: process.env.PATH, NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS };
+  environmentChanged = true;
   process.env.PATH = `${bin}:${previous.PATH ?? ""}`;
   process.env.NODE_EXTRA_CA_CERTS = certificate;
   const environment: NodeJS.ProcessEnv = {
@@ -125,8 +188,8 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     CODEX_HOME: join(home, ".codex"),
     CLAUDE_CONFIG_DIR: join(home, ".claude"),
   };
-  let running = await startController(environment);
-  let closed = false;
+  if (options.forceStartupFailure) throw new Error("forced fixture startup failure");
+  running = await startController(environment);
 
   async function reconcile(): Promise<void> {
     await running.ready.controller.reconcileNow(state.ref);
@@ -134,8 +197,8 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   }
 
   async function stopController(): Promise<void> {
-    running.abort.abort();
-    await running.run;
+    running!.abort.abort();
+    await running!.run;
   }
 
   async function restart(): Promise<void> {
@@ -159,27 +222,36 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     throw new Error(`fixture did not reach state ${target}: ${JSON.stringify(state.latestControl())}`);
   }
 
+  async function events(kind: RoutingEvent["kind"]): Promise<Array<Omit<RoutingEvent, "kind">>> {
+    const body = await readFile(eventsPath, "utf8").catch(() => "");
+    return body.trim().split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line) as RoutingEvent)
+      .filter((event) => event.kind === kind)
+      .map(({ agentId, target }) => ({ agentId, target }));
+  }
+
   const run: FixtureRun = {
     async activate() { state.activate(); },
     async activeProcesses() { return state.activeAttempts.size; },
     async answer(body) { state.addComment(body, MAINTAINER); },
+    async blockNextAttempt(stateId) { state.nextModes.set(stateId, ["block"]); },
     async changeHead() { state.changeHead(); },
     async changeRequest() { return state.normalizedChange(); },
     async close() {
-      if (closed) return;
-      closed = true;
-      const results = await Promise.allSettled([stopController(), closeServer(server)]);
-      process.env.PATH = previous.PATH;
-      if (previous.NODE_EXTRA_CA_CERTS === undefined) delete process.env.NODE_EXTRA_CA_CERTS;
-      else process.env.NODE_EXTRA_CA_CERTS = previous.NODE_EXTRA_CA_CERTS;
-      await rm(root, { recursive: true, force: true });
-      const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-      if (failures.length === 1) throw failures[0];
-      if (failures.length > 1) throw new AggregateError(failures, "fixture shutdown failed");
+      await cleanup();
     },
     async closeChangeRequest() { state.setChangeState("closed"); },
     control: async () => requireControl(state),
-    controllerLabels: async () => state.labels.filter((label) => label.startsWith("agent-" )).sort(),
+    async controlComments() {
+      return state.comments.filter((comment) => parseControlComment(comment.body) !== null)
+        .map((comment) => state.normalizedComment(comment));
+    },
+    async controlStates() {
+      return state.comments.map((comment) => parseControlComment(comment.body))
+        .filter((control): control is ControlState => control !== null);
+    },
+    controllerLabels: async () => state.labels.filter((label) => label.startsWith("agent-")).sort(),
+    compilations: async () => events("compile"),
     async finish() {
       await untilState("assessment-review");
       await run.answer("approved");
@@ -196,8 +268,17 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     async maximumConcurrentAttempts() { return state.maximumActiveAttempts; },
     async mergeChangeRequest() { state.setChangeState("merged"); },
     reconcile,
+    async receipts() {
+      const receipts: AgentReceipt[] = [];
+      for (const session of await run.sessions()) {
+        const body = await readFile(join(dataDirectory, "sessions", session, "receipt.json"), "utf8");
+        if (body.trim()) receipts.push(JSON.parse(body) as AgentReceipt);
+      }
+      return receipts;
+    },
     async removeActivation() { state.removeActivation(); },
     restart,
+    routing: async () => state.routing,
     async sessions() {
       const sessions = join(dataDirectory, "sessions");
       const flows = await readdir(sessions).catch(() => [] as string[]);
@@ -215,8 +296,19 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
       });
     },
     untilState,
+    async unauthenticatedProviderStatus() {
+      return (await fetch(`${state.apiUrl}/user`)).status;
+    },
   };
   return run;
+  } catch (error) {
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "fixture startup and cleanup failed");
+    }
+    throw error;
+  }
 }
 
 class FixtureState {
@@ -228,6 +320,7 @@ class FixtureState {
   readonly reviews = new Map<string, StoredReview>();
   readonly nextModes = new Map<string, AttemptMode[]>();
   readonly activeAttempts = new Set<string>();
+  readonly routing: Array<Omit<RoutingEvent, "kind">> = [];
   labels = ["agent-flow:development"];
   open = true;
   change: StoredChange | null = null;
@@ -323,31 +416,56 @@ class FixtureState {
     const url = new URL(request.url ?? "/", this.origin);
     const body = await requestBody(request);
     if (url.pathname === "/__fixture/attempt" && request.method === "POST") {
-      return this.attempt(body as AttemptContext, response);
+      return this.attempt(body as AttemptContext, request.headers["x-fixture-target"], response);
     }
     if (url.pathname === "/__fixture/completed" && request.method === "POST") {
       this.activeAttempts.delete(String((body as { attemptId: string }).attemptId));
       return json(response, 200, { ok: true });
     }
+    if (url.pathname === "/__fixture/late" && request.method === "POST") {
+      const context = body as AttemptContext;
+      const attemptId = context.controlState.attemptSeries?.current?.attemptId;
+      if (!attemptId) return json(response, 400, { message: "attempt is missing" });
+      return json(response, 200, { receipt: this.publish(context, attemptId) });
+    }
     if (this.provider === "github" && url.pathname.startsWith("/api/github/")) {
+      if (!this.validProviderHeaders(request)) return json(response, 400, { message: "invalid provider headers" });
       return this.github(request.method ?? "GET", url, body, response);
     }
     if (this.provider === "gitlab" && url.pathname.startsWith("/api/gitlab/api/v4/")) {
+      if (!this.validProviderHeaders(request)) return json(response, 400, { message: "invalid provider headers" });
       return this.gitlab(request.method ?? "GET", url, body, response);
     }
     json(response, 404, { message: "not found" });
   }
 
-  private attempt(context: AttemptContext, response: import("node:http").ServerResponse): void {
+  private validProviderHeaders(request: import("node:http").IncomingMessage): boolean {
+    if (request.headers.authorization !== "Bearer fixture") return false;
+    if (this.provider === "github") {
+      return request.headers.accept === "application/vnd.github+json"
+        && request.headers["x-github-api-version"] === "2022-11-28";
+    }
+    return request.headers.accept === "application/json";
+  }
+
+  private attempt(
+    context: AttemptContext,
+    target: string | string[] | undefined,
+    response: import("node:http").ServerResponse,
+  ): void {
     const control = context.controlState;
     const attemptId = control.attemptSeries?.current?.attemptId;
     if (!attemptId) return json(response, 400, { message: "attempt is missing" });
+    if (target !== "claude" && target !== "codex") {
+      return json(response, 400, { message: "fixture target is missing" });
+    }
+    this.routing.push({ agentId: control.attemptSeries!.agentId, target });
     this.activeAttempts.add(attemptId);
     this.maximumActiveAttempts = Math.max(this.maximumActiveAttempts, this.activeAttempts.size);
     const key = control.stateId === "needs-human" ? "needs-human" : control.stateId;
     const queue = this.nextModes.get(key) ?? [];
     const mode = queue.shift() ?? "success";
-    if (mode === "exit-failure" || mode === "block") return json(response, 200, { mode });
+    if (mode !== "success") return json(response, 200, { mode });
 
     const receipt = this.publish(context, attemptId);
     json(response, 200, { mode, receipt });
@@ -682,9 +800,10 @@ async function createConfiguration(
 
 async function createTools(bin: string): Promise<void> {
   const executable = resolve(ROOT, "test/fixtures/fake-harness.ts");
+  const events = join(dirname(bin), "events.ndjson");
   await Promise.all(["gh", "glab", "apm", "codex", "claude"].map(async (tool) => {
     const path = join(bin, tool);
-    await writeFile(path, `#!/bin/sh\necho ${tool} "$@" >> ${JSON.stringify(join(dirname(bin), "tools.log"))}\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(executable)} ${tool} "$@"\n`);
+    await writeFile(path, `#!/bin/sh\nAGENT_FLOW_FIXTURE_LOG=${JSON.stringify(events)} exec ${JSON.stringify(process.execPath)} ${JSON.stringify(executable)} ${tool} "$@"\n`);
     await chmod(path, 0o755);
   }));
 }
@@ -759,11 +878,7 @@ async function createAuth(home: string): Promise<void> {
   ]);
 }
 
-async function startController(environment: NodeJS.ProcessEnv): Promise<{
-  ready: ReadyDependencies;
-  abort: AbortController;
-  run: Promise<void>;
-}> {
+async function startController(environment: NodeJS.ProcessEnv): Promise<RunningController> {
   const port = Number(environment.AGENT_FLOW_HEALTH_PORT);
   let timestamp = Date.now();
   const ready = await runPreflight(createProductionDependencies(environment, port, {

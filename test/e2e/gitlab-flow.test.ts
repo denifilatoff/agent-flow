@@ -6,6 +6,7 @@ import { startFixture } from "../fixtures/provider-server.ts";
 test("GitLab activation reaches done through both human gates", async (t) => {
   const run = await startFixture("gitlab");
   t.after(() => run.close());
+  assert.equal(await run.unauthenticatedProviderStatus(), 400);
 
   await run.untilState("assessment-review");
   await run.answer("approved");

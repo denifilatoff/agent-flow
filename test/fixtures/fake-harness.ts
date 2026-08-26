@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 const [tool, ...args] = process.argv.slice(2);
@@ -10,50 +10,81 @@ if (tool === "gh" || tool === "glab") {
 }
 
 if (tool === "apm") {
-  if (args[0] === "compile") await compile(args.at(-1)!);
+  if (args[0] === "compile") {
+    const target = args.at(-1)!;
+    const agentId = await compile(target);
+    await record({ kind: "compile", agentId, target });
+  }
   process.exit(0);
 }
 
 if (tool === "codex" || tool === "claude") {
+  process.exit(await runAgent(tool));
+}
+
+process.exit(2);
+
+async function runAgent(target: "codex" | "claude"): Promise<number> {
   const contextPath = process.env.AGENT_FLOW_CONTEXT_PATH;
   const receiptPath = process.env.AGENT_FLOW_RECEIPT_PATH;
-  if (!contextPath || !receiptPath) process.exit(0);
+  if (!contextPath || !receiptPath) return 0;
   const context = JSON.parse(await readFile(contextPath, "utf8")) as {
     ticket: { repository: { cloneRoot: string } };
-    controlState: { attemptSeries: { current: { attemptId: string } } };
+    controlState: { attemptSeries: { agentId: string; current: { attemptId: string } } };
   };
   const endpoint = new URL("/__fixture/attempt", context.ticket.repository.cloneRoot);
   const response = await fetch(endpoint, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "x-fixture-target": target },
     body: JSON.stringify(context),
   });
   if (!response.ok) {
     console.error(await response.text());
-    process.exit(2);
+    return 2;
   }
   const result = await response.json() as { mode: string; receipt?: unknown };
-  if (result.mode === "exit-failure") process.exit(1);
-  if (result.receipt) await writeFile(receiptPath, `${JSON.stringify(result.receipt)}\n`, { mode: 0o600 });
   const completed = () => fetch(new URL("/__fixture/completed", endpoint), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ attemptId: context.controlState.attemptSeries.current.attemptId }),
   }).catch(() => undefined);
-  if (result.mode === "block" || result.mode === "late") {
-    await new Promise<void>(() => {
-      const keepAlive = setInterval(() => undefined, 1_000);
-      process.once("SIGTERM", () => {
-        clearInterval(keepAlive);
-        void completed().finally(() => process.exit(0));
+  try {
+    if (result.mode === "exit-failure") return 1;
+    if (result.mode === "late") {
+      await terminated(async () => {
+        const late = await fetch(new URL("/__fixture/late", endpoint), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(context),
+        });
+        if (!late.ok) throw new Error(await late.text());
+        const published = await late.json() as { receipt: unknown };
+        await writeFile(receiptPath, `${JSON.stringify(published.receipt)}\n`, { mode: 0o600 });
       });
-    });
+      return 0;
+    }
+    if (result.receipt) await writeFile(receiptPath, `${JSON.stringify(result.receipt)}\n`, { mode: 0o600 });
+    if (result.mode === "block") await terminated();
+    return 0;
+  } finally {
+    await completed();
   }
-  await completed();
-  process.exit(0);
 }
 
-process.exit(2);
+function terminated(onSignal: () => Promise<void> = async () => undefined): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const keepAlive = setInterval(() => undefined, 1_000);
+    process.once("SIGTERM", () => {
+      clearInterval(keepAlive);
+      void onSignal().then(resolve, reject);
+    });
+  });
+}
+
+async function record(event: Record<string, string>): Promise<void> {
+  const path = process.env.AGENT_FLOW_FIXTURE_LOG;
+  if (path) await appendFile(path, `${JSON.stringify(event)}\n`);
+}
 
 function clone(url: string, destination: string): void {
   execFileSync("git", ["init", destination]);
@@ -63,7 +94,7 @@ function clone(url: string, destination: string): void {
   execFileSync("git", ["-C", destination, "commit", "--allow-empty", "-m", "fixture"]);
 }
 
-async function compile(target: string): Promise<void> {
+async function compile(target: string): Promise<string> {
   const source = await readFile(join(process.cwd(), "apm.yml"), "utf8");
   const id = /^name:\s*([a-z][a-z0-9-]*)$/m.exec(source)?.[1] ?? basename(process.cwd());
   if (target === "claude") {
@@ -81,4 +112,5 @@ async function compile(target: string): Promise<void> {
       `name = ${JSON.stringify(id)}\ndeveloper_instructions = ${JSON.stringify(`Fixture ${id} instructions.`)}\n`,
     );
   }
+  return id;
 }
