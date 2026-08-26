@@ -219,9 +219,20 @@ async function waitForSpawn(calls: SpawnCall[], count = 1): Promise<void> {
   assert.equal(calls.length, count);
 }
 
-test("runs Codex in the worktree with private attempt paths", async (t) => {
+test("runs Codex with canonical, unambiguous private attempt paths", async (t) => {
   const fixture = await runFixture("codex");
   t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const canonicalRoot = join(fixture.root, "attempt with newline\n ");
+  await rename(fixture.input.session.root, canonicalRoot);
+  Object.assign(fixture.input.session, {
+    root: canonicalRoot,
+    contextPath: `${canonicalRoot}/alias/../context.json`,
+    receiptPath: `${canonicalRoot}/alias/../receipt.json`,
+    logPath: join(canonicalRoot, "harness.log"),
+    harnessSessionDirectory: join(canonicalRoot, "harness-session"),
+  });
+  const canonicalContextPath = join(canonicalRoot, "context.json");
+  const canonicalReceiptPath = join(canonicalRoot, "receipt.json");
   const processes = processFixture();
   const inheritedSecrets = [
     "GITHUB_TOKEN", "GITLAB_TOKEN", "OAUTH_TOKEN", "GH_TOKEN", "GLAB_TOKEN", "OPENAI_API_KEY", "UNRELATED_SECRET",
@@ -256,8 +267,8 @@ test("runs Codex in the worktree with private attempt paths", async (t) => {
     "-",
   ]);
   assert.equal(call.cwd, fixture.input.workspace.worktree);
-  assert.equal(call.env.AGENT_FLOW_CONTEXT_PATH, fixture.input.session.contextPath);
-  assert.equal(call.env.AGENT_FLOW_RECEIPT_PATH, fixture.input.session.receiptPath);
+  assert.equal(call.env.AGENT_FLOW_CONTEXT_PATH, canonicalContextPath);
+  assert.equal(call.env.AGENT_FLOW_RECEIPT_PATH, canonicalReceiptPath);
   assert.equal(call.env.HOME, process.env.HOME);
   assert.equal(call.env.GH_CONFIG_DIR, join(call.env.CODEX_HOME!, "cli-config/gh"));
   assert.equal(call.env.GLAB_CONFIG_DIR, join(call.env.CODEX_HOME!, "cli-config/glab"));
@@ -276,11 +287,10 @@ Develop the change.
 
 Implement ticket 17.
 
-When invoking the configured APM entry agent, pass these exact attempt file paths unchanged:
-contextPath: ${fixture.input.session.contextPath}
-receiptPath: ${fixture.input.session.receiptPath}
+Parse this JSON object and pass both string values unchanged when invoking the configured APM entry agent:
+{"contextPath":${JSON.stringify(canonicalContextPath)},"receiptPath":${JSON.stringify(canonicalReceiptPath)}}
 The entry agent must read contextPath and write its final AgentReceipt to receiptPath.
-If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_RECEIPT_PATH, it may use these literal paths directly.
+If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_RECEIPT_PATH, it may use these parsed paths directly.
 `,
   );
   call.child.stdout.write("stdout line\n");

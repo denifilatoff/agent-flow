@@ -47,8 +47,8 @@ export function createCodexAdapter(
           ...providerCredentialEnvironment(input.providerCredential),
           ...await createCliConfigEnvironment(home),
           CODEX_HOME: home,
-          AGENT_FLOW_CONTEXT_PATH: input.session.contextPath,
-          AGENT_FLOW_RECEIPT_PATH: input.session.receiptPath,
+          AGENT_FLOW_CONTEXT_PATH: contextPath,
+          AGENT_FLOW_RECEIPT_PATH: receiptPath,
         });
       } catch {
         throw new HarnessPreflightError("codex");
@@ -82,11 +82,10 @@ export function createCodexAdapter(
 function codexStagePrompt(stagePrompt: string, contextPath: string, receiptPath: string): string {
   return `${stagePrompt.trim()}
 
-When invoking the configured APM entry agent, pass these exact attempt file paths unchanged:
-contextPath: ${contextPath}
-receiptPath: ${receiptPath}
+Parse this JSON object and pass both string values unchanged when invoking the configured APM entry agent:
+${JSON.stringify({ contextPath, receiptPath })}
 The entry agent must read contextPath and write its final AgentReceipt to receiptPath.
-If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_RECEIPT_PATH, it may use these literal paths directly.`;
+If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_RECEIPT_PATH, it may use these parsed paths directly.`;
 }
 
 async function seedCodexHome(auth: CodexAuthSources, home: string): Promise<void> {
