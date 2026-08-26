@@ -24,7 +24,10 @@ function isSafePath(path: string): boolean {
 }
 
 async function git(repository: string, arguments_: string[]): Promise<Buffer> {
-  const { stdout } = await exec("git", ["-C", repository, ...arguments_], { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
+  const { stdout } = await exec("git", ["--no-replace-objects", "-C", repository, ...arguments_], {
+    encoding: "buffer",
+    maxBuffer: 16 * 1024 * 1024,
+  });
   return stdout as Buffer;
 }
 
@@ -113,7 +116,7 @@ export async function prepareConfigurationRepository(
       throw new Error("configuration repository origin does not match the configured source");
     }
     try {
-      await exec("git", [...authentication.arguments, "-C", target, "fetch", "--prune", "origin"], {
+      await exec("git", [...authentication.arguments, "--no-replace-objects", "-C", target, "fetch", "--prune", "origin"], {
         encoding: "buffer",
         maxBuffer: 16 * 1024 * 1024,
         env: { ...process.env, ...authentication.environment },
@@ -130,7 +133,7 @@ export async function prepareConfigurationRepository(
   const temporary = resolve(temporaryRoot, "mirror");
   try {
     try {
-      await exec("git", [...authentication.arguments, "clone", "--mirror", configured.normalized, temporary], {
+      await exec("git", [...authentication.arguments, "--no-replace-objects", "clone", "--mirror", configured.normalized, temporary], {
         encoding: "buffer",
         maxBuffer: 16 * 1024 * 1024,
         env: { ...process.env, ...authentication.environment },

@@ -116,7 +116,7 @@ export function createProductionDependencies(
   const dataDirectory = resolve(environment.AGENT_FLOW_DATA_DIRECTORY ?? "/data");
   const controllerPath = environment.AGENT_FLOW_CONTROLLER_CONFIG ?? "config/controller.example.yaml";
   const requestedRevision = environment.AGENT_FLOW_CONFIG_REVISION;
-  let current: ConfigBundle;
+  let current: ConfigBundle | undefined;
   let prepared: ReturnType<typeof prepareConfigurationRepository> | undefined;
   const pinned = new Map<string, ConfigBundle>();
 
@@ -133,12 +133,14 @@ export function createProductionDependencies(
   return {
     async loadConfig() {
       if (current) return current;
-      current = await load(requestedRevision);
-      if (normalizeConfigurationSource(current.controller.configuration.repository) !== configSource
-        || resolve(current.controller.runtime.dataDirectory) !== dataDirectory
-        || current.controller.runtime.healthPort !== healthPort) {
+      const candidate = await load(requestedRevision);
+      if (normalizeConfigurationSource(candidate.controller.configuration.repository) !== configSource
+        || resolve(candidate.controller.runtime.dataDirectory) !== dataDirectory
+        || candidate.controller.runtime.healthPort !== healthPort) {
+        pinned.delete(candidate.revision);
         throw new Error("runtime paths do not match startup configuration");
       }
+      current = candidate;
       return current;
     },
     createProviders(bundle: ConfigBundle): Providers {

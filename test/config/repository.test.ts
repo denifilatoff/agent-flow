@@ -139,6 +139,19 @@ test("a production dependency retains its verified bundle for the service lifeti
   }, 8080).loadConfig());
 });
 
+test("a production dependency never caches a bundle that failed runtime validation", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  const dependencies = createProductionDependencies({
+    AGENT_FLOW_CONFIG_REPOSITORY: pathToFileURL(repo.path).href,
+    AGENT_FLOW_DATA_DIRECTORY: data,
+  }, 8080);
+
+  await assert.rejects(dependencies.loadConfig(), /runtime paths/i);
+  await assert.rejects(dependencies.loadConfig(), /runtime paths/i);
+});
+
 test("loads a verified materialization after its pinned commit is pruned from the mirror", async (t) => {
   const repo = await TestRepository.create();
   const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
@@ -177,6 +190,22 @@ test("rejects a marker-only materialization for a pruned revision", async (t) =>
   await writeFile(join(target, ".complete"), `${sha}\n`);
 
   await assert.rejects(loadPinnedConfig(repo.path, data, sha), /revision|materialization/i);
+});
+
+test("rejects a materialization rewritten through a Git replacement ref", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  const pinned = await loadPinnedConfig(repo.path, data);
+  await repo.commitChangedFlow();
+  const replacement = await repo.head();
+  const materialized = join(data, "config", pinned.revision);
+  const objectStore = join(materialized, ".source.git");
+  await exec("git", ["-C", objectStore, "fetch", repo.path, replacement]);
+  await exec("git", ["-C", objectStore, "replace", pinned.revision, replacement]);
+  await cp(join(repo.path, "config/flows/development.yaml"), join(materialized, "config/flows/development.yaml"));
+
+  await assert.rejects(loadPinnedConfig(repo.path, data, pinned.revision));
 });
 
 test("uses noninteractive GitHub and GitLab credential helpers", async (t) => {
