@@ -31,8 +31,11 @@ const ATTEMPT_ID = "123e4567-e89b-42d3-a456-426614174001";
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
 const OLD_HEAD = "1111111111111111111111111111111111111111";
 const TICKET: TicketRef = { provider: "github", repository: "owner/repo", number: 17 };
+const GITLAB_TICKET: TicketRef = { provider: "gitlab", repository: "owner/repo", number: 17 };
 const ACTOR: Actor = { login: "maintainer", providerId: "9" };
 const COMMENT_URL = "https://github.example.test/owner/repo/issues/17#issuecomment-101";
+const GITLAB_COMMENT_URL = "https://gitlab.example.test/owner/repo/-/issues/17#note_101";
+const GITLAB_WORK_ITEM_URL = "https://gitlab.example.test/owner/repo/-/work_items/17#note_101";
 const CHANGE_URL = "https://github.example.test/owner/repo/pull/31";
 const REVIEW_URL = "https://github.example.test/owner/repo/pull/31#pullrequestreview-701";
 const HUMAN_URL = "https://github.example.test/owner/repo/issues/17#issuecomment-201";
@@ -156,7 +159,13 @@ function snapshot(overrides: Partial<ProviderTicketSnapshot> = {}): ProviderTick
 }
 
 class FakeProvider implements ProviderAdapter {
-  readonly kind = "github" as const;
+  readonly kind: "github" | "gitlab";
+  readonly expectedTicket: TicketRef;
+
+  constructor(kind: "github" | "gitlab" = "github", expectedTicket: TicketRef = TICKET) {
+    this.kind = kind;
+    this.expectedTicket = expectedTicket;
+  }
   calls: string[] = [];
   comment = providerComment();
   ticket: ProviderTicketSnapshot | null = null;
@@ -180,19 +189,19 @@ class FakeProvider implements ProviderAdapter {
   async bootstrap(_repository: string): Promise<TicketRef[]> { throw new Error("unused"); }
   async readRepository(_repository: string): Promise<ProviderRepository> { throw new Error("unused"); }
   async readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot> {
-    assert.deepEqual(ref, TICKET);
+    assert.deepEqual(ref, this.expectedTicket);
     return this.record("readTicket", this.ticket ?? snapshot({
       comments: [this.comment, this.sourceComment],
       changeRequest: this.changeRequest,
     }));
   }
   async permission(repository: string, actor: Actor): Promise<Permission> {
-    assert.equal(repository, TICKET.repository);
+    assert.equal(repository, this.expectedTicket.repository);
     assert.deepEqual(actor, this.sourceComment.actor);
     return this.record("permission", this.actorPermission);
   }
   async readComment(ref: TicketRef, id: string): Promise<ProviderComment> {
-    assert.deepEqual(ref, TICKET);
+    assert.deepEqual(ref, this.expectedTicket);
     return this.record(`readComment:${id}`, id === "201" ? this.sourceComment : this.comment);
   }
   async createComment(_ref: TicketRef, _body: string): Promise<ProviderComment> { throw new Error("unused"); }
@@ -219,12 +228,15 @@ class FakeProvider implements ProviderAdapter {
   }
 }
 
-function expectation(resultContract: ReceiptExpectation["resultContract"]): ReceiptExpectation {
+function expectation(
+  resultContract: ReceiptExpectation["resultContract"],
+  ticket: TicketRef = TICKET,
+): ReceiptExpectation {
   return {
     flowInstanceId: FLOW_ID,
     attemptId: ATTEMPT_ID,
     resultContract,
-    ticket: TICKET,
+    ticket,
     pinnedHeadSha: resultContract === "review" ? HEAD_SHA : null,
   };
 }
@@ -234,12 +246,13 @@ async function verify(
   resultContract: ReceiptExpectation["resultContract"] = "assessment",
   provider = new FakeProvider(),
   cancelled = false,
+  ticket: TicketRef = TICKET,
 ): Promise<AgentReceipt> {
   const root = await mkdtemp(join(tmpdir(), "agent-flow-receipt-"));
   roots.push(root);
   const path = join(root, "receipt.json");
   await writeFile(path, typeof value === "string" ? value : JSON.stringify(value));
-  return readAndVerifyReceipt(path, expectation(resultContract), provider, cancelled);
+  return readAndVerifyReceipt(path, expectation(resultContract, ticket), provider, cancelled);
 }
 
 async function invalid(promise: Promise<unknown>, pattern?: RegExp): Promise<void> {
@@ -260,6 +273,42 @@ test("accepts only a marked assessment that the provider reads back", async () =
 
   assert.equal(result.attemptId, ATTEMPT_ID);
   assert.deepEqual(provider.calls, ["readComment:101", "readTicket"]);
+});
+
+test("accepts only the GitLab work-item alias for the same verified issue comment", async () => {
+  const provider = new FakeProvider("gitlab", GITLAB_TICKET);
+  provider.comment = providerComment({ url: GITLAB_COMMENT_URL });
+  provider.ticket = snapshot({
+    ref: GITLAB_TICKET,
+    repository: {
+      provider: "gitlab",
+      name: GITLAB_TICKET.repository,
+      host: "gitlab.example.test",
+      cloneRoot: "https://gitlab.example.test/",
+      cloneUrl: "https://gitlab.example.test/owner/repo.git",
+    },
+    comments: [providerComment({ url: GITLAB_WORK_ITEM_URL })],
+    changeRequest: null,
+  });
+
+  const result = await verify(receipt([{ ...commentArtifact(), url: GITLAB_WORK_ITEM_URL }]),
+    "assessment", provider, false, GITLAB_TICKET);
+
+  assert.equal(result.artifacts[0]?.url, GITLAB_WORK_ITEM_URL);
+  assert.deepEqual(provider.calls, ["readComment:101", "readTicket"]);
+
+  for (const url of [
+    "https://@gitlab.example.test/owner/repo/-/work_items/17#note_101",
+    "https://gitlab.example.test/owner/repo/-/work_items/17?#note_101",
+    "https://other.example.test/owner/repo/-/work_items/17#note_101",
+    "https://gitlab.example.test/other/repo/-/work_items/17#note_101",
+    "https://gitlab.example.test/root/owner/repo/-/work_items/17#note_101",
+    "https://gitlab.example.test/owner/repo/-/work_items/18#note_101",
+    "https://gitlab.example.test/owner/repo/-/work_items/17#note_999",
+  ]) {
+    await invalid(verify(receipt([{ ...commentArtifact(), url }]),
+      "assessment", provider, false, GITLAB_TICKET), /comment URL/);
+  }
 });
 
 test("rejects malformed, oversized, and schema-invalid receipt JSON", async (context) => {

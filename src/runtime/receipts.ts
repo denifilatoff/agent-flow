@@ -117,7 +117,7 @@ export async function readAndVerifyReceipt(
   if (verifiedComments.length > 0 || development || reviewedChange) {
     const finalTicket = await providerRead(() => provider.readTicket(expected.ticket));
     assertTicketSnapshot(finalTicket, expected.ticket);
-    assertCommentMembership(verifiedComments, finalTicket.comments);
+    assertCommentMembership(verifiedComments, finalTicket.comments, expected, provider.kind);
 
     if (development) {
       const linked = requireLinkedChange(finalTicket, expected.ticket);
@@ -259,13 +259,44 @@ async function verifyComment(
   if (artifact.marker !== expectedMarker) invalid("receipt comment marker does not match its artifact kind");
   const published = await providerRead(() => provider.readComment(expected.ticket, artifact.id));
   if (published.id !== artifact.id) invalid("provider comment ID does not match the receipt");
-  if (published.url !== artifact.url) invalid("provider comment URL does not match the receipt");
+  if (!sameCommentUrl(published.url, artifact.url, expected, provider.kind, artifact.id)) {
+    invalid("provider comment URL does not match the receipt");
+  }
   const lines = published.body.split(/\r?\n/);
   if (lines[0] !== expectedMarker) invalid("provider comment marker does not match the receipt");
   if (lines[1]?.startsWith("<!-- agent-flow-review:")) {
     invalid("non-review comment contains review metadata");
   }
   return published;
+}
+
+function sameCommentUrl(
+  published: string,
+  artifact: string,
+  expected: ReceiptExpectation,
+  provider: ProviderAdapter["kind"],
+  commentId: string,
+): boolean {
+  if (published === artifact) return true;
+  if (provider !== "gitlab") return false;
+  const canonical = normalizedGitLabCommentUrl(published, expected.ticket, commentId);
+  return canonical !== null && canonical === normalizedGitLabCommentUrl(artifact, expected.ticket, commentId);
+}
+
+function normalizedGitLabCommentUrl(url: string, ticket: TicketRef, commentId: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (url !== parsed.href || url.includes("?") || parsed.username || parsed.password
+      || parsed.hash !== `#note_${commentId}`) return null;
+    const repository = ticket.repository.split("/").map(encodeURIComponent).join("/");
+    const issue = `/${repository}/-/issues/${ticket.number}`;
+    const workItem = `/${repository}/-/work_items/${ticket.number}`;
+    const suffix = parsed.pathname.endsWith(issue) ? issue : parsed.pathname.endsWith(workItem) ? workItem : null;
+    if (!suffix) return null;
+    return `${parsed.origin}${parsed.pathname.slice(0, -suffix.length)}${issue}${parsed.hash}`;
+  } catch {
+    return null;
+  }
 }
 
 async function readLinkedChange(
@@ -327,11 +358,13 @@ function assertSameChange(left: NormalizedChangeRequest, right: NormalizedChange
 function assertCommentMembership(
   verified: ProviderComment[],
   ticketComments: ProviderComment[],
+  expected: ReceiptExpectation,
+  provider: ProviderAdapter["kind"],
 ): void {
   for (const comment of verified) {
     const matches = ticketComments.filter((candidate) =>
       candidate.id === comment.id
-      && candidate.url === comment.url
+      && sameCommentUrl(candidate.url, comment.url, expected, provider, comment.id)
       && candidate.body === comment.body
       && candidate.actor.login === comment.actor.login
       && candidate.actor.providerId === comment.actor.providerId
