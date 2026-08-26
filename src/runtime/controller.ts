@@ -3,6 +3,7 @@ import { createScheduler } from "./scheduler.ts";
 import type { AttemptLauncher, ReconcileOutcome } from "./reconcile.ts";
 
 type DiscoveryAdapter = Pick<ProviderAdapter, "kind" | "bootstrap" | "discover">;
+type Lifecycle = "created" | "bootstrapping" | "ready" | "running" | "failed" | "stopped";
 
 export interface ControllerProvider {
   adapter: DiscoveryAdapter;
@@ -29,25 +30,34 @@ export interface Controller {
 interface RepositoryScan {
   provider: ControllerProvider;
   repository: string;
-  windowStartedAt: string;
-  seenTickets: Set<string>;
+  nextWindowStartedAt: string;
+}
+
+interface ScanCall {
+  scan: RepositoryScan & { windowStartedAt: string };
+  tickets: TicketRef[];
 }
 
 const ticketKey = (ref: TicketRef) => `${ref.provider}:${ref.repository}#${ref.number}`;
-const repositoryKey = (scan: RepositoryScan) => `${scan.provider.adapter.kind}:${scan.repository}`;
+const repositoryKey = (provider: ControllerProvider, repository: string) =>
+  `${provider.adapter.kind}:${repository}`;
 
 export function createController(dependencies: ControllerDependencies): Controller {
   const now = dependencies.now ?? (() => new Date().toISOString());
   const interval = (dependencies.pollingIntervalSeconds ?? 300) * 1_000;
   const delay = dependencies.delay ?? abortableDelay;
+  const repositories = dependencies.providers.flatMap((provider) => provider.repositories.map((repository) => ({
+    provider,
+    repository,
+    key: repositoryKey(provider, repository),
+  })));
+  const allowed = new Set(repositories.map(({ key }) => key));
+  const cursors = new Map<string, string>();
   const flowInstances = new Set<string>();
-  let sweepCursor: string | null = null;
-  let sweep: Promise<void> | null = null;
+  let lifecycle: Lifecycle = "created";
   let stopping = false;
 
-  if (!Number.isFinite(interval) || interval <= 0) {
-    throw new Error("polling interval must be positive");
-  }
+  if (!Number.isFinite(interval) || interval <= 0) throw new Error("polling interval must be positive");
 
   const tickets = createScheduler<TicketRef>({
     concurrency: dependencies.concurrency,
@@ -57,29 +67,46 @@ export function createController(dependencies: ControllerDependencies): Controll
       if (result.flowInstanceId) flowInstances.add(result.flowInstanceId);
     },
   });
-  const scans = createScheduler<RepositoryScan>({
+  const scanCalls = createScheduler<ScanCall>({
     concurrency: 1,
-    key: repositoryKey,
-    run: scanRepository,
+    key: ({ scan }) => repositoryKey(scan.provider, scan.repository),
+    run: discoverRepository,
+  });
+  const scans = createScheduler<RepositoryScan>({
+    concurrency: Math.max(1, repositories.length),
+    key: ({ provider, repository }) => repositoryKey(provider, repository),
+    run: reconcileRepository,
   });
 
-  const controller: Controller = {
+  return {
     async bootstrap(): Promise<void> {
+      if (lifecycle !== "created") throw new Error("controller bootstrap may only run once");
+      lifecycle = "bootstrapping";
       const startedAt = now();
       const found = new Map<string, TicketRef>();
-      for (const provider of dependencies.providers) {
-        for (const repository of provider.repositories) {
+      try {
+        for (const { provider, repository, key } of repositories) {
           for (const ref of await provider.adapter.bootstrap(repository)) {
             assertTicketIdentity(ref, provider.adapter, repository);
             found.set(ticketKey(ref), ref);
           }
+          cursors.set(key, startedAt);
         }
+        await Promise.all([...found.values()].map((ref) => tickets.schedule(ref)));
+        lifecycle = "ready";
+      } catch (error) {
+        lifecycle = "failed";
+        throw error;
       }
-      await Promise.all([...found.values()].map((ref) => tickets.schedule(ref)));
-      sweepCursor = startedAt;
     },
 
     async run(signal): Promise<void> {
+      if (lifecycle === "created" || lifecycle === "bootstrapping" || lifecycle === "failed") {
+        throw new Error("controller run requires a successful bootstrap");
+      }
+      if (lifecycle !== "ready") throw new Error("controller run may only run once");
+      lifecycle = "running";
+      const errors: unknown[] = [];
       try {
         while (!signal.aborted) {
           try {
@@ -87,44 +114,56 @@ export function createController(dependencies: ControllerDependencies): Controll
           } catch (error) {
             if (!signal.aborted) throw error;
           }
-          if (signal.aborted) break;
-          queueSweep();
+          if (!signal.aborted) queueSweep();
         }
-      } finally {
-        stopping = true;
-        scans.close();
-        tickets.close();
-        await cancelTracked();
-        if (sweep) await sweep;
-        await scans.drain();
-        await tickets.drain();
-        await cancelTracked();
+      } catch (error) {
+        errors.push(error);
       }
+
+      stopping = true;
+      scans.close();
+      scanCalls.close();
+      tickets.close();
+      await cancellationPass(errors);
+      await settle(scans.drain(), errors);
+      await settle(scanCalls.drain(), errors);
+      await settle(tickets.drain(), errors);
+      await cancellationPass(errors);
+      lifecycle = "stopped";
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, "controller shutdown failed");
     },
 
-    reconcileNow(ref): Promise<void> {
-      return tickets.schedule(ref);
+    async reconcileNow(ref): Promise<void> {
+      if (lifecycle === "stopped" || lifecycle === "failed") throw new Error(`controller is ${lifecycle}`);
+      assertAllowedRef(ref);
+      await tickets.schedule(ref);
     },
   };
-  return controller;
 
   function queueSweep(): void {
-    if (sweep) return;
-    if (sweepCursor === null) sweepCursor = now();
-    const windowStartedAt = sweepCursor;
-    const nextCursor = now();
-    const seenTickets = new Set<string>();
-    const jobs = dependencies.providers.flatMap((provider) => provider.repositories.map((repository) =>
-      scans.schedule({ provider, repository, windowStartedAt, seenTickets })));
-    sweep = Promise.allSettled(jobs).then((results) => {
-      for (const result of results) {
-        if (result.status === "rejected") dependencies.onError?.(result.reason);
-      }
-      if (results.every((result) => result.status === "fulfilled")) sweepCursor = nextCursor;
-    }).finally(() => { sweep = null; });
+    const nextWindowStartedAt = now();
+    for (const { provider, repository, key } of repositories) {
+      if (!cursors.has(key)) continue;
+      void scans.schedule({ provider, repository, nextWindowStartedAt })
+        .catch(reportError);
+    }
   }
 
-  async function scanRepository(scan: RepositoryScan): Promise<void> {
+  async function reconcileRepository(scan: RepositoryScan): Promise<void> {
+    const key = repositoryKey(scan.provider, scan.repository);
+    const windowStartedAt = cursors.get(key);
+    if (!windowStartedAt) throw new Error("repository discovery cursor is missing");
+    const call: ScanCall = { scan: { ...scan, windowStartedAt }, tickets: [] };
+    await scanCalls.schedule(call);
+    if (stopping) return;
+    await Promise.all(call.tickets.map((ref) => tickets.schedule(ref)));
+    cursors.set(key, scan.nextWindowStartedAt);
+  }
+
+  async function discoverRepository(call: ScanCall): Promise<void> {
+    const { scan } = call;
+    const seen = new Set<string>();
     let cursor: string | undefined;
     do {
       const page = await scan.provider.adapter.discover(
@@ -136,18 +175,38 @@ export function createController(dependencies: ControllerDependencies): Controll
       for (const ref of page.tickets) {
         assertTicketIdentity(ref, scan.provider.adapter, scan.repository);
         const id = ticketKey(ref);
-        if (scan.seenTickets.has(id)) continue;
-        scan.seenTickets.add(id);
-        void tickets.schedule(ref).catch((error: unknown) => dependencies.onError?.(error));
+        if (!seen.has(id)) {
+          seen.add(id);
+          call.tickets.push(ref);
+        }
       }
       cursor = page.nextCursor ?? undefined;
     } while (cursor !== undefined);
   }
 
-  async function cancelTracked(): Promise<void> {
-    await Promise.all([...flowInstances]
-      .filter((id) => dependencies.launcher.isRunning(id))
-      .map((id) => dependencies.launcher.cancel(id)));
+  function assertAllowedRef(ref: TicketRef): void {
+    if (!Number.isSafeInteger(ref.number) || ref.number < 1) throw new Error("invalid ticket identity");
+    if (!allowed.has(`${ref.provider}:${ref.repository}`)) {
+      throw new Error("ticket repository is not allowlisted");
+    }
+  }
+
+  async function cancellationPass(errors: unknown[]): Promise<void> {
+    for (const id of flowInstances) {
+      try {
+        if (dependencies.launcher.isRunning(id)) await dependencies.launcher.cancel(id);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+  }
+
+  function reportError(error: unknown): void {
+    try {
+      dependencies.onError?.(error);
+    } catch {
+      // Error reporting must not break the polling chain.
+    }
   }
 }
 
@@ -155,6 +214,14 @@ function assertTicketIdentity(ref: TicketRef, adapter: DiscoveryAdapter, reposit
   if (ref.provider !== adapter.kind || ref.repository !== repository
     || !Number.isSafeInteger(ref.number) || ref.number < 1) {
     throw new Error("discovered ticket identity does not match its allowlisted repository");
+  }
+}
+
+async function settle(promise: Promise<void>, errors: unknown[]): Promise<void> {
+  try {
+    await promise;
+  } catch (error) {
+    errors.push(error);
   }
 }
 

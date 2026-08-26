@@ -11,8 +11,11 @@ export interface Scheduler<T> {
 }
 
 interface Entry<T> {
+  id: string;
   value: T;
   promise: Promise<void>;
+  claimed: boolean;
+  started: boolean;
   resolve(): void;
   reject(error: unknown): void;
 }
@@ -23,7 +26,7 @@ export function createScheduler<T>(options: SchedulerOptions<T>): Scheduler<T> {
   }
 
   const pending: Entry<T>[] = [];
-  const keyed = new Map<string, Entry<T>>();
+  const keyed = new Map<string, Entry<T>[]>();
   const drained: Array<() => void> = [];
   let active = 0;
   let closed = false;
@@ -32,8 +35,9 @@ export function createScheduler<T>(options: SchedulerOptions<T>): Scheduler<T> {
     schedule(value): Promise<void> {
       if (closed) return Promise.reject(new Error("scheduler is closed"));
       const id = options.key(value);
-      const existing = keyed.get(id);
-      if (existing) return existing.promise;
+      const generations = keyed.get(id) ?? [];
+      const latest = generations.at(-1);
+      if (latest && !latest.started) return latest.promise;
 
       let resolve!: () => void;
       let reject!: (error: unknown) => void;
@@ -41,8 +45,9 @@ export function createScheduler<T>(options: SchedulerOptions<T>): Scheduler<T> {
         resolve = done;
         reject = fail;
       });
-      const entry = { value, promise, resolve, reject };
-      keyed.set(id, entry);
+      const entry = { id, value, promise, claimed: false, started: false, resolve, reject };
+      generations.push(entry);
+      keyed.set(id, generations);
       pending.push(entry);
       pump();
       return promise;
@@ -51,11 +56,15 @@ export function createScheduler<T>(options: SchedulerOptions<T>): Scheduler<T> {
     close(): void {
       if (closed) return;
       closed = true;
-      for (const entry of pending.splice(0)) {
-        keyed.delete(options.key(entry.value));
+      const cancelled = [...keyed.values()].flat().filter((entry) => !entry.started);
+      for (const entry of cancelled) {
+        const index = pending.indexOf(entry);
+        if (index >= 0) pending.splice(index, 1);
+        if (entry.claimed) active -= 1;
+        remove(entry);
         entry.reject(new Error("scheduler closed before work started"));
       }
-      if (active === 0) drained.splice(0).forEach((resolve) => resolve());
+      settleDrain();
     },
 
     drain(): Promise<void> {
@@ -65,26 +74,46 @@ export function createScheduler<T>(options: SchedulerOptions<T>): Scheduler<T> {
   };
 
   function pump(): void {
-    while (active < options.concurrency && pending.length > 0) {
-      const entry = pending.shift()!;
-      const id = options.key(entry.value);
+    while (active < options.concurrency) {
+      const index = pending.findIndex((entry) => keyed.get(entry.id)?.[0] === entry);
+      if (index < 0) return;
+      const entry = pending.splice(index, 1)[0]!;
+      entry.claimed = true;
       active += 1;
-      void Promise.resolve().then(() => options.run(entry.value)).then(() => {
-        finish(entry, id);
-        entry.resolve();
-      }, (error: unknown) => {
-        finish(entry, id);
-        entry.reject(error);
-      });
+      queueMicrotask(() => start(entry));
     }
   }
 
-  function finish(entry: Entry<T>, id: string): void {
-    if (keyed.get(id) === entry) {
-      active -= 1;
-      keyed.delete(id);
-      pump();
-      if (active === 0 && pending.length === 0) drained.splice(0).forEach((resolve) => resolve());
+  function start(entry: Entry<T>): void {
+    if (closed || keyed.get(entry.id)?.[0] !== entry) return;
+    entry.started = true;
+    let work: Promise<void>;
+    try {
+      work = options.run(entry.value);
+    } catch (error) {
+      finish(entry, false, error);
+      return;
     }
+    void work.then(() => finish(entry, true), (error: unknown) => finish(entry, false, error));
+  }
+
+  function finish(entry: Entry<T>, succeeded: boolean, error?: unknown): void {
+    active -= 1;
+    remove(entry);
+    if (!closed) pump();
+    settleDrain();
+    if (succeeded) entry.resolve();
+    else entry.reject(error);
+  }
+
+  function remove(entry: Entry<T>): void {
+    const generations = keyed.get(entry.id);
+    const index = generations?.indexOf(entry) ?? -1;
+    if (index >= 0) generations!.splice(index, 1);
+    if (generations?.length === 0) keyed.delete(entry.id);
+  }
+
+  function settleDrain(): void {
+    if (active === 0 && pending.length === 0) drained.splice(0).forEach((resolve) => resolve());
   }
 }
