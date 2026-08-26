@@ -200,6 +200,19 @@ function reviewReceipt(verdict: "approved" | "changes-requested" | "commented" =
   };
 }
 
+function failedReceipt(attemptId = ATTEMPT): AgentReceipt {
+  return {
+    apiVersion: "agent-flow/v1alpha1",
+    kind: "AgentReceipt",
+    flowInstanceId: FLOW_1,
+    attemptId,
+    outcome: "failed",
+    summary: "The harness exited.",
+    artifacts: [],
+    error: { code: "PROCESS_EXIT", message: "The harness exited." },
+  };
+}
+
 function humanReceipt(verdict: ControlHumanGate["verdict"], sourceCommentId: string): AgentReceipt {
   return {
     apiVersion: "agent-flow/v1alpha1",
@@ -820,7 +833,7 @@ test("uses stable semantic attempt input revisions", async (t) => {
     assert.notEqual(await revision("answer-1"), await revision("answer-2"));
   });
 
-  await t.test("new prior accepted output", async () => {
+  await t.test("prior-stage output does not become external input", async () => {
     async function revision(attemptId: string): Promise<string> {
       const provider = new FakeProvider();
       const receipt = { ...reviewReceipt(), attemptId };
@@ -845,7 +858,7 @@ test("uses stable semantic attempt input revisions", async (t) => {
       return launcher.requests[0]!.inputRevision;
     }
 
-    assert.notEqual(
+    assert.equal(
       await revision("33333333-3333-4333-8333-333333333333"),
       await revision("55555555-5555-4555-8555-555555555555"),
     );
@@ -885,5 +898,41 @@ test("uses stable semantic attempt input revisions", async (t) => {
     await reconcileTicket(dependencies(provider, secondLauncher), TICKET);
 
     assert.deepEqual(secondLauncher.requests, []);
+  });
+
+  await t.test("persisting a failed current attempt", async () => {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({ stateId: "development", changeRequest: controlChange() }));
+    provider.snapshot.changeRequest = changeRequest();
+    const firstLauncher = new FakeLauncher();
+    await reconcileTicket(dependencies(provider, firstLauncher), TICKET);
+    const request = firstLauncher.requests[0]!;
+    firstLauncher.running.clear();
+
+    const index = provider.snapshot.comments.findIndex((candidate) => candidate.id.startsWith("control-"));
+    const state = parseControlComment(provider.snapshot.comments[index]!.body)!;
+    provider.snapshot.comments[index] = controlComment({
+      ...state,
+      attemptSeries: attemptSeries({
+        agentId: "developer",
+        stateId: "development",
+        inputRevision: request.inputRevision,
+        current: {
+          attemptId: ATTEMPT,
+          status: "failed",
+          startedAt: "2026-08-26T12:01:00.000Z",
+          finishedAt: "2026-08-26T12:02:00.000Z",
+          error: { code: "PROCESS_EXIT", message: "The harness exited." },
+        },
+      }),
+      latestReceipt: failedReceipt(),
+    }, provider.snapshot.comments[index]!.id);
+    const secondLauncher = new FakeLauncher();
+
+    await reconcileTicket(dependencies(provider, secondLauncher), TICKET);
+
+    assert.deepEqual(secondLauncher.requests, []);
+    const unchanged = parseControlComment(provider.snapshot.comments[index]!.body)!;
+    assert.equal(unchanged.attemptSeries?.inputRevision, request.inputRevision);
   });
 });

@@ -412,10 +412,7 @@ function hasAcceptedAttempt(
   const series = control.attemptSeries;
   const current = series?.current;
   if (!series || !current || series.agentId !== agentId || series.stateId !== control.stateId) return false;
-  if (series.inputRevision !== inputRevision) return false;
-  if (current.status === "started") return true;
-  if (current.status !== "succeeded") return false;
-  return true;
+  return series.inputRevision === inputRevision;
 }
 
 function attemptInputRevision(
@@ -438,7 +435,6 @@ function attemptInputRevision(
       ].join(":"));
     }
     if (control.humanGate) parts.push(`human:${control.humanGate.sourceCommentId}`);
-    if (control.latestReceipt) parts.push(`receipt:${control.latestReceipt.attemptId}`);
     if (parts.length === 1 && snapshot.activation.eventId) {
       parts.push(`activation:${snapshot.activation.eventId}`);
     }
