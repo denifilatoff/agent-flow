@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
 import * as formatsPlugin from "ajv-formats";
@@ -25,18 +26,7 @@ const schemaIds: Record<SchemaKind, string> = {
   AgentReceipt: "https://agent-flow.dev/schemas/v1/agent-receipt.schema.json",
 };
 
-const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
-const addFormats = formatsPlugin.default as unknown as (instance: Ajv2020) => void;
-addFormats(ajv);
-
-for (const file of schemaFiles) {
-  const schema = JSON.parse(readFileSync(new URL(`../../schemas/v1/${file}`, import.meta.url), "utf8")) as JsonSchema;
-  ajv.addSchema(schema);
-}
-
-const validators: Record<SchemaKind, ValidateFunction> = Object.fromEntries(
-  Object.entries(schemaIds).map(([kind, id]) => [kind, ajv.getSchema(id)!]),
-) as Record<SchemaKind, ValidateFunction>;
+export type DocumentValidator = <T>(kind: SchemaKind, value: unknown) => T;
 
 export class ConfigValidationError extends Error {
   readonly kind: SchemaKind;
@@ -56,10 +46,56 @@ export async function parseYaml(path: string): Promise<unknown> {
   return parse(await readFile(path, "utf8"));
 }
 
-export function validateDocument<T>(kind: SchemaKind, value: unknown): T {
+function compileValidators(schemas: JsonSchema[]): Record<SchemaKind, ValidateFunction> {
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+  const addFormats = formatsPlugin.default as unknown as (instance: Ajv2020) => void;
+  addFormats(ajv);
+  for (const schema of schemas) ajv.addSchema(schema);
+
+  return Object.fromEntries(Object.entries(schemaIds).map(([kind, id]) => {
+    const validator = ajv.getSchema(id);
+    if (!validator) throw new Error(`${kind} schema must declare $id ${id}`);
+    return [kind, validator];
+  })) as Record<SchemaKind, ValidateFunction>;
+}
+
+function validateWith<T>(validators: Record<SchemaKind, ValidateFunction>, kind: SchemaKind, value: unknown): T {
   const validator = validators[kind];
   if (!validator(value)) {
     throw new ConfigValidationError(kind, validator.errors?.[0]);
   }
   return value as T;
+}
+
+const defaultValidators = compileValidators(schemaFiles.map((file) =>
+  JSON.parse(readFileSync(new URL(`../../schemas/v1/${file}`, import.meta.url), "utf8")) as JsonSchema
+));
+
+export function validateDocument<T>(kind: SchemaKind, value: unknown): T {
+  return validateWith(defaultValidators, kind, value);
+}
+
+export async function createDocumentValidator(schemaDirectory: string): Promise<DocumentValidator> {
+  const schemas: JsonSchema[] = [];
+  for (const file of schemaFiles) {
+    let source: string;
+    try {
+      source = await readFile(join(schemaDirectory, file), "utf8");
+    } catch (error) {
+      throw new Error(`pinned schema ${file} could not be read`, { cause: error });
+    }
+    try {
+      schemas.push(JSON.parse(source) as JsonSchema);
+    } catch (error) {
+      throw new Error(`pinned schema ${file} contains invalid JSON`, { cause: error });
+    }
+  }
+
+  let validators: Record<SchemaKind, ValidateFunction>;
+  try {
+    validators = compileValidators(schemas);
+  } catch (error) {
+    throw new Error("pinned schemas could not be compiled", { cause: error });
+  }
+  return <T>(kind: SchemaKind, value: unknown): T => validateWith(validators, kind, value);
 }

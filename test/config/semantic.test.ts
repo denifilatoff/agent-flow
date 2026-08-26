@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -36,6 +36,39 @@ async function loadFixture(name: "invalid-target" | "duplicate-repository"): Pro
 test("accepts the shipped bundle", async () => {
   const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
   await assert.doesNotReject(validateSemantics(bundle));
+});
+
+test("uses and requires schemas from the pinned root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-pinned-schema-"));
+  try {
+    await cp("config", join(root, "config"), { recursive: true });
+    await cp("schemas", join(root, "schemas"), { recursive: true });
+    const flowSchemaPath = join(root, "schemas/v1/flow.schema.json");
+    const flowSchema = JSON.parse(await readFile(flowSchemaPath, "utf8")) as {
+      properties: { metadata: { properties: { id: Record<string, unknown> } } };
+    };
+    flowSchema.properties.metadata.properties.id.const = "pinned-flow";
+    await writeFile(flowSchemaPath, JSON.stringify(flowSchema));
+
+    await assert.rejects(
+      loadConfigBundle(root, "config/controller.example.yaml", REVISION),
+      /Flow validation failed.*must be equal to constant/,
+    );
+
+    const receiptSchemaPath = join(root, "schemas/v1/agent-receipt.schema.json");
+    await unlink(receiptSchemaPath);
+    await assert.rejects(
+      loadConfigBundle(root, "config/controller.example.yaml", REVISION),
+      /pinned schema agent-receipt\.schema\.json.*could not be read/,
+    );
+    await writeFile(receiptSchemaPath, "{");
+    await assert.rejects(
+      loadConfigBundle(root, "config/controller.example.yaml", REVISION),
+      /pinned schema agent-receipt\.schema\.json.*invalid JSON/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("rejects missing targets and duplicate repositories", async () => {
@@ -79,6 +112,7 @@ test("rejects incomplete packages and paths outside the pinned root", async () =
   const root = await mkdtemp(join(tmpdir(), "agent-flow-config-"));
   try {
     await cp("config", join(root, "config"), { recursive: true });
+    await cp("schemas", join(root, "schemas"), { recursive: true });
     await cp("agent-packages", join(root, "agent-packages"), { recursive: true });
     await unlink(join(root, "agent-packages/architect/apm.lock.yaml"));
     await unlink(join(root, "agent-packages/planner/apm.yml"));

@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import { parseYaml, validateDocument } from "./schema-validator.ts";
+import { createDocumentValidator, parseYaml } from "./schema-validator.ts";
 import type { AgentCatalog, ControllerConfig, FlowDefinition } from "./types.js";
 
 export interface ConfigBundle {
@@ -32,15 +32,16 @@ async function pinnedFile(root: string, path: string): Promise<string> {
 
 export async function loadConfigBundle(root: string, controllerPath: string, revision: string): Promise<ConfigBundle> {
   const canonicalRoot = await realpath(resolve(root));
-  const controller = validateDocument<ControllerConfig>(
+  const validatePinnedDocument = await createDocumentValidator(await pinnedFile(canonicalRoot, "schemas/v1"));
+  const controller = validatePinnedDocument<ControllerConfig>(
     "ControllerConfig",
     await parseYaml(await pinnedFile(canonicalRoot, controllerPath)),
   );
-  const flow = validateDocument<FlowDefinition>(
+  const flow = validatePinnedDocument<FlowDefinition>(
     "Flow",
     await parseYaml(await pinnedFile(canonicalRoot, controller.configuration.flow)),
   );
-  const catalog = validateDocument<AgentCatalog>(
+  const catalog = validatePinnedDocument<AgentCatalog>(
     "AgentCatalog",
     await parseYaml(await pinnedFile(canonicalRoot, controller.configuration.catalog)),
   );
