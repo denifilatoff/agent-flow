@@ -40,8 +40,9 @@ Write one JSON object to `AGENT_FLOW_RECEIPT_PATH`. It must conform to `AgentRec
 `summary`, and `artifacts`. Every plan, question, or diagnostic comment artifact contains exactly `kind: "comment"`,
 `id`, `url`, `marker`, and `artifactKind`, using provider-returned values and the exact marker. Use `succeeded` for a
 completed plan, `needs-human` for a stage question, and `failed` with an `error` for a technical failure. In human-input
-mode, always set receipt `outcome` to `succeeded` and include `humanGate` with the cited `sourceCommentId`, mapped
-`verdict`, and bounded `notes`. For a `question` or `unclear` verdict, publish and receipt exactly one marked question
+mode, always set receipt `outcome` to `succeeded` and include `humanGate` with the cited `sourceCommentId` and mapped
+`verdict`. Always set `notes` to an array of one or more nonempty strings, never to a string. For a `question` or `unclear`
+verdict, publish and receipt exactly one marked question
 artifact containing exactly `kind: "comment"`, `id`, `url`, `marker`, and `artifactKind`, and set
 `artifactKind: "question"`. For `approved`, `changes-requested`, or `cancelled`, publish no artifact and set `artifacts`
 to `[]`. Never invent provider IDs, URLs, or publication state.

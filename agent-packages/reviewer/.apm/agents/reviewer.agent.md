@@ -75,7 +75,9 @@ technical failure. For the closed, unmerged stage question, set `outcome` to `ne
 `ReceiptComment` returned by provider readback. Do not include `ReceiptReview` or `humanGate`.
 
 In human-input mode, always set receipt `outcome` to `succeeded` and include `humanGate` with the cited
-`sourceCommentId`, mapped verdict, and bounded `notes`. For a `question` or `unclear` verdict, publish and receipt exactly
+`sourceCommentId` and mapped verdict.
+Always set `notes` to an array of one or more nonempty strings, never to a string.
+For a `question` or `unclear` verdict, publish and receipt exactly
 one marked question artifact containing exactly `kind: "comment"`, `id`, `url`, `marker`, and `artifactKind`, and set
 `artifactKind: "question"`. For `approved`, `changes-requested`, or `cancelled`, publish no artifact and set `artifacts`
 to `[]`. Never invent provider IDs, URLs, SHAs, verdicts, or publication state.

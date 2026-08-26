@@ -269,6 +269,10 @@ test("compiles every package with explicit receipt artifact discriminators", asy
         result.instructions,
         /For a `question` or `unclear`\s+verdict,[\s\S]*exactly\s+one marked question\s+artifact[\s\S]*`kind: "comment"`[\s\S]*`artifactKind: "question"`[\s\S]*For `approved`, `changes-requested`, or `cancelled`,[\s\S]*`artifacts`\s+to `\[\]`/,
       );
+      assert.match(
+        result.instructions,
+        /set `notes` to an array of one or more nonempty strings, never to a string/,
+      );
       if (agentId === "developer") {
         assert.match(
           result.instructions,

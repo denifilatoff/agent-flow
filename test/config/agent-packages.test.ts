@@ -87,6 +87,10 @@ test("human-input receipts always use the schema-compatible outcome", async () =
       agent.body,
       /In human-input\s+mode, always set receipt `outcome` to `succeeded`/,
     );
+    assert.match(
+      agent.body,
+      /set `notes` to an array of one or more nonempty strings, never to a string/,
+    );
     assert.match(agent.body, HUMAN_INPUT_ARTIFACT_MATRIX);
   }
 });
