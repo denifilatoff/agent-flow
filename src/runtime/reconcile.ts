@@ -49,6 +49,7 @@ export interface AttemptLauncher {
   start(request: AttemptRequest): Promise<void>;
   cancel(flowInstanceId: string): Promise<void>;
   isRunning(flowInstanceId: string): boolean;
+  onSettled?(listener: (ref: TicketRef) => void): void;
 }
 
 export interface ReconcileConfigSource {

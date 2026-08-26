@@ -60,6 +60,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
     new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds)));
   const now = dependencies.now ?? (() => new Date().toISOString());
   const newId = dependencies.newId ?? randomUUID;
+  let onSettled: ((ref: AttemptRequest["ref"]) => void) | undefined;
 
   return {
     async start(request): Promise<void> {
@@ -91,6 +92,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       }).finally(() => {
         if (!running.launched) running.resolveReady();
         if (active.get(flowId) === running) active.delete(flowId);
+        if (running.launched && !running.cancelled) onSettled?.(request.ref);
       });
       await running.ready;
     },
@@ -105,6 +107,10 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
 
     isRunning(flowInstanceId): boolean {
       return active.has(flowInstanceId);
+    },
+
+    onSettled(listener): void {
+      onSettled = listener;
     },
   };
 

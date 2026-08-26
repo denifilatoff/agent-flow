@@ -199,7 +199,7 @@ test("production retries keep the pinned provider credential scoped to the child
   await controller.bootstrap();
   await waitFor(() => environments.length === 2);
   await waitFor(
-    () => currentControl(provider)?.attemptSeries?.current?.status === "succeeded",
+    () => currentControl(provider)?.stateId === "assessment-review",
     () => `events=${events.join(",")}; control=${JSON.stringify(currentControl(provider))}`,
   );
 
@@ -217,7 +217,7 @@ test("production retries keep the pinned provider credential scoped to the child
     assert.doesNotMatch(await readFile(path, "utf8"), /token|refresh|pinned-gitlab-token/i);
   }
   assert.equal(currentControl(provider)?.attemptSeries?.consumed, 2);
-  assert.equal(currentControl(provider)?.stateId, "assessment");
+  assert.equal(currentControl(provider)?.stateId, "assessment-review");
   const sessions = join(root, "data/sessions", currentControl(provider)!.flowInstanceId);
   for (const attemptId of await readdir(sessions)) {
     for (const file of ["context.json", "harness.log"]) {

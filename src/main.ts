@@ -233,6 +233,9 @@ function composeController(
       await Promise.all(Object.values(runners).map((runner) => runner.cancel(flowInstanceId)));
     },
     isRunning: (flowInstanceId) => Object.values(runners).some((runner) => runner.isRunning(flowInstanceId)),
+    onSettled(listener) {
+      for (const runner of Object.values(runners)) runner.onSettled?.(listener);
+    },
   };
 
   return createController({
@@ -255,6 +258,7 @@ function composeController(
         config: {
           loadCurrent: async () => bundle,
           loadPinned: async (revision) => {
+            if (revision === bundle.revision) return bundle;
             const pinned = await loadPinned(revision);
             await validateSemantics(pinned);
             return pinned;

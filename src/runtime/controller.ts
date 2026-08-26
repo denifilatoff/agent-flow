@@ -14,7 +14,7 @@ export interface ControllerDependencies {
   providers: readonly ControllerProvider[];
   concurrency: number;
   reconcile(ref: TicketRef): Promise<ReconcileOutcome>;
-  launcher: Pick<AttemptLauncher, "cancel" | "isRunning">;
+  launcher: Pick<AttemptLauncher, "cancel" | "isRunning" | "onSettled">;
   pollingIntervalSeconds?: number;
   now?: () => string;
   delay?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
@@ -76,6 +76,9 @@ export function createController(dependencies: ControllerDependencies): Controll
     concurrency: Math.max(1, repositories.length),
     key: ({ provider, repository }) => repositoryKey(provider, repository),
     run: reconcileRepository,
+  });
+  dependencies.launcher.onSettled?.((ref) => {
+    if (!stopping) void tickets.schedule(ref).catch(reportError);
   });
 
   return {

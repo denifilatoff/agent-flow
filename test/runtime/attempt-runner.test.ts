@@ -106,7 +106,7 @@ function fixture(options: {
   request?: AttemptRequest; results?: Array<HarnessResult | Error | Promise<HarnessResult>>;
   verify?: (attemptId: string) => Promise<AgentReceipt>; write?: AttemptRunnerDependencies["writeControl"];
   ids?: string[]; compileError?: Error; delay?: (milliseconds: number) => Promise<void>;
-  providerCredential?: ProviderCredential;
+  providerCredential?: ProviderCredential; onSettled?: (ref: AttemptRequest["ref"]) => void;
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
   const process = deferred<HarnessResult>();
@@ -156,6 +156,7 @@ function fixture(options: {
     async delay(milliseconds) { delays.push(milliseconds); events.push("delay"); await options.delay?.(milliseconds); },
     now: () => NOW, newId: () => ids.shift()!,
   });
+  if (options.onSettled) runner.onSettled?.(options.onSettled);
   return { events, controls, attempts, delays, process, runner, request: configuredRequest };
 }
 
@@ -173,6 +174,16 @@ test("persists and reads back started before a background launch", async () => {
     "session:create", "apm:compile", "harness:spawn"]);
   assert.equal(subject.controls[0]!.attemptSeries?.consumed, 1);
   subject.process.resolve(OK); await waitIdle(subject);
+});
+
+test("wakes the ticket after a background attempt settles", async () => {
+  const settled: string[] = [];
+  const subject = fixture({ onSettled: (ref) => settled.push(`${ref.provider}:${ref.repository}#${ref.number}`) });
+  await subject.runner.start(subject.request);
+  assert.deepEqual(settled, []);
+  subject.process.resolve(OK);
+  await waitIdle(subject);
+  assert.deepEqual(settled, ["github:owner/repo#7"]);
 });
 
 test("suppresses a second start while the first process is active", async () => {
@@ -323,12 +334,14 @@ test("blocked reset reuses series ID; new input creates a fresh series", async (
 });
 
 test("cancel aborts the live job without owning provider state", async () => {
-  const subject = fixture(); await subject.runner.start(subject.request);
+  let settled = 0;
+  const subject = fixture({ onSettled: () => { settled += 1; } }); await subject.runner.start(subject.request);
   const cancelling = subject.runner.cancel(FLOW);
   subject.process.resolve({ exitCode: null, signal: "SIGTERM", timedOut: false });
   await cancelling;
   assert.equal(subject.runner.isRunning(FLOW), false);
   assert.equal(subject.controls.at(-1)!.attemptSeries?.current?.status, "started");
+  assert.equal(settled, 0);
   await subject.runner.cancel(FLOW);
 });
 
