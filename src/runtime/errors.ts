@@ -2,7 +2,14 @@ import { ApmPreflightError } from "../harness/apm.ts";
 import { HarnessPreflightError, HarnessProcessError } from "../harness/process.ts";
 import { ProviderHttpError } from "../provider/http.ts";
 import type { ReceiptError } from "../config/types.js";
-import { InvalidReceiptError, ReceiptReadbackError } from "./receipts.ts";
+import {
+  DecisionEvidenceUnavailableError,
+  DecisionReadbackError,
+  DecisionTrustError,
+  InvalidDecisionError,
+  InvalidReceiptError,
+  ReceiptReadbackError,
+} from "./receipts.ts";
 
 export class AttemptError extends Error {
   readonly code: string;
@@ -43,6 +50,18 @@ export function classifyAttemptError(error: unknown): AttemptError {
   }
   if (error instanceof ReceiptReadbackError) {
     return new AttemptError(error.code, "provider receipt readback failed transiently", true);
+  }
+  if (error instanceof InvalidDecisionError) {
+    return new AttemptError(error.code, "agent decision is invalid", true);
+  }
+  if (error instanceof DecisionEvidenceUnavailableError) {
+    return new AttemptError(error.code, "agent decision evidence is unavailable", true);
+  }
+  if (error instanceof DecisionReadbackError) {
+    return new AttemptError(error.code, "provider decision evidence readback failed transiently", true);
+  }
+  if (error instanceof DecisionTrustError) {
+    return new AttemptError(error.code, "agent decision contradicts pinned provider evidence", false);
   }
   return new AttemptError("ATTEMPT_CONFIGURATION_FAILED", "attempt configuration failed", false);
 }
