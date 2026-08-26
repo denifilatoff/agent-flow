@@ -45,7 +45,15 @@ export function createCodexAdapter(
       }
       return runHarnessProcess("codex", {
         file: "codex",
-        args: ["exec", "--cd", input.workspace.worktree, "-"],
+        args: [
+          "exec",
+          "--approve-for-me",
+          "--add-dir",
+          input.session.root,
+          "--cd",
+          input.workspace.worktree,
+          "-",
+        ],
         cwd: input.workspace.worktree,
         env: environment,
         logPath: input.session.logPath,

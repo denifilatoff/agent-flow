@@ -233,7 +233,16 @@ test("runs Codex in the worktree with private attempt paths", async (t) => {
   const pending = adapter.run(fixture.input);
   await waitForSpawn(processes.calls);
   const call = processes.calls[0]!;
-  assert.deepEqual([call.file, ...call.args], ["codex", "exec", "--cd", fixture.input.workspace.worktree, "-"]);
+  assert.deepEqual([call.file, ...call.args], [
+    "codex",
+    "exec",
+    "--approve-for-me",
+    "--add-dir",
+    fixture.input.session.root,
+    "--cd",
+    fixture.input.workspace.worktree,
+    "-",
+  ]);
   assert.equal(call.cwd, fixture.input.workspace.worktree);
   assert.equal(call.env.AGENT_FLOW_CONTEXT_PATH, fixture.input.session.contextPath);
   assert.equal(call.env.AGENT_FLOW_RECEIPT_PATH, fixture.input.session.receiptPath);
