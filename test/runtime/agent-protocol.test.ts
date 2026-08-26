@@ -169,6 +169,15 @@ test("renders event-specific evidence and the pinned change identity", async () 
   assert.match(paused, /artifact=question/);
 });
 
+test("rejects a review prompt without a pinned change request", async () => {
+  const flow = await shippedFlow();
+
+  assert.throws(
+    () => renderRuntimePrompt(promptInput(flow, { stateId: "review", resultContract: "review" })),
+    /review event requires a pinned change request/,
+  );
+});
+
 test("human input publishes only clarification questions", async () => {
   const flow = await shippedFlow();
   const sourceComment = {

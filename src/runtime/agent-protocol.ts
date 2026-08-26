@@ -97,7 +97,8 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
   }
   if (event.startsWith("human-")) return "no new provider publication";
   if (event === "review-approved" || event === "review-changes-requested") {
-    const head = input.changeRequest?.headSha ?? "the pinned head from the attempt context";
+    if (!input.changeRequest) throw new Error("review event requires a pinned change request");
+    const head = input.changeRequest.headSha;
     const verdict = event === "review-approved" ? "approved" : "changes-requested";
     return `a provider-native review on ${head} beginning exactly with ${marker(input, "review")} `
       + `and <!-- agent-flow-review:v1 head=${head} verdict=${verdict} -->`;
