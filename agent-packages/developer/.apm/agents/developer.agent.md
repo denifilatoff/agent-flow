@@ -45,7 +45,8 @@ Write one JSON object to `AGENT_FLOW_RECEIPT_PATH`. It must conform to `AgentRec
 `number`, `url`, 40-character `headSha`, and `state`. Read the change request back and bind these fields to its actual
 result after the final push. Never report a local or stale SHA.
 
-Use `succeeded` after the repository tests and provider readback pass. Use `needs-human` with a marked question when a
-human decision is required. Use `failed` with an `error` and, when available, a marked diagnostic for a technical
-failure. In human-input mode, also include `humanGate` with the cited `sourceCommentId`, mapped `verdict`, and bounded
-`notes`. Never invent provider IDs, URLs, SHAs, or publication state.
+In stage mode, use `succeeded` after the repository tests and provider readback pass, or use `needs-human` with a marked
+question when a human decision is required. Use `failed` with an `error` and, when available, a marked diagnostic for a
+technical failure. In human-input mode, always set receipt `outcome` to `succeeded`, including when the verdict is
+`unclear` and a clarification question is published. Also include `humanGate` with the cited `sourceCommentId`, mapped
+`verdict`, and bounded `notes`. Never invent provider IDs, URLs, SHAs, or publication state.

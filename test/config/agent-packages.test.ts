@@ -60,3 +60,32 @@ test("developer package has one entry agent and a lockfile", async () => {
 test("reviewer package has one entry agent and a lockfile", async () => {
   await assertAgentPackage("reviewer", "review");
 });
+
+test("human-input receipts always use the schema-compatible outcome", async () => {
+  for (const packageName of Object.keys(PACKAGE_TARGETS)) {
+    const agent = parsePrimitive(
+      await readFile(
+        new URL(`../../agent-packages/${packageName}/.apm/agents/${packageName}.agent.md`, import.meta.url),
+        "utf8",
+      ),
+    );
+    assert.match(
+      agent.body,
+      /In human-input mode, always set receipt `outcome` to `succeeded`, including when the\s+verdict\s+is\s+`unclear`/,
+    );
+  }
+});
+
+test("reviewer accepts a closed change request only for human input", async () => {
+  const reviewer = parsePrimitive(
+    await readFile(
+      new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(reviewer.body, /Stage mode requires an open linked change request\./);
+  assert.match(
+    reviewer.body,
+    /Human-input mode may receive[\s\S]*after it closes[\s\S]*reopening that same request or cancelling the flow/,
+  );
+});
