@@ -174,6 +174,14 @@ test("binds discovery cursors to the exact project and window", async () => {
     ),
     /page/,
   );
+  await assert.rejects(
+    gitlab.discover(REPOSITORY, window, ""),
+    /discovery cursor/,
+  );
+  await assert.rejects(
+    gitlab.discover(REPOSITORY, window, valid.replace("page=2", `page=${"9".repeat(400)}`)),
+    /discovery cursor requires one advancing page parameter/,
+  );
 });
 
 test("rejects provider pagination that changes routes or omits an advancing page", async () => {
@@ -185,6 +193,15 @@ test("rejects provider pagination that changes routes or omits an advancing page
   });
   await assert.rejects(
     adapter(noPageClient).discover(REPOSITORY, { updatedAfter: SINCE, overlapSeconds: 1 }),
+    /pagination.*page/,
+  );
+
+  const hugePageClient = new FixtureClient().add("GET", discovery, {
+    data: fixture.discovery,
+    next: `/api/v4/${discovery}&page=${"9".repeat(400)}`,
+  });
+  await assert.rejects(
+    adapter(hugePageClient).discover(REPOSITORY, { updatedAfter: SINCE, overlapSeconds: 1 }),
     /pagination.*page/,
   );
 

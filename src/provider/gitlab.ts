@@ -127,7 +127,7 @@ export function createGitLabAdapter(
       });
       const initialPath = `${route}?${query}`;
       let path: string;
-      if (cursor) {
+      if (cursor !== undefined) {
         const cursorUrl = new URL(cursor, apiBase);
         const expectedUrl = new URL(route, apiBase);
         if (cursorUrl.origin !== expectedUrl.origin
@@ -148,7 +148,11 @@ export function createGitLabAdapter(
           }
         }
         const pages = cursorUrl.searchParams.getAll("page");
-        if (pages.length !== 1 || !/^[1-9]\d*$/.test(pages[0]!) || Number(pages[0]) <= 1) {
+        const page = Number(pages[0]);
+        if (pages.length !== 1
+          || !/^[1-9]\d*$/.test(pages[0]!)
+          || !Number.isSafeInteger(page)
+          || page <= 1) {
           throw new Error("GitLab discovery cursor requires one advancing page parameter");
         }
         path = cursor;
@@ -334,10 +338,13 @@ function validatePagination(currentPath: string, nextPath: string, apiBase: URL)
 function paginationPage(url: URL, required: boolean): number {
   const values = url.searchParams.getAll("page");
   if (values.length === 0 && !required) return 1;
-  if (values.length !== 1 || !/^[1-9]\d*$/.test(values[0]!)) {
+  const page = Number(values[0]);
+  if (values.length !== 1
+    || !/^[1-9]\d*$/.test(values[0]!)
+    || !Number.isSafeInteger(page)) {
     throw new Error("GitLab pagination requires exactly one positive page parameter");
   }
-  return Number(values[0]);
+  return page;
 }
 
 function paginationFilters(url: URL): string {
