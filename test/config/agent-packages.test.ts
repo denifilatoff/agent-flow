@@ -48,3 +48,7 @@ async function assertAgentPackage(packageName: keyof typeof PACKAGE_TARGETS, art
 test("architect package has one entry agent and a lockfile", async () => {
   await assertAgentPackage("architect", "assessment");
 });
+
+test("planner package has one entry agent and a lockfile", async () => {
+  await assertAgentPackage("planner", "plan");
+});
