@@ -19,7 +19,7 @@ import { runPreflight, type PreflightDependencies, type ReadyDependencies } from
 import { createAttemptRunner } from "./runtime/attempt-runner.ts";
 import type { ControlWriter } from "./runtime/control-state.ts";
 import { createController, type Controller } from "./runtime/controller.ts";
-import { RateLimiter } from "./runtime/rate-limiter.ts";
+import { RateLimiter, type RateLimiterClock } from "./runtime/rate-limiter.ts";
 import { reconcileTicket, type AttemptLauncher } from "./runtime/reconcile.ts";
 import { WorkspaceManager } from "./runtime/workspaces.ts";
 
@@ -41,7 +41,7 @@ export interface MainDependencies {
 
 const DEFAULT_MAIN_DEPENDENCIES: MainDependencies = {
   createHealthServer,
-  createPreflightDependencies: productionDependencies,
+  createPreflightDependencies: createProductionDependencies,
   runPreflight,
   signals: process,
   reportError: (message) => console.error(message),
@@ -103,7 +103,11 @@ export async function main(
   return exitCode;
 }
 
-function productionDependencies(environment: NodeJS.ProcessEnv, healthPort: number) {
+export function createProductionDependencies(
+  environment: NodeJS.ProcessEnv,
+  healthPort: number,
+  rateLimiterClock?: RateLimiterClock,
+) {
   const configRepository = resolve(environment.AGENT_FLOW_CONFIG_REPOSITORY ?? "/config");
   const dataDirectory = resolve(environment.AGENT_FLOW_DATA_DIRECTORY ?? "/data");
   const controllerPath = environment.AGENT_FLOW_CONTROLLER_CONFIG ?? "config/controller.example.yaml";
@@ -131,7 +135,7 @@ function productionDependencies(environment: NodeJS.ProcessEnv, healthPort: numb
       for (const kind of ["github", "gitlab"] as const) {
         const config = bundle.controller.providers[kind];
         if (!config) continue;
-        const limiter = new RateLimiter(bundle.controller.polling);
+        const limiter = new RateLimiter(bundle.controller.polling, rateLimiterClock);
         const client = createRateLimitedHttpClient(
           new URL(config.apiUrl),
           () => ({ authorization: `Bearer ${requiredEnvironment(environment, config.tokenEnv)}` }),
