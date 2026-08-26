@@ -2,7 +2,7 @@ import { validateDocument } from "../config/schema-validator.ts";
 import type { ControlState } from "../config/types.js";
 
 const CONTROL_MARKER = "<!-- agent-flow-control:v1 -->";
-const CONTROL_COMMENT = /^<!-- agent-flow-control:v1 -->\n```json\n([\s\S]+)\n```\n$/;
+const CONTROL_COMMENT = /^<!-- agent-flow-control:v1 -->\n```json\n([\s\S]+)\n```\n?$/;
 const PATCH_FIELDS = new Set<keyof ControlStatePatch>([
   "stateId",
   "resumeStateId",

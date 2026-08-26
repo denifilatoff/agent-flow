@@ -53,6 +53,26 @@ test("round trips the exact control marker and increments sequence", () => {
   assert.equal(next.updatedAt, NOW);
 });
 
+test("round trips a control comment after GitLab removes its final newline", () => {
+  const state = controlState({ sequence: 4 });
+  const gitLabBody = renderControlComment(state).slice(0, -1);
+
+  assert.deepEqual(parseControlComment(gitLabBody), state);
+});
+
+test("rejects any other trailing control comment format", () => {
+  const canonical = renderControlComment(controlState());
+  const withoutFinalNewline = canonical.slice(0, -1);
+  for (const body of [
+    `${canonical}\n`,
+    `${withoutFinalNewline} `,
+    `${withoutFinalNewline}text`,
+    canonical.replace("\n```\n", "```\n"),
+  ]) {
+    assert.throws(() => parseControlComment(body), /control comment/);
+  }
+});
+
 test("returns null only for bodies without the marker on the first line", () => {
   assert.equal(parseControlComment("ordinary comment"), null);
   assert.equal(parseControlComment(`preface\n${renderControlComment(controlState())}`), null);
