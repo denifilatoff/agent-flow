@@ -1219,6 +1219,29 @@ test("uses stable semantic attempt input revisions", async (t) => {
     assert.notEqual(secondLauncher.requests[0]?.inputRevision, firstLauncher.requests[0]?.inputRevision);
   });
 
+  for (const [field, value] of [
+    ["title", "Fix the other edge case"],
+    ["description", "Handle the revised scope."],
+  ] as const) {
+    await t.test(`new ticket ${field}`, async () => {
+      const baselineProvider = new FakeProvider();
+      const baselineLauncher = new FakeLauncher();
+      await reconcileTicket(dependencies(baselineProvider, baselineLauncher), TICKET);
+      const baseline = baselineLauncher.requests[0]!.inputRevision;
+
+      const changedProvider = new FakeProvider();
+      installControl(changedProvider, controlState({
+        attemptSeries: attemptSeries({ inputRevision: baseline }),
+      }));
+      changedProvider.snapshot[field] = value;
+      const changedLauncher = new FakeLauncher();
+      await reconcileTicket(dependencies(changedProvider, changedLauncher), TICKET);
+
+      assert.equal(changedLauncher.requests.length, 1);
+      assert.notEqual(changedLauncher.requests[0]!.inputRevision, baseline);
+    });
+  }
+
   await t.test("new human comment", async () => {
     async function revision(sourceId: string): Promise<string> {
       const provider = new FakeProvider();

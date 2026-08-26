@@ -465,9 +465,12 @@ function attemptInputRevision(
   snapshot: ProviderTicketSnapshot,
   sourceComment: ProviderComment | null,
 ): string {
-  const parts: string[] = [`config:${control.configRevision}`];
+  const parts: unknown[] = [
+    ["config", control.configRevision],
+    ["ticket", snapshot.title, snapshot.description],
+  ];
   if (sourceComment) {
-    parts.push(`comment:${sourceComment.id}`);
+    parts.push(["comment", sourceComment.id]);
   } else {
     if (snapshot.changeRequest) {
       parts.push([
@@ -477,11 +480,11 @@ function attemptInputRevision(
         snapshot.changeRequest.number,
         snapshot.changeRequest.headSha,
         snapshot.changeRequest.state,
-      ].join(":"));
+      ]);
     }
-    if (control.humanGate) parts.push(`human:${control.humanGate.sourceCommentId}`);
-    if (parts.length === 1 && snapshot.activation.eventId) {
-      parts.push(`activation:${snapshot.activation.eventId}`);
+    if (control.humanGate) parts.push(["human", control.humanGate.sourceCommentId]);
+    if (!snapshot.changeRequest && !control.humanGate && snapshot.activation.eventId) {
+      parts.push(["activation", snapshot.activation.eventId]);
     }
   }
   return `input:${createHash("sha256").update(JSON.stringify(parts)).digest("hex")}`;
