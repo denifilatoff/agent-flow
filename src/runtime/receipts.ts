@@ -243,7 +243,7 @@ async function discoverDecisionComment(
   provider: ProviderAdapter,
 ): Promise<ProviderComment> {
   const expectedMarker = decisionMarker(expected, artifactKind);
-  const fresh = ticket.comments.filter((comment) => comment.createdAt >= expected.startedAt);
+  const fresh = ticket.comments.filter((comment) => isFreshEvidence(comment.createdAt, expected.startedAt));
   const sameAttempt = fresh.filter((comment) => attemptArtifact(comment.body, expected) !== null);
   if (sameAttempt.some((comment) => attemptArtifact(comment.body, expected) !== artifactKind)) {
     decisionTrust("fresh same-attempt comment marker has the wrong artifact kind");
@@ -288,7 +288,7 @@ async function readDecisionChange(
     decisionTrust("linked change request identity does not match the pinned change request");
   }
   if (linked.state !== "open") decisionTrust("linked change request state is not open");
-  if (linked.updatedAt < expected.startedAt) {
+  if (!isFreshEvidence(linked.updatedAt, expected.startedAt)) {
     evidenceUnavailable("linked change request was not updated during the attempt");
   }
 
@@ -298,6 +298,9 @@ async function readDecisionChange(
   );
   assertChangeTicketIdentity(published, expected.ticket);
   assertSameDecisionChange(linked, published);
+  if (!isFreshEvidence(published.updatedAt, expected.startedAt)) {
+    evidenceUnavailable("linked change request was not updated during the attempt");
+  }
   return published;
 }
 
@@ -326,7 +329,7 @@ async function readDecisionReview(
     "provider review evidence could not be verified",
   );
   if (!discovered) evidenceUnavailable("provider review evidence is unavailable");
-  if (discovered.submittedAt < expected.startedAt) {
+  if (!isFreshEvidence(discovered.submittedAt, expected.startedAt)) {
     evidenceUnavailable("provider review was not submitted during the attempt");
   }
   const published = await decisionProviderReadback(
@@ -347,6 +350,9 @@ async function readDecisionReview(
   if (lines[0] !== reviewMarker) decisionTrust("provider review marker does not match the attempt");
   const metadata = `<!-- agent-flow-review:v1 head=${pinned.headSha} verdict=${verdict} -->`;
   if (lines[1] !== metadata) decisionTrust("provider review metadata does not match the logical verdict");
+  if (!isFreshEvidence(published.submittedAt, expected.startedAt)) {
+    evidenceUnavailable("provider review was not submitted during the attempt");
+  }
   if (!sameReview(discovered, published)) decisionTrust("provider review changed during readback");
   return published;
 }
@@ -539,6 +545,12 @@ function attemptArtifact(body: string, expected: DecisionExpectation): string | 
   return line.startsWith(prefix) && line.endsWith(" -->")
     ? line.slice(prefix.length, -4)
     : null;
+}
+
+function isFreshEvidence(timestamp: string, startedAt: string): boolean {
+  const evidenceTime = Date.parse(timestamp);
+  const startTime = Date.parse(startedAt);
+  return Number.isFinite(evidenceTime) && Number.isFinite(startTime) && evidenceTime >= startTime;
 }
 
 async function decisionProviderRead<T>(

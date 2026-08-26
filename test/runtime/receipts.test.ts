@@ -487,6 +487,22 @@ test("treats missing fresh evidence as retryable", async (context) => {
     })]);
     await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation(), provider), /comment/);
   });
+  await context.test("same-second comment before a millisecond start", async () => {
+    const provider = new FakeProvider();
+    installComments(provider, [comment("assessment", {
+      createdAt: "2026-08-27T10:00:00Z", updatedAt: "2026-08-27T10:00:00Z",
+    })]);
+    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
+      startedAt: "2026-08-27T10:00:00.500Z",
+    }), provider), /comment/);
+  });
+  await context.test("invalid comment timestamp", async () => {
+    const provider = new FakeProvider();
+    installComments(provider, [comment("assessment", {
+      createdAt: "not-a-timestamp", updatedAt: "not-a-timestamp",
+    })]);
+    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation(), provider), /comment/);
+  });
   await context.test("change request", async () => {
     const provider = new FakeProvider();
     provider.ticket = snapshot({ changeRequest: null });
@@ -504,6 +520,37 @@ test("treats missing fresh evidence as retryable", async (context) => {
     }), provider), /change request/);
     assert.deepEqual(provider.calls, ["readTicket"]);
   });
+  await context.test("same-second development change request before a millisecond start", async () => {
+    const provider = new FakeProvider();
+    const stale = change({ updatedAt: "2026-08-27T10:00:00Z" });
+    provider.ticket = snapshot({ changeRequest: stale });
+    provider.changeRequest = stale;
+    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
+      stateId: "development",
+      resultContract: "development",
+      startedAt: "2026-08-27T10:00:00.500Z",
+    }), provider), /change request/);
+    assert.deepEqual(provider.calls, ["readTicket"]);
+  });
+  await context.test("development timestamp regresses during exact readback", async () => {
+    const provider = new FakeProvider();
+    provider.ticket = snapshot({ changeRequest: change({ updatedAt: "2026-08-27T10:00:00.500Z" }) });
+    provider.changeRequest = change({ updatedAt: "2026-08-27T10:00:00Z" });
+    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
+      stateId: "development",
+      resultContract: "development",
+      startedAt: "2026-08-27T10:00:00.500Z",
+    }), provider), /change request/);
+  });
+  await context.test("invalid development timestamp", async () => {
+    const provider = new FakeProvider();
+    const invalid = change({ updatedAt: "not-a-timestamp" });
+    provider.ticket = snapshot({ changeRequest: invalid });
+    provider.changeRequest = invalid;
+    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
+      stateId: "development", resultContract: "development",
+    }), provider), /change request/);
+  });
   await context.test("review", async () => {
     const provider = new FakeProvider();
     provider.foundReview = null;
@@ -520,6 +567,39 @@ test("treats missing fresh evidence as retryable", async (context) => {
       stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
     }), provider), /review/);
     assert.deepEqual(provider.calls, ["readTicket", "findReview:31"]);
+  });
+  await context.test("same-second review before a millisecond start", async () => {
+    const provider = new FakeProvider();
+    const stale = review({ submittedAt: "2026-08-27T10:00:00Z" });
+    provider.foundReview = stale;
+    provider.reviewReadback = stale;
+    await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
+      stateId: "review",
+      resultContract: "review",
+      pinnedChangeRequest: change(),
+      startedAt: "2026-08-27T10:00:00.500Z",
+    }), provider), /review/);
+    assert.deepEqual(provider.calls, ["readTicket", "findReview:31"]);
+  });
+  await context.test("review timestamp regresses during exact readback", async () => {
+    const provider = new FakeProvider();
+    provider.foundReview = review({ submittedAt: "2026-08-27T10:00:00.500Z" });
+    provider.reviewReadback = review({ submittedAt: "2026-08-27T10:00:00Z" });
+    await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
+      stateId: "review",
+      resultContract: "review",
+      pinnedChangeRequest: change(),
+      startedAt: "2026-08-27T10:00:00.500Z",
+    }), provider), /review/);
+  });
+  await context.test("invalid review timestamp", async () => {
+    const provider = new FakeProvider();
+    const invalid = review({ submittedAt: "not-a-timestamp" });
+    provider.foundReview = invalid;
+    provider.reviewReadback = invalid;
+    await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
+      stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
+    }), provider), /review/);
   });
 });
 
