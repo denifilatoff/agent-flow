@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { createGitLabAdapter } from "../../src/provider/gitlab.ts";
+import { ProviderHttpError } from "../../src/provider/http.ts";
 import type {
   ProviderRequest,
   ProviderResponse,
@@ -51,10 +52,13 @@ class FixtureClient implements RateLimitedHttpClient {
   }
 }
 
-function adapter(client: FixtureClient) {
+function adapter(
+  client: FixtureClient,
+  apiUrl = "https://gitlab.example.test/api/v4",
+) {
   return createGitLabAdapter(
     {
-      apiUrl: "https://gitlab.example.test/api/v4",
+      apiUrl,
       tokenEnv: "GITLAB_TOKEN",
       repositories: [REPOSITORY],
     },
@@ -91,16 +95,25 @@ test("uses updated_after and normalizes an issue snapshot", async () => {
     .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
     .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
       data: fixture.labelEventsFirst,
-      next: `${PROJECT}/issues/23/resource_label_events?page=2`,
+      next: `${PROJECT}/issues/23/resource_label_events?per_page=100&page=2`,
     })
-    .add("GET", `${PROJECT}/issues/23/resource_label_events?page=2`, {
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100&page=2`, {
       data: fixture.labelEventsSecond,
     })
-    .add("GET", `${PROJECT}/issues/23/notes?per_page=100`, {
-      data: fixture.commentsFirst,
-      next: `${PROJECT}/issues/23/notes?page=2`,
-    })
-    .add("GET", `${PROJECT}/issues/23/notes?page=2`, { data: fixture.commentsSecond })
+    .add(
+      "GET",
+      `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`,
+      {
+        data: fixture.commentsFirst,
+        next:
+          `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100&page=2`,
+      },
+    )
+    .add(
+      "GET",
+      `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100&page=2`,
+      { data: fixture.commentsSecond },
+    )
     .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, {
       data: fixture.relatedMergeRequests,
     })
@@ -151,8 +164,44 @@ test("binds discovery cursors to the exact project and window", async () => {
   );
   await assert.rejects(
     gitlab.discover(REPOSITORY, window, `${valid}&page=3`),
-    /discovery window/,
+    /page/,
   );
+  await assert.rejects(
+    gitlab.discover(
+      REPOSITORY,
+      window,
+      `/api/v4/${PROJECT}/issues?scope=all&state=all&updated_after=2026-08-25T09%3A59%3A59.000Z&per_page=100`,
+    ),
+    /page/,
+  );
+});
+
+test("rejects provider pagination that changes routes or omits an advancing page", async () => {
+  const discovery =
+    `${PROJECT}/issues?scope=all&state=all&updated_after=2026-08-25T09%3A59%3A59.000Z&per_page=100`;
+  const noPageClient = new FixtureClient().add("GET", discovery, {
+    data: fixture.discovery,
+    next: `/api/v4/${discovery}`,
+  });
+  await assert.rejects(
+    adapter(noPageClient).discover(REPOSITORY, { updatedAfter: SINCE, overlapSeconds: 1 }),
+    /pagination.*page/,
+  );
+
+  const managed = `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100`;
+  const crossProjectClient = new FixtureClient().add("GET", managed, {
+    data: [{ iid: 23 }],
+    next:
+      "/api/v4/projects/other%2Fproject/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100&page=2",
+  });
+  await assert.rejects(adapter(crossProjectClient).bootstrap(REPOSITORY), /pagination.*route/);
+
+  const changedFilterClient = new FixtureClient().add("GET", managed, {
+    data: [{ iid: 23 }],
+    next:
+      `/api/v4/${PROJECT}/issues?scope=all&state=opened&labels=agent-flow%3Amanaged&per_page=100&page=2`,
+  });
+  await assert.rejects(adapter(changedFilterClient).bootstrap(REPOSITORY), /pagination.*filters/);
 });
 
 test("bootstraps the union of managed and activation labels across pages", async () => {
@@ -162,11 +211,14 @@ test("bootstraps the union of managed and activation labels across pages", async
   const client = new FixtureClient()
     .add("GET", managed, {
       data: [{ iid: 23 }],
-      next: `${PROJECT}/issues?labels=agent-flow%3Amanaged&page=2`,
+      next:
+        `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100&page=2`,
     })
-    .add("GET", `${PROJECT}/issues?labels=agent-flow%3Amanaged&page=2`, {
-      data: [{ iid: 24 }],
-    })
+    .add(
+      "GET",
+      `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100&page=2`,
+      { data: [{ iid: 24 }] },
+    )
     .add("GET", activation, { data: [{ iid: 23 }, { iid: 25 }] });
 
   assert.deepEqual(await adapter(client).bootstrap(REPOSITORY), [
@@ -208,6 +260,21 @@ test("maps project access levels and performs issue note CRUD", async () => {
   assert.ok(client.calls.every(({ priority }) => priority === "active"));
 });
 
+test("maps a missing project member to none and preserves other provider errors", async () => {
+  const missing = new ProviderHttpError("member not found", 404, false, null, {});
+  const unavailable = new ProviderHttpError("provider unavailable", 503, true, null, {});
+  const client = new FixtureClient()
+    .add("GET", `${PROJECT}/members/all/11`, { data: null, error: missing })
+    .add("GET", `${PROJECT}/members/all/12`, { data: null, error: unavailable });
+  const gitlab = adapter(client);
+
+  assert.equal(await gitlab.permission(REPOSITORY, { login: "outsider", providerId: "11" }), "none");
+  await assert.rejects(
+    gitlab.permission(REPOSITORY, { login: "developer", providerId: "12" }),
+    (error) => error === unavailable,
+  );
+});
+
 test("updates only reserved labels and preserves concurrent user labels", async () => {
   const updatedIssue = {
     ...(fixture.issue as Record<string, unknown>),
@@ -238,7 +305,11 @@ test("ignores related merge requests from another project", async () => {
     .add("GET", PROJECT, { data: fixture.project })
     .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
     .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: [] })
-    .add("GET", `${PROJECT}/issues/23/notes?per_page=100`, { data: [] })
+    .add(
+      "GET",
+      `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`,
+      { data: [] },
+    )
     .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, {
       data: [{
         id: 4100,
@@ -250,6 +321,26 @@ test("ignores related merge requests from another project", async () => {
 
   assert.equal((await adapter(client).readTicket(ref)).changeRequest, null);
   assert.equal(client.calls.some(({ path }) => path.endsWith("/merge_requests/41")), false);
+});
+
+test("rejects ambiguous related merge requests in the same project", async () => {
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: [] })
+    .add(
+      "GET",
+      `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`,
+      { data: [] },
+    )
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, {
+      data: [
+        { iid: 41, project_id: 100, references: { full: "group/project!41" } },
+        { iid: 42, project_id: 100, references: { full: "group/project!42" } },
+      ],
+    });
+
+  await assert.rejects(adapter(client).readTicket(ref), /multiple related merge requests/);
 });
 
 test("reads merge request and structured review-note state", async () => {
@@ -275,6 +366,28 @@ test("reads merge request and structured review-note state", async () => {
     verdict: "changes-requested",
     body: (fixture.reviewNote as Record<string, unknown>).body,
   });
+});
+
+test("preserves a self-managed GitLab relative URL root for note artifacts", async () => {
+  const relativeApi = "https://gitlab.example.test/gitlab/api/v4";
+  const relativeMergeRequest = {
+    ...(fixture.mergeRequest as Record<string, unknown>),
+    web_url: "https://gitlab.example.test/gitlab/group/project/-/merge_requests/41",
+  };
+  const client = new FixtureClient()
+    .add("GET", `${PROJECT}/issues/23/notes/603`, { data: fixture.comment })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: relativeMergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/41/notes/702`, { data: fixture.reviewNote });
+  const gitlab = adapter(client, relativeApi);
+
+  assert.equal(
+    (await gitlab.readComment(ref, "603")).url,
+    "https://gitlab.example.test/gitlab/group/project/-/issues/23#note_603",
+  );
+  assert.equal(
+    (await gitlab.readReview(ref, 41, "702")).url,
+    "https://gitlab.example.test/gitlab/group/project/-/merge_requests/41#note_702",
+  );
 });
 
 test("rejects unknown issue, merge request, and review-note states", async () => {

@@ -1,4 +1,5 @@
 import type { ProviderConfig } from "../config/types.js";
+import { ProviderHttpError } from "./http.ts";
 import type {
   Actor,
   DiscoveryPage,
@@ -30,6 +31,7 @@ export function createGitLabAdapter(
   const allowlist = new Set(config.repositories);
   const apiBase = new URL(config.apiUrl);
   if (!apiBase.pathname.endsWith("/")) apiBase.pathname += "/";
+  const webBase = gitLabWebBase(apiBase);
 
   function repositoryPath(repository: string): string {
     if (!allowlist.has(repository)) throw new Error(`GitLab repository is not allowlisted: ${repository}`);
@@ -71,7 +73,9 @@ export function createGitLabAdapter(
       visited.add(next);
       const response = await request(next, priority);
       items.push(...array(response.data, "GitLab list response"));
-      next = response.pagination.next;
+      next = response.pagination.next === null
+        ? null
+        : validatePagination(next, response.pagination.next, apiBase);
     }
     return items;
   }
@@ -115,6 +119,13 @@ export function createGitLabAdapter(
     ): Promise<DiscoveryPage> {
       const route = `${repositoryPath(repository)}/issues`;
       const updatedAfter = discoverySince(window);
+      const query = new URLSearchParams({
+        scope: "all",
+        state: "all",
+        updated_after: updatedAfter,
+        per_page: "100",
+      });
+      const initialPath = `${route}?${query}`;
       let path: string;
       if (cursor) {
         const cursorUrl = new URL(cursor, apiBase);
@@ -137,24 +148,20 @@ export function createGitLabAdapter(
           }
         }
         const pages = cursorUrl.searchParams.getAll("page");
-        if (pages.length > 1 || (pages[0] !== undefined && !/^[1-9]\d*$/.test(pages[0]))) {
-          throw new Error("GitLab cursor does not match the discovery window");
+        if (pages.length !== 1 || !/^[1-9]\d*$/.test(pages[0]!) || Number(pages[0]) <= 1) {
+          throw new Error("GitLab discovery cursor requires one advancing page parameter");
         }
         path = cursor;
       } else {
-        const query = new URLSearchParams({
-          scope: "all",
-          state: "all",
-          updated_after: updatedAfter,
-          per_page: "100",
-        });
-        path = `${route}?${query}`;
+        path = initialPath;
       }
 
       const response = await request(path, "background");
       return {
         tickets: issueRefs(response.data, repository),
-        nextCursor: response.pagination.next,
+        nextCursor: response.pagination.next === null
+          ? null
+          : validatePagination(path, response.pagination.next, apiBase),
       };
     },
 
@@ -186,7 +193,13 @@ export function createGitLabAdapter(
       const labels = normalizeLabels(issue.labels);
       const events = await listAll(`${path}/resource_label_events?per_page=100`, "active");
       const issueUrl = string(issue, "web_url");
-      const comments = (await listAll(`${path}/notes?per_page=100`, "active"))
+      const commentQuery = new URLSearchParams({
+        activity_filter: "only_comments",
+        order_by: "created_at",
+        sort: "asc",
+        per_page: "100",
+      });
+      const comments = (await listAll(`${path}/notes?${commentQuery}`, "active"))
         .map((note) => normalizeNote(note, issueUrl));
       const activationEvent = labels.includes(ACTIVATION_LABEL)
         ? [...events].reverse().find((event) => isLabelEvent(event, "add", ACTIVATION_LABEL))
@@ -222,10 +235,16 @@ export function createGitLabAdapter(
 
     async permission(repository: string, actor: Actor): Promise<Permission> {
       assertIdentifier(actor.providerId, "GitLab actor id");
-      const response = await request(
-        `${repositoryPath(repository)}/members/all/${actor.providerId}`,
-        "active",
-      );
+      let response: ProviderResponse<unknown>;
+      try {
+        response = await request(
+          `${repositoryPath(repository)}/members/all/${actor.providerId}`,
+          "active",
+        );
+      } catch (error) {
+        if (error instanceof ProviderHttpError && error.status === 404) return "none";
+        throw error;
+      }
       const member = object(response.data, "GitLab project member");
       if (identifier(member.id, "GitLab project member id") !== actor.providerId) {
         throw new Error("GitLab project member identity mismatch");
@@ -236,7 +255,7 @@ export function createGitLabAdapter(
     async readComment(ref: TicketRef, id: string): Promise<ProviderComment> {
       assertIdentifier(id, "note id");
       const response = await request(`${ticketPath(ref)}/notes/${id}`, "active");
-      return normalizeNote(response.data, issueWebUrl(apiBase, ref, id));
+      return normalizeNote(response.data, issueWebUrl(webBase, ref, id));
     },
 
     async createComment(ref: TicketRef, body: string): Promise<ProviderComment> {
@@ -246,7 +265,7 @@ export function createGitLabAdapter(
       });
       const note = object(response.data, "GitLab note");
       const id = identifier(note.id, "GitLab note id");
-      return normalizeNote(note, issueWebUrl(apiBase, ref, id));
+      return normalizeNote(note, issueWebUrl(webBase, ref, id));
     },
 
     async updateComment(ref: TicketRef, id: string, body: string): Promise<ProviderComment> {
@@ -255,7 +274,7 @@ export function createGitLabAdapter(
         method: "PUT",
         body: { body },
       });
-      return normalizeNote(response.data, issueWebUrl(apiBase, ref, id));
+      return normalizeNote(response.data, issueWebUrl(webBase, ref, id));
     },
 
     async setControllerLabels(ref: TicketRef, remove: string[], add: string[]): Promise<string[]> {
@@ -287,9 +306,47 @@ export function createGitLabAdapter(
         `${repositoryPath(ref.repository)}/merge_requests/${changeNumber}/notes/${id}`,
         "active",
       );
-      return normalizeReviewNote(response.data, change, apiBase);
+      return normalizeReviewNote(response.data, change);
     },
   };
+}
+
+function validatePagination(currentPath: string, nextPath: string, apiBase: URL): string {
+  const current = new URL(currentPath, apiBase);
+  const next = new URL(nextPath, apiBase);
+  if (next.origin !== current.origin
+    || next.pathname !== current.pathname
+    || next.username
+    || next.password
+    || next.hash) {
+    throw new Error("GitLab pagination changed the request route");
+  }
+
+  const currentPage = paginationPage(current, false);
+  const nextPage = paginationPage(next, true);
+  if (nextPage <= currentPage) throw new Error("GitLab pagination page did not advance");
+  if (paginationFilters(current) !== paginationFilters(next)) {
+    throw new Error("GitLab pagination changed request filters");
+  }
+  return nextPath;
+}
+
+function paginationPage(url: URL, required: boolean): number {
+  const values = url.searchParams.getAll("page");
+  if (values.length === 0 && !required) return 1;
+  if (values.length !== 1 || !/^[1-9]\d*$/.test(values[0]!)) {
+    throw new Error("GitLab pagination requires exactly one positive page parameter");
+  }
+  return Number(values[0]);
+}
+
+function paginationFilters(url: URL): string {
+  return JSON.stringify(
+    [...url.searchParams.entries()]
+      .filter(([name]) => name !== "page")
+      .sort(([leftName, leftValue], [rightName, rightValue]) =>
+        leftName.localeCompare(rightName) || leftValue.localeCompare(rightValue)),
+  );
 }
 
 function normalizeProject(
@@ -343,7 +400,6 @@ function normalizeMergeRequest(value: unknown, repository: string): NormalizedCh
 function normalizeReviewNote(
   value: unknown,
   change: NormalizedChangeRequest,
-  apiBase: URL,
 ): NormalizedReview {
   const note = object(value, "GitLab review note");
   const body = optionalString(note.body, "GitLab review note body");
@@ -356,7 +412,7 @@ function normalizeReviewNote(
   const id = identifier(note.id, "GitLab review note id");
   return {
     id,
-    url: mergeRequestNoteUrl(apiBase, change.repository, change.number, id),
+    url: noteArtifactUrl(note, change.url, id),
     actor: normalizeActor(note.author, "GitLab review note actor"),
     submittedAt: string(note, "created_at"),
     headSha,
@@ -368,11 +424,9 @@ function normalizeReviewNote(
 function normalizeNote(value: unknown, resourceUrl: string): ProviderComment {
   const note = object(value, "GitLab note");
   const id = identifier(note.id, "GitLab note id");
-  const url = new URL(resourceUrl);
-  url.hash = `note_${id}`;
   return {
     id,
-    url: url.href,
+    url: noteArtifactUrl(note, resourceUrl, id),
     body: optionalString(note.body, "GitLab note body"),
     actor: normalizeActor(note.author, "GitLab note actor"),
     createdAt: string(note, "created_at"),
@@ -400,6 +454,7 @@ function findChangeRequestNumber(
   projectId: number,
   repository: string,
 ): number | null {
+  const candidates = new Set<number>();
   for (const item of related) {
     const mergeRequest = object(item, "GitLab related merge request");
     if (integer(mergeRequest, "project_id") !== projectId) continue;
@@ -407,9 +462,12 @@ function findChangeRequestNumber(
     assertPositiveInteger(number, "merge request number");
     const references = nullableObject(mergeRequest.references);
     if (references && string(references, "full") !== `${repository}!${number}`) continue;
-    return number;
+    candidates.add(number);
+    if (candidates.size > 1) {
+      throw new Error("GitLab issue has multiple related merge requests in the configured project");
+    }
   }
-  return null;
+  return candidates.values().next().value ?? null;
 }
 
 function discoverySince(window: DiscoveryWindow): string {
@@ -445,30 +503,42 @@ function permission(accessLevel: number): Permission {
   return "none";
 }
 
-function issueWebUrl(apiBase: URL, ref: TicketRef, noteId: string): string {
-  return noteUrl(apiBase, ref.repository, "issues", ref.number, noteId);
-}
-
-function mergeRequestNoteUrl(
-  apiBase: URL,
-  repository: string,
-  number: number,
-  noteId: string,
-): string {
-  return noteUrl(apiBase, repository, "merge_requests", number, noteId);
+function issueWebUrl(webBase: URL, ref: TicketRef, noteId: string): string {
+  return noteUrl(webBase, ref.repository, "issues", ref.number, noteId);
 }
 
 function noteUrl(
-  apiBase: URL,
+  webBase: URL,
   repository: string,
   resource: "issues" | "merge_requests",
   number: number,
   noteId: string,
 ): string {
   const path = repository.split("/").map(encodeURIComponent).join("/");
-  const url = new URL(`/${path}/-/${resource}/${number}`, apiBase.origin);
+  const url = new URL(webBase);
+  const root = url.pathname.replace(/\/$/, "");
+  url.pathname = `${root}/${path}/-/${resource}/${number}`;
   url.hash = `note_${noteId}`;
   return url.href;
+}
+
+function noteArtifactUrl(note: Record<string, unknown>, resourceUrl: string, noteId: string): string {
+  if (note.web_url !== undefined && note.web_url !== null) {
+    return new URL(string(note, "web_url")).href;
+  }
+  const url = new URL(resourceUrl);
+  url.hash = `note_${noteId}`;
+  return url.href;
+}
+
+function gitLabWebBase(apiBase: URL): URL {
+  const webBase = new URL(apiBase);
+  const path = webBase.pathname.replace(/\/+$/, "");
+  if (!path.endsWith("/api/v4")) throw new Error("GitLab API URL must end with /api/v4");
+  webBase.pathname = `${path.slice(0, -"/api/v4".length)}/`;
+  webBase.search = "";
+  webBase.hash = "";
+  return webBase;
 }
 
 function isControllerLabel(label: string): boolean {
