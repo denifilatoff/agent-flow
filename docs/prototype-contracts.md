@@ -1,5 +1,11 @@
 # Prototype contracts
 
+## Implementation status
+
+The runtime agent protocol in this document is the approved target for the next implementation change. The prototype
+code still accepts a model-generated `AgentReceipt` until that change is implemented. The implementation plan must
+replace that temporary contract without changing the provider-backed state-machine semantics defined here.
+
 ## Scope
 
 The prototype runs one polling controller in one Docker container. It supports GitHub and GitLab through separate REST
@@ -7,7 +13,7 @@ adapters, compiles data-only flow YAML into XState v5, and launches Codex or Cla
 does not include webhooks, a database, a durable queue, multiple controller replicas, a UI, or automatic merge.
 
 GitHub or GitLab remains the canonical operational store. Local repositories, worktrees, compiled APM output, context
-files, receipts, and harness sessions are replaceable execution artifacts.
+files, decisions, and harness sessions are replaceable execution artifacts.
 
 ## Repository structure
 
@@ -37,8 +43,9 @@ fields and unsupported versions before reconciliation starts.
 - `schemas/v1/controller-config.schema.json` defines providers, the repository allowlist, polling limits, and local
   runtime paths.
 - `schemas/v1/control-state.schema.json` defines the JSON payload inside the ticket's mutable control comment.
-- `schemas/v1/agent-receipt.schema.json` defines the local receipt that a completed agent attempt returns to the
-  controller.
+- `schemas/v1/agent-decision.schema.json` defines the minimal local JSON decision returned by a completed agent attempt.
+- `schemas/v1/agent-receipt.schema.json` defines the controller-built, provider-verified attempt record stored in the
+  control comment. The model does not write this record.
 
 The initial schemas use `v1alpha1` because the prototype may change them incompatibly. A running flow still pins the
 configuration repository commit SHA, so a schema change cannot alter an existing instance without explicit migration.
@@ -59,6 +66,7 @@ Flow YAML may use only these controller events:
 - `human-changes-requested`
 - `human-question`
 - `human-unclear`
+- `human-cancelled`
 - `human-answer-accepted`
 - `human-answer-cancelled`
 - `human-answer-unclear`
@@ -69,6 +77,11 @@ Flow YAML may use only these controller events:
 
 Ticket closure and activation-label removal are controller-level cancellation events and do not need repetition in
 every state. The controller also provides a fixed `$resume` target for `needs-human` and `blocked`.
+
+The controller assigns each fixed event one source: `agent`, `provider`, or `controller`. A generated runtime prompt
+contains only the current state's outgoing `agent` events. `attempts-exhausted`, `authorized-comment`, and every
+`change-request-*` event are never included in model choices. Event-source metadata is controller code, not executable
+flow configuration.
 
 Flow YAML may name only these guards:
 
@@ -95,9 +108,52 @@ At an explicit human gate or in `needs-human`, a new authorized comment starts t
 mode before XState receives a verdict event. `blocked` is different: any new authorized, unmarked comment resets the
 retry budget directly, as defined by the architecture.
 
-Human-input receipts may use `approved`, `changes-requested`, `cancelled`, `question`, or `unclear`. In `needs-human`,
-`cancelled` derives `human-answer-cancelled` and transitions directly to the terminal `cancelled` state. It does not
-resume the paused stage.
+In human-input mode, the generated prompt exposes only the gate events configured on the current state. In
+`needs-human`, `human-answer-cancelled` transitions directly to the terminal `cancelled` state. It does not resume the
+paused stage.
+
+## Generated runtime prompt
+
+The controller generates the orchestration part of every attempt prompt from the pinned flow state, attempt mode,
+result contract, and outgoing transitions. Compiled APM instructions precede this runtime section and describe only the
+agent's domain role. Agent packages do not repeat event names, JSON shapes, markers, environment paths, or machine
+record fields.
+
+The runtime section contains:
+
+- the context and decision file paths;
+- the exact marker to place on each required provider publication;
+- the pinned change-request identity and head when the stage needs them;
+- the allowed model-origin events and one exact JSON example for each;
+- the provider evidence required for each event; and
+- a prohibition on reserved-label changes and additional decision fields.
+
+The decision file contains exactly one JSON object:
+
+```json
+{"event":"<allowed-agent-event>"}
+```
+
+The session directory and active attempt bind that object to its flow instance and attempt. The model therefore does
+not repeat those identifiers. JSON Schema validates the fixed shape, and runtime validation rejects an event that is
+not both model-owned and configured on the current state.
+
+After a successful harness exit, the controller reads the decision and discovers its evidence through the provider:
+
+- `agent-succeeded` requires the stage's marked assessment or plan comment, or the linked open change request;
+- `agent-needs-human` requires one marked question comment;
+- `review-approved` and `review-changes-requested` require one native review on the pinned head whose logical verdict
+  agrees with the decision;
+- human gate question or unclear events require one marked clarification question; and
+- human gate approval, changes-requested, and cancellation events require no new publication.
+
+The controller reads every discovered object back and constructs the `AgentReceipt` stored in the control comment. It
+fills flow and attempt IDs, provider IDs and URLs, head SHA, normalized change-request state, and other deterministic
+fields. The model never supplies those values.
+
+A missing or malformed decision, an unavailable required artifact, or a syntactically valid event that lacks required
+evidence is a retryable attempt failure. Evidence that refers to another ticket, change request, flow, attempt, or
+pinned head is a non-retryable trust-boundary failure. Neither case advances XState.
 
 ## Cross-file validation
 
@@ -137,8 +193,9 @@ Every agent-authored provider comment starts with this marker:
 <!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=<artifact-kind> -->
 ```
 
-`artifact-kind` is `assessment`, `plan`, `question`, `review`, or `diagnostic`. The controller compares the marker with
-the receipt and reads the provider object back before accepting it.
+`artifact-kind` is `assessment`, `plan`, `question`, `review`, or `diagnostic`. The generated runtime prompt supplies
+the exact marker. The controller compares it with the active attempt and reads the provider object back before
+accepting it.
 
 Every stage-mode review publication, including a comment-style provider review, starts with these two lines in this
 order:
@@ -154,22 +211,21 @@ so the agent must publish no verdict after observing a different provider head. 
 `artifact=question` publications and do not include review metadata.
 
 When GitHub prevents self-approval, the agent submits a native pull-request review with event `COMMENT`. Its second
-marker line carries the intended logical verdict, such as `approved`. The receipt contains that review's ID as one
-`ReceiptReview`, and the controller reads it back from `/pulls/<number>/reviews/<id>`. The fallback is not an issue
-comment. For native `APPROVED` and `CHANGES_REQUESTED` states, the marker verdict must agree with the provider state.
+marker line carries the intended logical verdict, such as `approved`. The controller locates that review by the active
+attempt marker and reads it back from the pull-request reviews API. The fallback is not an issue comment. For native
+`APPROVED` and `CHANGES_REQUESTED` states, the marker verdict must agree with the provider state.
 
-Only an open linked change request follows the pinned-head review path and produces a `ReceiptReview`. A closed,
-unmerged linked change request may run the reviewer in stage mode only once after Task 17 enters `needs-human` with
+Only an open linked change request follows the pinned-head review path and produces a verified review result. A closed,
+unmerged linked change request may run the reviewer in stage mode only once after the flow enters `needs-human` with
 `review` as the resume state. This run does not inspect the closed head or publish review metadata or a verdict. It
-publishes one reopen-or-cancel question that starts with the exact common marker for `artifact=question`, reads the
-provider comment back, and writes a `needs-human` receipt containing exactly that `ReceiptComment`. The receipt has no
-`ReceiptReview` or `humanGate`. A merged change request never uses this path.
+publishes one reopen-or-cancel question with the supplied `artifact=question` marker and writes
+`{"event":"agent-needs-human"}`. A merged change request never uses this path.
 
 The first later authorized unmarked answer runs the reviewer in human-input mode. The reviewer interprets reopen,
-cancel, or unclear intent without reviewing code. Reopen maps to `approved`, and cancel maps to `cancelled`. The agent
-writes a `succeeded` receipt with `humanGate`; unclear or question intent also publishes one marked clarification
-question. `cancelled` transitions directly to terminal `cancelled`, removes the activation label, preserves
-`agent-flow:managed`, and exposes only `agent-stage:cancelled`. Human-input mode never publishes a review verdict.
+cancel, or unclear intent without reviewing code. Reopen produces `human-answer-accepted`; cancel produces
+`human-answer-cancelled`; unclear or question intent produces `human-answer-unclear` and one marked clarification
+question. Cancellation removes the activation label, preserves `agent-flow:managed`, and exposes only
+`agent-stage:cancelled`. Human-input mode never publishes a review verdict.
 
 ## Attempt files
 
@@ -178,14 +234,14 @@ The controller creates one immutable session directory per attempt:
 ```text
 /data/sessions/<flow-instance-id>/<attempt-id>/
   context.json
-  receipt.json
+  decision.json
   harness.log
   harness-session/
 ```
 
-The harness receives `AGENT_FLOW_CONTEXT_PATH` and `AGENT_FLOW_RECEIPT_PATH`. The controller treats `receipt.json` as
-untrusted input, validates it, reads each referenced provider artifact back, then copies the accepted receipt into the
-control comment. Losing the session directory does not lose operational state.
+The harness receives `AGENT_FLOW_CONTEXT_PATH` and `AGENT_FLOW_DECISION_PATH`. The controller treats `decision.json` as
+untrusted input, validates it, discovers and reads the required provider artifacts, then stores its own verified result
+in the control comment. Losing the session directory does not lose operational state.
 
 ## Repository workspaces
 
