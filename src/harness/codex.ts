@@ -43,9 +43,14 @@ export function createCodexAdapter(
         ]);
         home = await createHarnessHome(input.session, "codex");
         await seedCodexHome(auth, home);
+        const cliConfig = await createCliConfigEnvironment(home);
         environment = harnessEnvironment({
-          ...providerCredentialEnvironment(input.providerCredential),
-          ...await createCliConfigEnvironment(home),
+          ...await providerCredentialEnvironment(
+            input.providerCredential,
+            cliConfig.GLAB_CONFIG_DIR,
+            dependencies,
+          ),
+          ...cliConfig,
           CODEX_HOME: home,
           AGENT_FLOW_CONTEXT_PATH: contextPath,
           AGENT_FLOW_RECEIPT_PATH: receiptPath,

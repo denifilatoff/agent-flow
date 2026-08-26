@@ -27,7 +27,7 @@ import { writeControlCas, type ControlWriter } from "./control-state.ts";
 export interface AttemptRunnerDependencies {
   dataDirectory: string;
   provider: ProviderAdapter;
-  providerCredential(tokenEnv: string): ProviderCredential;
+  providerCredential(tokenEnv: string, apiUrl: string): ProviderCredential;
   workspaceManager: Pick<WorkspaceManager, "prepareWorkspace">;
   harnesses: Partial<Record<"claude" | "codex", HarnessAdapter>>;
   writeControl: ControlWriter;
@@ -337,8 +337,10 @@ function validateRequest(request: AttemptRequest, dependencies: AttemptRunnerDep
       false,
     );
   }
-  const providerCredential = dependencies.providerCredential(providerConfig.tokenEnv);
-  if (providerCredential.provider !== ref.provider || providerCredential.name !== providerConfig.tokenEnv) {
+  const providerCredential = dependencies.providerCredential(providerConfig.tokenEnv, providerConfig.apiUrl);
+  if (providerCredential.provider !== ref.provider
+    || providerCredential.name !== providerConfig.tokenEnv
+    || providerCredential.apiUrl !== providerConfig.apiUrl) {
     throw new AttemptError("PROVIDER_CREDENTIAL_INVALID", "provider credential does not match", false);
   }
   const agent = bundle.catalog.agents[request.agentId];

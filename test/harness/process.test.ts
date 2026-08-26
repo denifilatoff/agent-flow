@@ -10,6 +10,7 @@ import {
   realpath,
   rename,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -18,6 +19,7 @@ import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
+import { parse } from "yaml";
 
 import { createClaudeAdapter } from "../../src/harness/claude.ts";
 import { createCodexAdapter } from "../../src/harness/codex.ts";
@@ -43,6 +45,17 @@ interface SpawnCall {
   env: NodeJS.ProcessEnv;
   child: FakeChild;
 }
+
+const GITLAB_OAUTH_METADATA: Record<string, string> = {
+  host: "gitlab.test",
+  api_host: "gitlab.test",
+  api_protocol: "https",
+  git_protocol: "https",
+  user: "operator",
+  use_keyring: "true",
+  is_oauth2: "true",
+  oauth2_expiry_date: "2026-08-27T12:00:00Z",
+};
 
 class FakeChild extends EventEmitter implements SpawnedProcess {
   readonly stdout = new PassThrough();
@@ -206,6 +219,7 @@ async function runFixture(target: "codex" | "claude"): Promise<{
         provider: target === "codex" ? "github" : "gitlab",
         name: target === "codex" ? "GITHUB_TOKEN" : "GITLAB_TOKEN",
         value: "fixture-provider-token",
+        apiUrl: target === "codex" ? "https://api.github.com" : "https://gitlab.test/api/v4",
       },
     },
   };
@@ -250,12 +264,15 @@ test("runs Codex with canonical, unambiguous private attempt paths", async (t) =
     processes.dependencies,
   );
   Object.assign(fixture.input, {
-    providerCredential: { provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token" },
+    providerCredential: {
+      provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
+    },
   });
 
   const pending = adapter.run(fixture.input);
   await waitForSpawn(processes.calls);
   const call = processes.calls[0]!;
+  t.after(() => call.child.finish(0, null));
   assert.deepEqual([call.file, ...call.args], [
     "codex",
     "exec",
@@ -334,26 +351,56 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
       else process.env[name] = value;
     }
   });
+  Object.assign(fixture.input, {
+    providerCredential: {
+      provider: "gitlab",
+      name: "OAUTH_TOKEN",
+      value: "gitlab-ticket-token",
+      apiUrl: "https://gitlab.test/api/v4",
+    },
+  });
+  const metadataCalls: string[][] = [];
+  processes.dependencies.runCommand = async (file, args) => {
+    metadataCalls.push([file, ...args]);
+    return { stdout: `${GITLAB_OAUTH_METADATA[args[2]!]}\n`, stderr: "" };
+  };
   const adapter = createClaudeAdapter(
     { credentialsFile: fixture.authFile, settingsFile: fixture.configFile },
     processes.dependencies,
   );
-  Object.assign(fixture.input, {
-    providerCredential: { provider: "gitlab", name: "OAUTH_TOKEN", value: "gitlab-ticket-token" },
-  });
 
   const pending = adapter.run(fixture.input);
   await waitForSpawn(processes.calls);
   const call = processes.calls[0]!;
+  t.after(() => call.child.finish(0, null));
   assert.deepEqual([call.file, ...call.args], ["claude", "--agent", "developer", "-p"]);
   assert.deepEqual(call.args.filter((argument) => argument.includes("ticket 17")), []);
   assert.match(call.env.CLAUDE_CONFIG_DIR!, /harness-session\/claude-/);
   assert.equal(call.env.GH_CONFIG_DIR, join(call.env.CLAUDE_CONFIG_DIR!, "cli-config/gh"));
   assert.equal(call.env.GLAB_CONFIG_DIR, join(call.env.CLAUDE_CONFIG_DIR!, "cli-config/glab"));
-  assert.equal(call.env.OAUTH_TOKEN, "gitlab-ticket-token");
-  for (const name of inheritedSecrets.filter((name) => name !== "OAUTH_TOKEN")) {
+  assert.equal(call.env.OAUTH_TOKEN, undefined);
+  for (const name of inheritedSecrets) {
     assert.equal(call.env[name], undefined);
   }
+  assert.deepEqual(metadataCalls, Object.keys(GITLAB_OAUTH_METADATA).map((key) => [
+    "glab", "config", "get", key, "--host", "gitlab.test",
+  ]));
+  const glabConfigPath = join(call.env.GLAB_CONFIG_DIR!, "config.yml");
+  const glabConfigBody = await readFile(glabConfigPath, "utf8");
+  assert.equal((await stat(glabConfigPath)).mode & 0o777, 0o600);
+  assert.deepEqual(parse(glabConfigBody), {
+    host: "gitlab.test",
+    hosts: { "gitlab.test": {
+      api_host: "gitlab.test",
+      api_protocol: "https",
+      git_protocol: "https",
+      user: "operator",
+      use_keyring: "true",
+      is_oauth2: "true",
+      oauth2_expiry_date: "2026-08-27T12:00:00Z",
+    } },
+  });
+  assert.doesNotMatch(glabConfigBody, /token|refresh|gitlab-ticket-token/i);
   assert.equal(Buffer.concat(call.child.input).toString(), "Follow repository rules.\n\nDevelop the change.\n\nImplement ticket 17.\n");
   assert.match(
     await readFile(join(call.env.CLAUDE_CONFIG_DIR!, "agents/developer.md"), "utf8"),
@@ -363,6 +410,61 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
     await readFile(join(call.env.CLAUDE_CONFIG_DIR!, "rules/root.md"), "utf8"),
     "Follow repository rules.\n",
   );
+  call.child.finish(0, null);
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
+});
+
+test("fails GitLab OAuth metadata validation before spawning", async (t) => {
+  for (const invalid of [
+    { ...GITLAB_OAUTH_METADATA, use_keyring: "" },
+    { ...GITLAB_OAUTH_METADATA, host: "other.test" },
+  ]) {
+    const fixture = await runFixture("codex");
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    fixture.input.providerCredential = {
+      provider: "gitlab",
+      name: "OAUTH_TOKEN",
+      value: "gitlab-ticket-token",
+      apiUrl: "https://gitlab.test/api/v4",
+    };
+    const processes = processFixture();
+    processes.dependencies.runCommand = async (_file, args) => ({
+      stdout: `${invalid[args[2]!] ?? ""}\n`,
+      stderr: "",
+    });
+    const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+
+    const pending = assert.rejects(adapter.run(fixture.input), HarnessPreflightError);
+    await delay(5);
+    processes.children[0]?.finish(0, null);
+    await pending;
+    assert.equal(processes.calls.length, 0);
+  }
+});
+
+test("passes a GitLab personal token without seeding OAuth metadata", async (t) => {
+  const fixture = await runFixture("codex");
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  fixture.input.providerCredential = {
+    provider: "gitlab",
+    name: "GITLAB_TOKEN",
+    value: "gitlab-ticket-token",
+    apiUrl: "https://gitlab.test/api/v4",
+  };
+  const processes = processFixture();
+  let metadataCalls = 0;
+  processes.dependencies.runCommand = async () => {
+    metadataCalls += 1;
+    return { stdout: "", stderr: "" };
+  };
+  const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+
+  const pending = adapter.run(fixture.input);
+  await waitForSpawn(processes.calls);
+  const call = processes.calls[0]!;
+  assert.equal(call.env.GITLAB_TOKEN, "gitlab-ticket-token");
+  assert.equal(metadataCalls, 0);
+  assert.deepEqual(await readdir(call.env.GLAB_CONFIG_DIR!), []);
   call.child.finish(0, null);
   assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
 });
@@ -377,7 +479,9 @@ test("rejects provider credentials that collide with protected harness variables
     const fixture = await runFixture("codex");
     t.after(() => rm(fixture.root, { recursive: true, force: true }));
     const processes = processFixture();
-    fixture.input.providerCredential = { provider: "github", name, value: "credential-secret" };
+    fixture.input.providerCredential = {
+      provider: "github", name, value: "credential-secret", apiUrl: "https://api.github.com",
+    };
     const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
     const rejection = assert.rejects(adapter.run(fixture.input), HarnessPreflightError);
     await delay(5);

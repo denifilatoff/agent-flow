@@ -117,7 +117,7 @@ function fixture(options: {
   const harness: HarnessAdapter = { target: "codex", async preflight() {}, async run(input) {
     events.push("harness:spawn");
     assert.deepEqual(input.providerCredential, {
-      provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token",
+      provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
     });
     const value = results.shift() ?? OK;
     if (value instanceof Error) throw value;
@@ -133,7 +133,9 @@ function fixture(options: {
   const runner = createAttemptRunner({
     dataDirectory: "/data", provider: { kind: "github" } as ProviderAdapter,
     providerCredential: () => options.providerCredential
-      ?? { provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token" },
+      ?? {
+        provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
+      },
     workspaceManager: { async prepareWorkspace() { events.push("workspace:prepare"); return {
       baseClone: "/data/repositories/repo", worktree: "/data/worktrees/flow", repository: "owner/repo",
       ticketNumber: 7, flowInstanceId: FLOW,
@@ -243,12 +245,15 @@ test("rejects invalid pinned identity and allowlist before consuming an attempt"
 });
 
 test("rejects a credential that does not match the active provider configuration", async () => {
-  const subject = fixture({
-    providerCredential: { provider: "gitlab", name: "OAUTH_TOKEN", value: "gitlab-token" },
-  });
-  await assert.rejects(subject.runner.start(subject.request), /provider credential does not match/);
-  assert.equal(subject.controls.length, 0);
-  assert.equal(subject.events.includes("workspace:prepare"), false);
+  for (const providerCredential of [
+    { provider: "gitlab", name: "OAUTH_TOKEN", value: "gitlab-token", apiUrl: "https://gitlab.com/api/v4" },
+    { provider: "github", name: "GITHUB_TOKEN", value: "github-token", apiUrl: "https://wrong.test/api/v3" },
+  ] as const) {
+    const subject = fixture({ providerCredential });
+    await assert.rejects(subject.runner.start(subject.request), /provider credential does not match/);
+    assert.equal(subject.controls.length, 0);
+    assert.equal(subject.events.includes("workspace:prepare"), false);
+  }
 });
 
 test("rejects an unsupported provider token environment before consuming an attempt", async () => {
@@ -256,7 +261,9 @@ test("rejects an unsupported provider token environment before consuming an atte
   configured.controller.providers.github!.tokenEnv = "HOME";
   const subject = fixture({
     request: request({ bundle: configured }),
-    providerCredential: { provider: "github", name: "HOME", value: "credential-secret" },
+    providerCredential: {
+      provider: "github", name: "HOME", value: "credential-secret", apiUrl: "https://api.github.com",
+    },
   });
   await assert.rejects(subject.runner.start(subject.request), /provider token environment is not supported/);
   assert.equal(subject.controls.length, 0);
@@ -273,7 +280,7 @@ test("rejects a GitHub token environment for the wrong host class before consumi
     configured.controller.providers.github!.tokenEnv = tokenEnv;
     const subject = fixture({
       request: request({ bundle: configured }),
-      providerCredential: { provider: "github", name: tokenEnv, value: "credential-secret" },
+      providerCredential: { provider: "github", name: tokenEnv, value: "credential-secret", apiUrl },
     });
     await assert.rejects(subject.runner.start(subject.request), /provider token environment is not supported/);
     assert.equal(subject.controls.length, 0);

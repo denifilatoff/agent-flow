@@ -55,9 +55,14 @@ export function createClaudeAdapter(
         } else {
           throw new Error("Claude runtime has no root instructions");
         }
+        const cliConfig = await createCliConfigEnvironment(home);
         environment = harnessEnvironment({
-          ...providerCredentialEnvironment(input.providerCredential),
-          ...await createCliConfigEnvironment(home),
+          ...await providerCredentialEnvironment(
+            input.providerCredential,
+            cliConfig.GLAB_CONFIG_DIR,
+            dependencies,
+          ),
+          ...cliConfig,
           CLAUDE_CONFIG_DIR: home,
           AGENT_FLOW_CONTEXT_PATH: input.session.contextPath,
           AGENT_FLOW_RECEIPT_PATH: input.session.receiptPath,

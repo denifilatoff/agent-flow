@@ -215,10 +215,11 @@ function composeController(
       ...attemptRunnerOverrides,
       dataDirectory,
       provider,
-      providerCredential: (name) => ({
+      providerCredential: (name, apiUrl) => ({
         provider: kind,
         name,
         value: requiredEnvironment(environment, name),
+        apiUrl,
       }),
       workspaceManager,
       harnesses,

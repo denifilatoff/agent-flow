@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { parse } from "yaml";
 
 import { loadConfigBundle } from "../src/config/load.ts";
 import type { AgentReceipt, ControlState } from "../src/config/types.ts";
@@ -26,6 +27,10 @@ const NOW = "2026-08-26T12:00:00.000Z";
 const TICKET = { provider: "gitlab", repository: "group/repo", number: 7 } as const;
 const GHES_TICKET = { provider: "github", repository: "owner/repo", number: 8 } as const;
 const ACTOR = { login: "operator", providerId: "1" };
+const GITLAB_OAUTH_METADATA: Record<string, string> = {
+  host: "gitlab.test", api_host: "gitlab.test", api_protocol: "https", git_protocol: "https",
+  user: "operator", use_keyring: "true", is_oauth2: "true", oauth2_expiry_date: "2026-08-27T12:00:00Z",
+};
 
 class Child extends EventEmitter implements SpawnedProcess {
   readonly stdin = new Writable({ write: (_chunk, _encoding, callback) => callback() });
@@ -152,11 +157,15 @@ test("production retries keep the pinned provider credential scoped to the child
       spawn: (_file, _args, options) => {
         events.push("spawn");
         environments.push({ ...options.env });
-        if (environments.length === 1) bundle.controller.providers.gitlab!.tokenEnv = "CHANGED_TOKEN";
+        if (environments.length === 1) {
+          bundle.controller.providers.gitlab!.tokenEnv = "CHANGED_TOKEN";
+          bundle.controller.providers.gitlab!.apiUrl = "https://changed.test/api/v4";
+        }
         const child = new Child();
         setImmediate(() => child.finish(exitCodes.shift()!, null));
         return child;
       },
+      runCommand: async (_file, args) => ({ stdout: `${GITLAB_OAUTH_METADATA[args[2]!] ?? ""}\n`, stderr: "" }),
     },
     attemptRunner: {
       workspaceManager: { async prepareWorkspace(_repository, _ticket, flowInstanceId) {
@@ -196,18 +205,28 @@ test("production retries keep the pinned provider credential scoped to the child
 
   assert.equal(environments.length, 2, `events=${events.join(",")}; control=${JSON.stringify(currentControl(provider))}`);
   for (const environment of environments) {
-    assert.equal(environment.OAUTH_TOKEN, "pinned-gitlab-token");
+    assert.equal(environment.OAUTH_TOKEN, undefined);
     for (const name of ["CHANGED_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "UNRELATED_SECRET"]) {
       assert.equal(environment[name], undefined);
     }
     assert.match(environment.GH_CONFIG_DIR!, /\/sessions\/.*\/harness-session\/codex-.*\/cli-config\/gh$/);
     assert.match(environment.GLAB_CONFIG_DIR!, /\/sessions\/.*\/harness-session\/codex-.*\/cli-config\/glab$/);
+    const path = join(environment.GLAB_CONFIG_DIR!, "config.yml");
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    assert.deepEqual(Object.keys(parse(await readFile(path, "utf8")).hosts), ["gitlab.test"]);
+    assert.doesNotMatch(await readFile(path, "utf8"), /token|refresh|pinned-gitlab-token/i);
   }
   assert.equal(currentControl(provider)?.attemptSeries?.consumed, 2);
   assert.equal(currentControl(provider)?.stateId, "assessment");
-  const contexts = await readFile(join(root, "data/sessions", currentControl(provider)!.flowInstanceId,
-    currentControl(provider)!.attemptSeries!.current!.attemptId, "context.json"), "utf8");
-  assert.doesNotMatch(contexts, /pinned-gitlab-token|github-token|openai-secret|unrelated-secret/);
+  const sessions = join(root, "data/sessions", currentControl(provider)!.flowInstanceId);
+  for (const attemptId of await readdir(sessions)) {
+    for (const file of ["context.json", "harness.log"]) {
+      assert.doesNotMatch(
+        await readFile(join(sessions, attemptId, file), "utf8"),
+        /pinned-gitlab-token|github-token|openai-secret|unrelated-secret/,
+      );
+    }
+  }
 });
 
 test("production passes a custom GHES credential without exposing public GitHub auth", async (t) => {

@@ -8,6 +8,7 @@ export interface ProviderCredential {
   provider: ProviderKind;
   name: string;
   value: string;
+  apiUrl: string;
 }
 
 export interface HarnessAdapter {
