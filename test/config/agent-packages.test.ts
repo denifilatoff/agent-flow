@@ -99,7 +99,7 @@ test("reviewer publishes review metadata immediately after the common marker", a
   );
   assert.match(
     reviewer.body,
-    /```text\s*<!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=review -->\s*<!-- agent-flow-review:v1 head=<sha> verdict=<verdict> -->\s*```/,
+    /```text\r?\n<!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=review -->\r?\n<!-- agent-flow-review:v1 head=<sha> verdict=<verdict> -->\r?\n```/,
   );
   assert.match(reviewer.body, /40-character lowercase hexadecimal SHA/);
   assert.match(reviewer.body, /exactly `approved`,\s*`changes-requested`, or `commented`/);
