@@ -6,6 +6,7 @@ import {
   advanceControlState,
   listControlComments,
   parseControlComment,
+  parseExpectedControlComment,
   renderControlComment,
   selectActiveControlComment,
   type ProviderComment,
@@ -58,10 +59,12 @@ test("round trips a control comment after GitLab removes its final newline", () 
   const gitLabBody = renderControlComment(state).slice(0, -1);
 
   assert.deepEqual(parseControlComment(gitLabBody), state);
+  assert.deepEqual(parseExpectedControlComment(gitLabBody, state), state);
 });
 
 test("rejects any other trailing control comment format", () => {
-  const canonical = renderControlComment(controlState());
+  const expected = controlState();
+  const canonical = renderControlComment(expected);
   const withoutFinalNewline = canonical.slice(0, -1);
   for (const body of [
     `${canonical}\n`,
@@ -70,7 +73,15 @@ test("rejects any other trailing control comment format", () => {
     canonical.replace("\n```\n", "```\n"),
   ]) {
     assert.throws(() => parseControlComment(body), /control comment/);
+    assert.equal(parseExpectedControlComment(body, expected), null);
   }
+  assert.equal(
+    parseExpectedControlComment(
+      renderControlComment(controlState({ sequence: 1 })),
+      expected,
+    ),
+    null,
+  );
 });
 
 test("returns null only for bodies without the marker on the first line", () => {

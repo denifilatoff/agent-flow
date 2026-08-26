@@ -17,11 +17,10 @@ import { createHealthServer, createReadiness } from "./health.ts";
 import { createGitHubAdapter } from "./provider/github.ts";
 import { createGitLabAdapter } from "./provider/gitlab.ts";
 import { createRateLimitedHttpClient } from "./provider/http.ts";
-import { listControlComments, parseControlComment, renderControlComment } from "./provider/control-comment.ts";
 import type { ProviderAdapter, ProviderKind } from "./provider/types.ts";
 import { runPreflight, type PreflightDependencies, type ReadyDependencies } from "./preflight.ts";
 import { createAttemptRunner } from "./runtime/attempt-runner.ts";
-import type { ControlWriter } from "./runtime/control-state.ts";
+import { createControlWriter, type ControlWriter } from "./runtime/control-state.ts";
 import { createController, type Controller } from "./runtime/controller.ts";
 import { RateLimiter, type RateLimiterClock } from "./runtime/rate-limiter.ts";
 import { reconcileTicket, type AttemptLauncher } from "./runtime/reconcile.ts";
@@ -245,37 +244,6 @@ function composeController(
     },
     onError: () => console.error("agent-flow reconciliation failed"),
   });
-}
-
-function createControlWriter(provider: ProviderAdapter): ControlWriter {
-  const tails = new Map<string, Promise<void>>();
-  return (ref, expected, next) => {
-    const key = `${ref.provider}:${ref.repository}#${ref.number}`;
-    const previous = tails.get(key) ?? Promise.resolve();
-    const result = previous.then(async () => {
-      if (next.flowInstanceId !== expected.flowInstanceId || next.sequence !== expected.sequence + 1) {
-        throw new Error("invalid control state update");
-      }
-      const snapshot = await provider.readTicket(ref);
-      const matches = listControlComments(snapshot.comments)
-        .filter(({ state }) => state.flowInstanceId === expected.flowInstanceId);
-      if (matches.length !== 1 || matches[0]!.state.sequence !== expected.sequence) {
-        throw new Error("control state compare-and-swap conflict");
-      }
-      const id = matches[0]!.comment.id;
-      const body = renderControlComment(next);
-      const updated = await provider.updateComment(ref, id, body);
-      if (updated.id !== id || updated.body !== body) throw new Error("control state update mismatch");
-      const readback = await provider.readComment(ref, id);
-      const parsed = parseControlComment(readback.body);
-      if (readback.id !== id || !parsed) throw new Error("control state readback mismatch");
-      return parsed;
-    });
-    const tail = result.then(() => undefined, () => undefined);
-    tails.set(key, tail);
-    void tail.finally(() => { if (tails.get(key) === tail) tails.delete(key); });
-    return result;
-  };
 }
 
 function requiredRunner(

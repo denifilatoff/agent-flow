@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { validateDocument } from "../config/schema-validator.ts";
 import type { ControlState } from "../config/types.js";
 
@@ -45,6 +47,13 @@ export function parseControlComment(body: string): ControlState | null {
 export function renderControlComment(state: ControlState): string {
   const valid = validateDocument<ControlState>("ControlState", state);
   return `${CONTROL_MARKER}\n\`\`\`json\n${JSON.stringify(valid, null, 2)}\n\`\`\`\n`;
+}
+
+export function parseExpectedControlComment(body: string, expected: ControlState): ControlState | null {
+  const canonical = renderControlComment(expected);
+  if (body !== canonical && body !== canonical.slice(0, -1)) return null;
+  const parsed = parseControlComment(body);
+  return parsed && isDeepStrictEqual(parsed, expected) ? parsed : null;
 }
 
 export function listControlComments(comments: ProviderComment[]): ParsedControlComment[] {

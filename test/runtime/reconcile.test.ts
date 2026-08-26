@@ -262,6 +262,7 @@ class FakeProvider implements ProviderAdapter {
   snapshot = snapshot();
   readbackMismatch = false;
   labelReadbackMismatch = false;
+  stripGitLabFinalNewline = false;
   readError: Error | null = null;
   created = 0;
   updated = 0;
@@ -291,7 +292,8 @@ class FakeProvider implements ProviderAdapter {
   async createComment(_ref: TicketRef, body: string): Promise<ProviderComment> {
     this.events.push("provider:create-control");
     this.created += 1;
-    const created = comment(`created-${this.created}`, body, MAINTAINER, NOW);
+    const storedBody = this.stripGitLabFinalNewline ? body.slice(0, -1) : body;
+    const created = comment(`created-${this.created}`, storedBody, MAINTAINER, NOW);
     this.snapshot.comments.push(created);
     return structuredClone(created);
   }
@@ -300,7 +302,8 @@ class FakeProvider implements ProviderAdapter {
     this.updated += 1;
     const index = this.snapshot.comments.findIndex((candidate) => candidate.id === id);
     assert.notEqual(index, -1);
-    this.snapshot.comments[index] = { ...this.snapshot.comments[index]!, body, updatedAt: NOW };
+    const storedBody = this.stripGitLabFinalNewline ? body.slice(0, -1) : body;
+    this.snapshot.comments[index] = { ...this.snapshot.comments[index]!, body: storedBody, updatedAt: NOW };
     return structuredClone(this.snapshot.comments[index]!);
   }
   async setControllerLabels(_ref: TicketRef, remove: string[], add: string[]): Promise<string[]> {
@@ -438,6 +441,17 @@ test("accepts one authorized activation and owns one stage label", async () => {
   assert.equal(launcher.requests[0]?.control.sequence, 0);
   assert.equal(launcher.requests[0]?.control.activationEventId, "803");
   assert.ok(provider.events.indexOf("provider:read-control") < provider.events.indexOf("provider:set-labels"));
+});
+
+test("accepts a GitLab control creation readback without the final newline", async () => {
+  const provider = new FakeProvider();
+  provider.stripGitLabFinalNewline = true;
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.stateId, "assessment");
+  assert.equal(launcher.requests.length, 1);
 });
 
 test("ignores an activation by an actor below write permission", async () => {

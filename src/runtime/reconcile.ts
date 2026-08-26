@@ -14,6 +14,7 @@ import {
   advanceControlState,
   listControlComments,
   parseControlComment,
+  parseExpectedControlComment,
   renderControlComment,
   type ParsedControlComment,
 } from "../provider/control-comment.ts";
@@ -324,7 +325,7 @@ function assertSnapshot(snapshot: ProviderTicketSnapshot, ref: TicketRef): void 
 async function createControl(provider: ProviderAdapter, ref: TicketRef, control: ControlState): Promise<void> {
   const body = renderControlComment(control);
   const created = await providerCall("provider control comment create failed", () => provider.createComment(ref, body));
-  await assertControlReadback(provider, ref, created.id, body);
+  await assertControlReadback(provider, ref, created.id, control);
 }
 
 async function writeExistingControl(
@@ -343,13 +344,13 @@ async function assertControlReadback(
   provider: ProviderAdapter,
   ref: TicketRef,
   commentId: string,
-  body: string,
+  expected: ControlState,
 ): Promise<void> {
   const readback = await providerCall(
     "provider control comment readback failed",
     () => provider.readComment(ref, commentId),
   );
-  if (readback.id !== commentId || readback.body !== body || !parseControlComment(readback.body)) {
+  if (readback.id !== commentId || !parseExpectedControlComment(readback.body, expected)) {
     throw new Error("control comment readback mismatch");
   }
 }
