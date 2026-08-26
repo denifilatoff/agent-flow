@@ -171,6 +171,11 @@ Human-input mode uses the same mechanism. At `assessment-review`, for example, t
 agent interprets the first authorized, unmarked comment. A changes-requested decision returns to the working state; a
 later successful assessment reaches the human gate again.
 
+The `needs-human` state also accepts an `agent-needs-human` self-transition. It is used when the controller first enters
+the paused state because a linked change request closed before the reviewer could publish the reopen-or-cancel question.
+The reviewer publishes that question in stage mode, the controller records its verified evidence, and the machine stays
+in `needs-human` while preserving the review resume target.
+
 The review agent publishes a provider-native review on the pinned head. Blocking findings produce
 `review-changes-requested`; a review with no blocking findings produces `review-approved`. The controller verifies the
 native review, marker metadata when the provider cannot represent self-approval, and head SHA before deriving the

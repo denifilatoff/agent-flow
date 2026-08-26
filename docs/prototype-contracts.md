@@ -104,6 +104,11 @@ The YAML cannot contain commands, scripts, expressions, module names, or inline 
 A transition into `needs-human` or `blocked` may set `resumeTarget`. Otherwise, the controller resumes the source
 state. This handles provider-wait states that must return to an agent after human input.
 
+`needs-human` must declare an `agent-needs-human` self-transition with `record-receipt`. The controller uses it when a
+provider-wait transition enters the paused state before the responsible agent has published its question, including the
+closed, unmerged change-request path. This keeps the question publication inside the state-machine contract while
+preserving the existing resume target.
+
 At an explicit human gate or in `needs-human`, a new authorized comment starts the current-stage agent in human-input
 mode before XState receives a verdict event. `blocked` is different: any new authorized, unmarked comment resets the
 retry budget directly, as defined by the architecture.
