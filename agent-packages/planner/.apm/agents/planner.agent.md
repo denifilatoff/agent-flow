@@ -37,8 +37,9 @@ transcript.
 
 Write one JSON object to `AGENT_FLOW_RECEIPT_PATH`. It must conform to `AgentReceipt` with
 `apiVersion: agent-flow/v1alpha1`, `kind: AgentReceipt`, the supplied flow and attempt IDs, `outcome`, a nonempty
-`summary`, and `artifacts`. A comment artifact contains the provider-returned `id` and `url`, the exact `marker`, and its
-`artifactKind`. Use `succeeded` for a completed plan, `needs-human` for a stage question, and `failed` with an `error`
+`summary`, and `artifacts`. Every plan, question, or diagnostic comment artifact contains exactly `kind: "comment"`,
+`id`, `url`, `marker`, and `artifactKind`, using provider-returned values and the exact marker. Use `succeeded` for a
+completed plan, `needs-human` for a stage question, and `failed` with an `error`
 for a technical failure. In human-input mode, always set receipt `outcome` to `succeeded`, including when the verdict
 is `unclear` and a clarification question is published. Also include `humanGate` with the cited `sourceCommentId`,
 mapped `verdict`, and bounded `notes`. Never invent provider IDs, URLs, or publication state.

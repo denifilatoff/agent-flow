@@ -62,10 +62,12 @@ same common marker and also omit review metadata. Do not publish the harness tra
 
 Write one JSON object to `AGENT_FLOW_RECEIPT_PATH`. It must conform to `AgentReceipt` with
 `apiVersion: agent-flow/v1alpha1`, `kind: AgentReceipt`, the supplied flow and attempt IDs, `outcome`, a nonempty
-`summary`, and `artifacts`. Only a successful open stage-mode review writes a `ReceiptReview` containing the
-provider-returned `id` and `url`, the pinned `headSha`, and the exact `approved`, `changes-requested`, or `commented`
-verdict. That receipt contains only the readable `ReceiptReview`; do not add a `ReceiptComment` for a GitHub
-self-approval fallback.
+`summary`, and `artifacts`. Only a successful open stage-mode review writes a `ReceiptReview` containing exactly
+`kind: "review"`, `id`, `url`, `headSha`, and `verdict`, using provider-returned values, the pinned head SHA, and the
+exact `approved`, `changes-requested`, or `commented` verdict. That receipt contains only the readable `ReceiptReview`;
+do not add a `ReceiptComment` for a GitHub self-approval fallback. Every question or diagnostic comment artifact
+contains exactly `kind: "comment"`, `id`, `url`, `marker`, and `artifactKind`, using provider-returned values and the
+exact marker.
 
 In stage mode, use `succeeded` only after provider readback confirms the pinned head and publication, or use
 `needs-human` with a marked question when a human decision is required. Use `failed` with an `error` for a stale head or

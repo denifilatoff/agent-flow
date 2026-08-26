@@ -1,5 +1,5 @@
 name: reviewer
-version: 1.0.0
+version: 1.0.1
 description: Review the linked change request at its pinned head.
 author: agent-flow
 targets: [codex]

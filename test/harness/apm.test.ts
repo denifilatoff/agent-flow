@@ -229,7 +229,7 @@ test("rejects package symlinks and overlapping output", async (t) => {
   );
 });
 
-test("compiles the architect and planner packages for Claude and Codex", async (t) => {
+test("compiles every package with explicit receipt artifact discriminators", async (t) => {
   try {
     await execFile("apm", ["--version"]);
   } catch (error) {
@@ -241,8 +241,14 @@ test("compiles the architect and planner packages for Claude and Codex", async (
   }
   const root = await mkdtemp(join(tmpdir(), "agent-flow-apm-real-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const [agentId, expected] of [["architect", /Assess only the ticket/], ["planner", /complete plan/]] as const) {
-    for (const target of ["claude", "codex"] as const) {
+  const packages = [
+    ["architect", ["claude", "codex"], /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/],
+    ["planner", ["claude", "codex"], /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/],
+    ["developer", ["codex"], /exactly\s+`kind: "change-request"`,\s+`number`,\s+`url`,\s+`headSha`, and `state`/],
+    ["reviewer", ["codex"], /exactly\s+`kind: "review"`,\s+`id`,\s+`url`,\s+`headSha`, and `verdict`/],
+  ] as const;
+  for (const [agentId, targets, expected] of packages) {
+    for (const target of targets) {
       const outputDirectory = join(root, `${agentId}-${target}`);
       await mkdir(outputDirectory);
       const result = await compileAgentContext(
@@ -253,6 +259,12 @@ test("compiles the architect and planner packages for Claude and Codex", async (
       );
       assert.match(result.instructions, expected);
       assert.match(result.instructions, /only entry agent/);
+      if (agentId === "developer" || agentId === "reviewer") {
+        assert.match(
+          result.instructions,
+          /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/,
+        );
+      }
       await execFile("apm", ["audit", "--ci", "--no-policy"], { cwd: result.runtimeDirectory });
       const packageDirectory = join(process.cwd(), `agent-packages/${agentId}`);
       await assert.rejects(access(join(packageDirectory, target === "claude" ? ".claude" : ".codex")), {

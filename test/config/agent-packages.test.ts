@@ -10,6 +10,13 @@ const PACKAGE_TARGETS = {
   reviewer: ["codex"],
 } as const;
 
+const ARTIFACT_CONTRACTS = {
+  architect: /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/,
+  planner: /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/,
+  developer: /exactly\s+`kind: "change-request"`,\s+`number`,\s+`url`,\s+`headSha`, and `state`/,
+  reviewer: /exactly\s+`kind: "review"`,\s+`id`,\s+`url`,\s+`headSha`, and `verdict`/,
+} as const;
+
 function parsePrimitive(source: string): { frontmatter: Record<string, unknown>; body: string } {
   const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(source);
   assert.ok(match, "primitive must have YAML frontmatter");
@@ -21,7 +28,7 @@ async function assertAgentPackage(packageName: keyof typeof PACKAGE_TARGETS, art
   const manifest = parse(await readFile(new URL("apm.yml", packageRoot), "utf8")) as Record<string, unknown>;
 
   assert.equal(manifest.name, packageName);
-  assert.equal(manifest.version, "1.0.0");
+  assert.equal(manifest.version, "1.0.1");
   assert.deepEqual(manifest.targets, PACKAGE_TARGETS[packageName]);
   await readFile(new URL("apm.lock.yaml", packageRoot), "utf8");
 
@@ -30,6 +37,10 @@ async function assertAgentPackage(packageName: keyof typeof PACKAGE_TARGETS, art
   const agent = parsePrimitive(await readFile(new URL(`.apm/agents/${agentFiles[0]}`, packageRoot), "utf8"));
   assert.equal(agent.frontmatter.name, packageName);
   assert.match(agent.body, new RegExp(`\\b${artifact}\\b`));
+  assert.match(agent.body, ARTIFACT_CONTRACTS[packageName]);
+  if (packageName === "developer" || packageName === "reviewer") {
+    assert.match(agent.body, /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/);
+  }
 
   const instructionFiles = (await readdir(new URL(".apm/instructions/", packageRoot))).filter((file) =>
     file.endsWith(".instructions.md"),
