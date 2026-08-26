@@ -80,11 +80,19 @@
     "github": {
       "type": "object",
       "$ref": "#/$defs/providerBase",
+      "properties": {
+        "tokenEnv": {
+          "enum": ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+        }
+      },
       "unevaluatedProperties": false
     },
     "gitlab": {
       "type": "object",
       "$ref": "#/$defs/providerBase",
+      "properties": {
+        "tokenEnv": { "enum": ["GITLAB_TOKEN", "OAUTH_TOKEN"] }
+      },
       "unevaluatedProperties": false
     }
   }

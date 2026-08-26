@@ -108,6 +108,41 @@ test("rejects missing targets and duplicate repositories", async () => {
   await assert.rejects(loadFixture("duplicate-repository"), /repository .* is configured more than once/);
 });
 
+test("rejects provider token environment names that bypass schema validation", async () => {
+  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
+  bundle.controller.providers.github!.tokenEnv = "HOME";
+  await assert.rejects(
+    validateSemantics(bundle),
+    /controller\.providers\.github\.tokenEnv: token environment HOME is not supported for GitHub API host api\.github\.com/,
+  );
+});
+
+test("binds GitHub token environment names to the configured API host", async () => {
+  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
+  const github = bundle.controller.providers.github!;
+
+  github.apiUrl = "https://api.github.com";
+  github.tokenEnv = "GITHUB_TOKEN";
+  await validateSemantics(bundle);
+  github.apiUrl = "https://example.ghe.com/api/v3";
+  await validateSemantics(bundle);
+  github.apiUrl = "https://api.github.com";
+  github.tokenEnv = "GH_ENTERPRISE_TOKEN";
+  await assert.rejects(
+    validateSemantics(bundle),
+    /GH_ENTERPRISE_TOKEN is not supported for GitHub API host api\.github\.com/,
+  );
+
+  github.apiUrl = "https://github.enterprise.test/api/v3";
+  github.tokenEnv = "GITHUB_ENTERPRISE_TOKEN";
+  await validateSemantics(bundle);
+  github.tokenEnv = "GH_TOKEN";
+  await assert.rejects(
+    validateSemantics(bundle),
+    /GH_TOKEN is not supported for GitHub API host github\.enterprise\.test/,
+  );
+});
+
 test("reports every flow error in deterministic path order", async () => {
   const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
   bundle.flow.spec.initial = "missing-initial";

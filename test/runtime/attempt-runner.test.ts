@@ -6,7 +6,7 @@ import type { ConfigBundle } from "../../src/config/load.ts";
 import type { AgentReceipt, ControlState } from "../../src/config/types.ts";
 import { ApmPreflightError } from "../../src/harness/apm.ts";
 import { HarnessPreflightError, HarnessProcessError } from "../../src/harness/process.ts";
-import type { HarnessAdapter, HarnessResult } from "../../src/harness/types.ts";
+import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../../src/harness/types.ts";
 import { ProviderHttpError } from "../../src/provider/http.ts";
 import type { ProviderAdapter, ProviderTicketSnapshot } from "../../src/provider/types.ts";
 import { createAttemptRunner, type AttemptRunnerDependencies } from "../../src/runtime/attempt-runner.ts";
@@ -29,7 +29,7 @@ function bundle(maxAttempts = 3): ConfigBundle {
     controller: {
       apiVersion: "agent-flow/v1alpha1", kind: "ControllerConfig",
       configuration: { repository: "config", flow: "config/flow.yaml", catalog: "config/agents.yaml" },
-      providers: { github: { apiUrl: "https://api.github.test", tokenEnv: "GITHUB_TOKEN", repositories: ["owner/repo"] } },
+      providers: { github: { apiUrl: "https://api.github.com", tokenEnv: "GITHUB_TOKEN", repositories: ["owner/repo"] } },
       polling: { intervalSeconds: 30, maxCallsPerMinute: 60, quotaReservePercent: 20 },
       runtime: { concurrency: 4, dataDirectory: "/data", healthPort: 8080 },
     },
@@ -106,6 +106,7 @@ function fixture(options: {
   request?: AttemptRequest; results?: Array<HarnessResult | Error | Promise<HarnessResult>>;
   verify?: (attemptId: string) => Promise<AgentReceipt>; write?: AttemptRunnerDependencies["writeControl"];
   ids?: string[]; compileError?: Error; delay?: (milliseconds: number) => Promise<void>;
+  providerCredential?: ProviderCredential;
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
   const process = deferred<HarnessResult>();
@@ -115,6 +116,9 @@ function fixture(options: {
   const ids = [...(options.ids ?? [SERIES, ATTEMPT_1, ATTEMPT_2])];
   const harness: HarnessAdapter = { target: "codex", async preflight() {}, async run(input) {
     events.push("harness:spawn");
+    assert.deepEqual(input.providerCredential, {
+      provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token",
+    });
     const value = results.shift() ?? OK;
     if (value instanceof Error) throw value;
     if (value instanceof Promise) return value;
@@ -128,12 +132,15 @@ function fixture(options: {
   });
   const runner = createAttemptRunner({
     dataDirectory: "/data", provider: { kind: "github" } as ProviderAdapter,
+    providerCredential: () => options.providerCredential
+      ?? { provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token" },
     workspaceManager: { async prepareWorkspace() { events.push("workspace:prepare"); return {
       baseClone: "/data/repositories/repo", worktree: "/data/worktrees/flow", repository: "owner/repo",
       ticketNumber: 7, flowInstanceId: FLOW,
     }; } }, harnesses: { codex: harness }, writeControl,
     async createSession(_data, _flow, attemptId, context) { attempts.push(attemptId); events.push("session:create");
-      assert.equal(context.controlState.attemptSeries?.current?.attemptId, attemptId); return {
+      assert.equal(context.controlState.attemptSeries?.current?.attemptId, attemptId);
+      assert.equal(inspect(context).includes("github-ticket-token"), false); return {
         root: `/data/sessions/${attemptId}`, contextPath: `/data/sessions/${attemptId}/context.json`,
         receiptPath: `/data/sessions/${attemptId}/receipt.json`, logPath: `/data/sessions/${attemptId}/harness.log`,
         harnessSessionDirectory: `/data/sessions/${attemptId}/harness-session`,
@@ -230,6 +237,45 @@ test("rejects invalid pinned identity and allowlist before consuming an attempt"
   for (const invalid of [request({ bundle: disallowed }), badRevision]) {
     const subject = fixture({ request: invalid });
     await assert.rejects(subject.runner.start(subject.request));
+    assert.equal(subject.controls.length, 0);
+    assert.equal(subject.events.includes("workspace:prepare"), false);
+  }
+});
+
+test("rejects a credential that does not match the active provider configuration", async () => {
+  const subject = fixture({
+    providerCredential: { provider: "gitlab", name: "OAUTH_TOKEN", value: "gitlab-token" },
+  });
+  await assert.rejects(subject.runner.start(subject.request), /provider credential does not match/);
+  assert.equal(subject.controls.length, 0);
+  assert.equal(subject.events.includes("workspace:prepare"), false);
+});
+
+test("rejects an unsupported provider token environment before consuming an attempt", async () => {
+  const configured = bundle();
+  configured.controller.providers.github!.tokenEnv = "HOME";
+  const subject = fixture({
+    request: request({ bundle: configured }),
+    providerCredential: { provider: "github", name: "HOME", value: "credential-secret" },
+  });
+  await assert.rejects(subject.runner.start(subject.request), /provider token environment is not supported/);
+  assert.equal(subject.controls.length, 0);
+  assert.equal(subject.events.includes("workspace:prepare"), false);
+});
+
+test("rejects a GitHub token environment for the wrong host class before consuming an attempt", async () => {
+  for (const [apiUrl, tokenEnv] of [
+    ["https://api.github.com", "GH_ENTERPRISE_TOKEN"],
+    ["https://github.enterprise.test/api/v3", "GH_TOKEN"],
+  ] as const) {
+    const configured = bundle();
+    configured.controller.providers.github!.apiUrl = apiUrl;
+    configured.controller.providers.github!.tokenEnv = tokenEnv;
+    const subject = fixture({
+      request: request({ bundle: configured }),
+      providerCredential: { provider: "github", name: tokenEnv, value: "credential-secret" },
+    });
+    await assert.rejects(subject.runner.start(subject.request), /provider token environment is not supported/);
     assert.equal(subject.controls.length, 0);
     assert.equal(subject.events.includes("workspace:prepare"), false);
   }

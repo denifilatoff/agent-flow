@@ -183,7 +183,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     AGENT_FLOW_DATA_DIRECTORY: dataDirectory,
     AGENT_FLOW_CONTROLLER_CONFIG: controllerPath,
     AGENT_FLOW_HEALTH_PORT: String(address.port + 1),
-    GITHUB_TOKEN: "fixture",
+    GH_ENTERPRISE_TOKEN: "fixture",
     GITLAB_TOKEN: "fixture",
     CODEX_HOME: join(home, ".codex"),
     CLAUDE_CONFIG_DIR: join(home, ".claude"),
@@ -838,7 +838,7 @@ async function runDockerFixture(root: string, port: number, healthPort: number):
     chmod(join(auth, ".codex/auth.json"), 0o644),
     chmod(join(auth, ".claude/.credentials.json"), 0o644),
   ]);
-  await writeFile(join(canonicalRoot, "compose.e2e.yaml"), `services:\n  controller:\n    restart: "no"\n    command: ["node", "/fixture-source/docker-controller.mjs"]\n    environment:\n      AGENT_FLOW_CONTROLLER_CONFIG: config/controller.e2e.yaml\n      GITHUB_TOKEN: fixture\n      NODE_EXTRA_CA_CERTS: /fixture/fixture.crt\n      PATH: /fixture-bin:/opt/tools/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n      HOME: /home/agent\n      CODEX_HOME: /home/agent/.codex\n      CLAUDE_CONFIG_DIR: /home/agent/.claude\n    ports: !override\n      - "${healthPort}:8080"\n    volumes: !override\n      - ${repository}:/config:ro\n      - ${data}:/data\n      - ${certificate}:/fixture/fixture.crt:ro\n      - ${bin}:/fixture-bin:ro\n      - ${resolve(ROOT, "test/fixtures")}:/fixture-source:ro\n      - ${join(auth, ".config/gh")}:/home/agent/.config/gh:ro\n      - ${join(auth, ".config/glab-cli")}:/home/agent/.config/glab-cli:ro\n      - ${join(auth, ".codex")}:/home/agent/.codex:ro\n      - ${join(auth, ".claude")}:/home/agent/.claude:ro\n`);
+  await writeFile(join(canonicalRoot, "compose.e2e.yaml"), `services:\n  controller:\n    restart: "no"\n    command: ["node", "/fixture-source/docker-controller.mjs"]\n    environment:\n      AGENT_FLOW_CONTROLLER_CONFIG: config/controller.e2e.yaml\n      GH_ENTERPRISE_TOKEN: fixture\n      NODE_EXTRA_CA_CERTS: /fixture/fixture.crt\n      PATH: /fixture-bin:/opt/tools/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n      HOME: /home/agent\n      CODEX_HOME: /home/agent/.codex\n      CLAUDE_CONFIG_DIR: /home/agent/.claude\n    ports: !override\n      - "${healthPort}:8080"\n    volumes: !override\n      - ${repository}:/config:ro\n      - ${data}:/data\n      - ${certificate}:/fixture/fixture.crt:ro\n      - ${bin}:/fixture-bin:ro\n      - ${resolve(ROOT, "test/fixtures")}:/fixture-source:ro\n      - ${join(auth, ".config/gh")}:/home/agent/.config/gh:ro\n      - ${join(auth, ".config/glab-cli")}:/home/agent/.config/glab-cli:ro\n      - ${join(auth, ".codex")}:/home/agent/.codex:ro\n      - ${join(auth, ".claude")}:/home/agent/.claude:ro\n`);
   const server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
     void state.handle(request, response).catch((error: unknown) => json(response, 500, {
       error: error instanceof Error ? error.message : "fixture failed",

@@ -7,7 +7,7 @@ configuration:
 providers:
   github:
     apiUrl: __API_URL__
-    tokenEnv: GITHUB_TOKEN
+    tokenEnv: GH_ENTERPRISE_TOKEN
     repositories: [owner/repo]
 polling:
   intervalSeconds: 60

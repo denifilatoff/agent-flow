@@ -45,6 +45,28 @@ test("accepts credential-free Git configuration URLs", async () => {
   }));
 });
 
+test("accepts only provider CLI token environment names", async () => {
+  const value = await parseYaml("config/controller.example.yaml") as Record<string, unknown>;
+  const providers = value.providers as Record<string, Record<string, unknown>>;
+  const github = providers.github!;
+  for (const tokenEnv of ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN"]) {
+    validateDocument("ControllerConfig", { ...value, providers: { github: { ...github, tokenEnv } } });
+  }
+  const gitlab = { ...github, apiUrl: "https://gitlab.test/api/v4", repositories: ["group/repo"] };
+  for (const tokenEnv of ["OAUTH_TOKEN", "GITLAB_TOKEN"]) {
+    validateDocument("ControllerConfig", { ...value, providers: { gitlab: { ...gitlab, tokenEnv } } });
+  }
+  for (const [provider, config] of [["github", github], ["gitlab", gitlab]] as const) {
+    for (const tokenEnv of [
+      "HOME", "AGENT_FLOW_CONTEXT_PATH", "GH_CONFIG_DIR", "GLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "ARBITRARY_TOKEN",
+    ]) {
+      assert.throws(() => validateDocument("ControllerConfig", {
+        ...value, providers: { [provider]: { ...config, tokenEnv } },
+      }));
+    }
+  }
+});
+
 test("accepts a cancelled AgentReceipt human gate", () => {
   validateDocument("AgentReceipt", {
     apiVersion: "agent-flow/v1alpha1",

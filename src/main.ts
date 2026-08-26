@@ -12,6 +12,7 @@ import {
 import { validateSemantics } from "./config/semantic.ts";
 import { createClaudeAdapter } from "./harness/claude.ts";
 import { createCodexAdapter } from "./harness/codex.ts";
+import type { ProcessDependencies } from "./harness/process.ts";
 import type { HarnessAdapter } from "./harness/types.ts";
 import { createHealthServer, createReadiness } from "./health.ts";
 import { createGitHubAdapter } from "./provider/github.ts";
@@ -19,7 +20,7 @@ import { createGitLabAdapter } from "./provider/gitlab.ts";
 import { createRateLimitedHttpClient } from "./provider/http.ts";
 import type { ProviderAdapter, ProviderKind } from "./provider/types.ts";
 import { runPreflight, type PreflightDependencies, type ReadyDependencies } from "./preflight.ts";
-import { createAttemptRunner } from "./runtime/attempt-runner.ts";
+import { createAttemptRunner, type AttemptRunnerDependencies } from "./runtime/attempt-runner.ts";
 import { createControlWriter, type ControlWriter } from "./runtime/control-state.ts";
 import { createController, type Controller } from "./runtime/controller.ts";
 import { RateLimiter, type RateLimiterClock } from "./runtime/rate-limiter.ts";
@@ -28,6 +29,14 @@ import { WorkspaceManager } from "./runtime/workspaces.ts";
 
 type Providers = Partial<Record<ProviderKind, ProviderAdapter>>;
 type Harnesses = Partial<Record<"claude" | "codex", HarnessAdapter>>;
+type AttemptRunnerOverrides = Partial<Pick<AttemptRunnerDependencies,
+  "workspaceManager" | "createSession" | "compileAgent" | "verifyReceipt" | "delay" | "now" | "newId"
+>>;
+
+export interface ProductionOverrides {
+  harnessProcesses?: Partial<ProcessDependencies>;
+  attemptRunner?: AttemptRunnerOverrides;
+}
 
 interface SignalSource {
   once(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
@@ -110,6 +119,7 @@ export function createProductionDependencies(
   environment: NodeJS.ProcessEnv,
   healthPort: number,
   rateLimiterClock?: RateLimiterClock,
+  overrides: ProductionOverrides = {},
 ) {
   const configSource = normalizeConfigurationSource(environment.AGENT_FLOW_CONFIG_REPOSITORY ?? "/config");
   const dataDirectory = resolve(environment.AGENT_FLOW_DATA_DIRECTORY ?? "/data");
@@ -169,15 +179,15 @@ export function createProductionDependencies(
         codex: createCodexAdapter({
           authFile: join(codexRoot, "auth.json"),
           ...(existsSync(codexConfig) ? { configFile: codexConfig } : {}),
-        }),
+        }, overrides.harnessProcesses),
         claude: createClaudeAdapter({
           credentialsFile: join(claudeRoot, ".credentials.json"),
           ...(existsSync(claudeSettings) ? { settingsFile: claudeSettings } : {}),
-        }),
+        }, overrides.harnessProcesses),
       };
     },
     createController(bundle: ConfigBundle, providers: Providers, harnesses: Harnesses): Controller {
-      return composeController(bundle, providers, harnesses, load, dataDirectory);
+      return composeController(bundle, providers, harnesses, load, dataDirectory, environment, overrides);
     },
   };
 }
@@ -188,8 +198,11 @@ function composeController(
   harnesses: Harnesses,
   loadPinned: (revision?: string) => Promise<ConfigBundle>,
   dataDirectory: string,
+  environment: NodeJS.ProcessEnv,
+  overrides: ProductionOverrides,
 ): Controller {
-  const workspaceManager = new WorkspaceManager(dataDirectory);
+  const { workspaceManager = new WorkspaceManager(dataDirectory), ...attemptRunnerOverrides } =
+    overrides.attemptRunner ?? {};
   const writers: Partial<Record<ProviderKind, ControlWriter>> = {};
   const runners: Partial<Record<ProviderKind, AttemptLauncher>> = {};
 
@@ -199,8 +212,14 @@ function composeController(
     const writeControl = createControlWriter(provider);
     writers[kind] = writeControl;
     runners[kind] = createAttemptRunner({
+      ...attemptRunnerOverrides,
       dataDirectory,
       provider,
+      providerCredential: (name) => ({
+        provider: kind,
+        name,
+        value: requiredEnvironment(environment, name),
+      }),
       workspaceManager,
       harnesses,
       writeControl,

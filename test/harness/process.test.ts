@@ -5,6 +5,7 @@ import {
   appendFile,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rename,
@@ -24,6 +25,7 @@ import {
   HarnessPreflightError,
   HarnessProcessError,
   copyRegularFile,
+  harnessEnvironment,
   runHarnessProcess,
   type CommandRunner,
   type ProcessDependencies,
@@ -200,6 +202,11 @@ async function runFixture(target: "codex" | "claude"): Promise<{
       stagePrompt: "Implement ticket 17.",
       timeoutSeconds: 60,
       signal: new AbortController().signal,
+      providerCredential: {
+        provider: target === "codex" ? "github" : "gitlab",
+        name: target === "codex" ? "GITHUB_TOKEN" : "GITLAB_TOKEN",
+        value: "fixture-provider-token",
+      },
     },
   };
 }
@@ -216,7 +223,9 @@ test("runs Codex in the worktree with private attempt paths", async (t) => {
   const fixture = await runFixture("codex");
   t.after(() => rm(fixture.root, { recursive: true, force: true }));
   const processes = processFixture();
-  const inheritedSecrets = ["GITHUB_TOKEN", "GITLAB_TOKEN", "GH_TOKEN", "GLAB_TOKEN", "OPENAI_API_KEY"];
+  const inheritedSecrets = [
+    "GITHUB_TOKEN", "GITLAB_TOKEN", "OAUTH_TOKEN", "GH_TOKEN", "GLAB_TOKEN", "OPENAI_API_KEY", "UNRELATED_SECRET",
+  ];
   const previous = new Map(inheritedSecrets.map((name) => [name, process.env[name]]));
   for (const name of inheritedSecrets) process.env[name] = `SECRET_${name}`;
   t.after(() => {
@@ -229,6 +238,9 @@ test("runs Codex in the worktree with private attempt paths", async (t) => {
     { authFile: fixture.authFile, configFile: fixture.configFile },
     processes.dependencies,
   );
+  Object.assign(fixture.input, {
+    providerCredential: { provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token" },
+  });
 
   const pending = adapter.run(fixture.input);
   await waitForSpawn(processes.calls);
@@ -247,7 +259,14 @@ test("runs Codex in the worktree with private attempt paths", async (t) => {
   assert.equal(call.env.AGENT_FLOW_CONTEXT_PATH, fixture.input.session.contextPath);
   assert.equal(call.env.AGENT_FLOW_RECEIPT_PATH, fixture.input.session.receiptPath);
   assert.equal(call.env.HOME, process.env.HOME);
-  for (const name of inheritedSecrets) assert.equal(call.env[name], undefined);
+  assert.equal(call.env.GH_CONFIG_DIR, join(call.env.CODEX_HOME!, "cli-config/gh"));
+  assert.equal(call.env.GLAB_CONFIG_DIR, join(call.env.CODEX_HOME!, "cli-config/glab"));
+  assert.deepEqual(await readdir(call.env.GH_CONFIG_DIR!), []);
+  assert.deepEqual(await readdir(call.env.GLAB_CONFIG_DIR!), []);
+  assert.equal(call.env.GITHUB_TOKEN, "github-ticket-token");
+  for (const name of inheritedSecrets.filter((name) => name !== "GITHUB_TOKEN")) {
+    assert.equal(call.env[name], undefined);
+  }
   assert.match(call.env.CODEX_HOME!, /harness-session\/codex-/);
   assert.equal(Buffer.concat(call.child.input).toString(), "Follow repository rules.\n\nDevelop the change.\n\nImplement ticket 17.\n");
   call.child.stdout.write("stdout line\n");
@@ -282,16 +301,22 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
   const fixture = await runFixture("claude");
   t.after(() => rm(fixture.root, { recursive: true, force: true }));
   const processes = processFixture();
-  const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
-  process.env.ANTHROPIC_API_KEY = "SECRET_ANTHROPIC_API_KEY";
+  const inheritedSecrets = ["GITHUB_TOKEN", "GITLAB_TOKEN", "OAUTH_TOKEN", "OPENAI_API_KEY", "UNRELATED_SECRET"];
+  const previous = new Map(inheritedSecrets.map((name) => [name, process.env[name]]));
+  for (const name of inheritedSecrets) process.env[name] = `SECRET_${name}`;
   t.after(() => {
-    if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
-    else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   });
   const adapter = createClaudeAdapter(
     { credentialsFile: fixture.authFile, settingsFile: fixture.configFile },
     processes.dependencies,
   );
+  Object.assign(fixture.input, {
+    providerCredential: { provider: "gitlab", name: "OAUTH_TOKEN", value: "gitlab-ticket-token" },
+  });
 
   const pending = adapter.run(fixture.input);
   await waitForSpawn(processes.calls);
@@ -299,7 +324,12 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
   assert.deepEqual([call.file, ...call.args], ["claude", "--agent", "developer", "-p"]);
   assert.deepEqual(call.args.filter((argument) => argument.includes("ticket 17")), []);
   assert.match(call.env.CLAUDE_CONFIG_DIR!, /harness-session\/claude-/);
-  assert.equal(call.env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(call.env.GH_CONFIG_DIR, join(call.env.CLAUDE_CONFIG_DIR!, "cli-config/gh"));
+  assert.equal(call.env.GLAB_CONFIG_DIR, join(call.env.CLAUDE_CONFIG_DIR!, "cli-config/glab"));
+  assert.equal(call.env.OAUTH_TOKEN, "gitlab-ticket-token");
+  for (const name of inheritedSecrets.filter((name) => name !== "OAUTH_TOKEN")) {
+    assert.equal(call.env[name], undefined);
+  }
   assert.equal(Buffer.concat(call.child.input).toString(), "Follow repository rules.\n\nDevelop the change.\n\nImplement ticket 17.\n");
   assert.match(
     await readFile(join(call.env.CLAUDE_CONFIG_DIR!, "agents/developer.md"), "utf8"),
@@ -311,6 +341,26 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
   );
   call.child.finish(0, null);
   assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
+});
+
+test("rejects unsafe harness environment names and values", () => {
+  assert.throws(() => harnessEnvironment({ "BAD=NAME": "token" }), /invalid harness environment name/);
+  assert.throws(() => harnessEnvironment({ GITHUB_TOKEN: "bad\0token" }), /invalid harness environment value/);
+});
+
+test("rejects provider credentials that collide with protected harness variables", async (t) => {
+  for (const name of ["HOME", "CODEX_HOME", "AGENT_FLOW_CONTEXT_PATH", "GH_CONFIG_DIR", "ARBITRARY_TOKEN"]) {
+    const fixture = await runFixture("codex");
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const processes = processFixture();
+    fixture.input.providerCredential = { provider: "github", name, value: "credential-secret" };
+    const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+    const rejection = assert.rejects(adapter.run(fixture.input), HarnessPreflightError);
+    await delay(5);
+    processes.children[0]?.finish(0, null);
+    await rejection;
+    assert.equal(processes.calls.length, 0);
+  }
 });
 
 test("terminates a cancelled Claude process once", async (t) => {

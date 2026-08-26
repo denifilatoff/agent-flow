@@ -6,10 +6,12 @@ import {
   buildPrompt,
   copyRegularFile,
   copyRegularTree,
+  createCliConfigEnvironment,
   createHarnessHome,
   harnessEnvironment,
   pathIsDirectory,
   pathIsFile,
+  providerCredentialEnvironment,
   preflightHarness,
   processDependencies,
   runHarnessProcess,
@@ -54,6 +56,8 @@ export function createClaudeAdapter(
           throw new Error("Claude runtime has no root instructions");
         }
         environment = harnessEnvironment({
+          ...providerCredentialEnvironment(input.providerCredential),
+          ...await createCliConfigEnvironment(home),
           CLAUDE_CONFIG_DIR: home,
           AGENT_FLOW_CONTEXT_PATH: input.session.contextPath,
           AGENT_FLOW_RECEIPT_PATH: input.session.receiptPath,

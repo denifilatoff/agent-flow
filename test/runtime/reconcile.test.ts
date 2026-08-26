@@ -44,6 +44,7 @@ const FLOW_2 = "22222222-2222-4222-8222-222222222222";
 const ATTEMPT = "33333333-3333-4333-8333-333333333333";
 const SERIES = "44444444-4444-4444-8444-444444444444";
 const NOW = "2026-08-26T12:00:00.000Z";
+const PROVIDER_CREDENTIAL = { provider: "github", name: "GITHUB_TOKEN", value: "fixture-token" } as const;
 const TICKET: TicketRef = {
   provider: "github",
   repository: "example-owner/example-repository",
@@ -382,6 +383,7 @@ async function assertRunnerAccepts(request: AttemptRequest, provider: ProviderAd
   const runner = createAttemptRunner({
     dataDirectory: "/data",
     provider,
+    providerCredential: () => PROVIDER_CREDENTIAL,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: request.ref.repository,
       ticketNumber: request.ref.number, flowInstanceId: request.control.flowInstanceId,
@@ -596,6 +598,7 @@ test("reconciler owns terminal cancellation for an actual running attempt", asyn
   const runner = createAttemptRunner({
     dataDirectory: "/data",
     provider,
+    providerCredential: () => PROVIDER_CREDENTIAL,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: TICKET.repository,
       ticketNumber: TICKET.number, flowInstanceId: FLOW_1,
@@ -646,7 +649,7 @@ test("terminal cancellation overrides an in-flight success from the same attempt
   const releaseSuccessCas = deferred<void>();
   const abortObserved = deferred<void>();
   const runner = createAttemptRunner({
-    dataDirectory: "/data", provider,
+    dataDirectory: "/data", provider, providerCredential: () => PROVIDER_CREDENTIAL,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: TICKET.repository,
       ticketNumber: TICKET.number, flowInstanceId: FLOW_1,

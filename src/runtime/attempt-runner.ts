@@ -12,8 +12,9 @@ import type {
   ControlState as PersistedControl,
 } from "../config/types.js";
 import { validateDocument } from "../config/schema-validator.ts";
+import { isProviderTokenEnvironmentForApiUrl } from "../config/provider-credentials.ts";
 import { compileAgentContext, type CompiledAgent } from "../harness/apm.ts";
-import type { HarnessAdapter, HarnessResult } from "../harness/types.ts";
+import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../harness/types.ts";
 import { advanceControlState, type ControlStatePatch } from "../provider/control-comment.ts";
 import type { ProviderAdapter, ProviderArtifact } from "../provider/types.js";
 import type { AttemptLauncher, AttemptRequest } from "./reconcile.ts";
@@ -26,6 +27,7 @@ import { writeControlCas, type ControlWriter } from "./control-state.ts";
 export interface AttemptRunnerDependencies {
   dataDirectory: string;
   provider: ProviderAdapter;
+  providerCredential(tokenEnv: string): ProviderCredential;
   workspaceManager: Pick<WorkspaceManager, "prepareWorkspace">;
   harnesses: Partial<Record<"claude" | "codex", HarnessAdapter>>;
   writeControl: ControlWriter;
@@ -223,6 +225,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           stagePrompt: stagePrompt(request),
           timeoutSeconds: config.retry.timeoutSeconds,
           signal: running.abort.signal,
+          providerCredential: config.providerCredential,
         });
         if (!running.launched) {
           running.launched = true;
@@ -327,11 +330,22 @@ function validateRequest(request: AttemptRequest, dependencies: AttemptRunnerDep
   if (!providerConfig?.repositories.includes(ref.repository)) {
     throw new AttemptError("REPOSITORY_NOT_ALLOWED", "repository is not allowlisted", false);
   }
+  if (!isProviderTokenEnvironmentForApiUrl(ref.provider, providerConfig.tokenEnv, providerConfig.apiUrl)) {
+    throw new AttemptError(
+      "PROVIDER_CREDENTIAL_INVALID",
+      "provider token environment is not supported",
+      false,
+    );
+  }
+  const providerCredential = dependencies.providerCredential(providerConfig.tokenEnv);
+  if (providerCredential.provider !== ref.provider || providerCredential.name !== providerConfig.tokenEnv) {
+    throw new AttemptError("PROVIDER_CREDENTIAL_INVALID", "provider credential does not match", false);
+  }
   const agent = bundle.catalog.agents[request.agentId];
   if (!agent) throw new AttemptError("AGENT_NOT_CONFIGURED", "agent is not configured", false);
   assertModeContract(request);
   const packageDirectory = safePackageDirectory(bundle, agent.package);
-  return { ...agent, packageDirectory };
+  return { ...agent, packageDirectory, providerCredential };
 }
 
 function selectedState(bundle: ConfigBundle, control: ControlState) {

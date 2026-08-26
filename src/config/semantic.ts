@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { parseYaml } from "./schema-validator.ts";
 import type { ConfigBundle } from "./load.js";
 import type { FlowTransition } from "./types.js";
+import { isProviderTokenEnvironmentForApiUrl } from "./provider-credentials.ts";
 
 type FlowGuardName = NonNullable<FlowTransition["guards"]>[number];
 type FlowActionName = NonNullable<FlowTransition["actions"]>[number];
@@ -195,6 +196,15 @@ export async function validateSemantics(bundle: ConfigBundle): Promise<void> {
   const repositories = new Map<string, string>();
   for (const provider of (["github", "gitlab"] as const)) {
     const config = bundle.controller.providers[provider];
+    if (config && !isProviderTokenEnvironmentForApiUrl(provider, config.tokenEnv, config.apiUrl)) {
+      const host = new URL(config.apiUrl).hostname;
+      errors.push({
+        path: `controller.providers.${provider}.tokenEnv`,
+        message: provider === "github"
+          ? `token environment ${config.tokenEnv} is not supported for GitHub API host ${host}`
+          : `token environment ${config.tokenEnv} is not supported by gitlab CLI`,
+      });
+    }
     for (const [index, repository] of (config?.repositories ?? []).entries()) {
       const path = `controller.providers.${provider}.repositories.${index}`;
       const previous = repositories.get(repository);

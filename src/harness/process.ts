@@ -24,12 +24,14 @@ import { finished, pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 import type { HarnessTarget } from "../config/types.ts";
+import { isProviderTokenEnvironment } from "../config/provider-credentials.ts";
 import { assertSafeDirectory, assertSafeFile, createSafeDirectory } from "../runtime/filesystem.ts";
 import type { AttemptSession } from "../runtime/sessions.ts";
-import type { HarnessResult } from "./types.ts";
+import type { HarnessResult, ProviderCredential } from "./types.ts";
 
 const MAX_PROMPT_BYTES = 1_048_576;
 const MAX_ENVIRONMENT_VALUE_BYTES = 4_096;
+const SAFE_ENVIRONMENT_NAME = /^[A-Z][A-Z0-9_]*$/;
 const POST_EXIT_DRAIN_MS = 1_000;
 const SIGNAL_FAILURE_SETTLE_MS = 1_000;
 const TERMINATION_GRACE_MS = 10_000;
@@ -155,10 +157,18 @@ export function harnessEnvironment(overrides: Record<string, string>): NodeJS.Pr
   }
   if (!environment.PATH) throw new Error("PATH is required for harness execution");
   for (const [name, value] of Object.entries(overrides)) {
+    if (!SAFE_ENVIRONMENT_NAME.test(name)) throw new Error(`invalid harness environment name: ${name}`);
     if (!safeEnvironmentValue(value)) throw new Error(`invalid harness environment value: ${name}`);
     environment[name] = value;
   }
   return environment;
+}
+
+export function providerCredentialEnvironment(credential: ProviderCredential): Record<string, string> {
+  if (!isProviderTokenEnvironment(credential.provider, credential.name)) {
+    throw new Error("unsupported provider credential environment");
+  }
+  return { [credential.name]: credential.value };
 }
 
 export async function createHarnessHome(session: AttemptSession, target: HarnessTarget): Promise<string> {
@@ -168,6 +178,17 @@ export async function createHarnessHome(session: AttemptSession, target: Harness
     "harness session directory",
   );
   return createSafeDirectory(harnessRoot, join(harnessRoot, `${target}-${randomUUID()}`), `${target} harness home`);
+}
+
+export async function createCliConfigEnvironment(
+  home: string,
+): Promise<Record<"GH_CONFIG_DIR" | "GLAB_CONFIG_DIR", string>> {
+  const root = await createSafeDirectory(home, join(home, "cli-config"), "CLI configuration directory");
+  const [github, gitlab] = await Promise.all([
+    createSafeDirectory(root, join(root, "gh"), "GitHub CLI configuration directory"),
+    createSafeDirectory(root, join(root, "glab"), "GitLab CLI configuration directory"),
+  ]);
+  return { GH_CONFIG_DIR: github, GLAB_CONFIG_DIR: gitlab };
 }
 
 export async function copyRegularFile(source: string, destination: string, label: string): Promise<void> {
