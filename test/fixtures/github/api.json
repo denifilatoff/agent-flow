@@ -104,7 +104,7 @@
   "review": {
     "id": 701,
     "html_url": "https://github.example.test/owner/repo/pull/31#pullrequestreview-701",
-    "body": "Please fix the edge case.",
+    "body": "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->\n<!-- agent-flow-review:v1 head=0123456789abcdef0123456789abcdef01234567 verdict=changes-requested -->\nPlease fix the edge case.",
     "state": "CHANGES_REQUESTED",
     "commit_id": "0123456789abcdef0123456789abcdef01234567",
     "submitted_at": "2026-08-25T10:30:00Z",

@@ -99,10 +99,17 @@ test("reviewer publishes review metadata immediately after the common marker", a
   );
   assert.match(
     reviewer.body,
-    /exact second line:\s*```text\s*<!-- agent-flow-review:v1 head=<sha> verdict=<verdict> -->\s*```/,
+    /```text\s*<!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=review -->\s*<!-- agent-flow-review:v1 head=<sha> verdict=<verdict> -->\s*```/,
   );
   assert.match(reviewer.body, /40-character lowercase hexadecimal SHA/);
   assert.match(reviewer.body, /exactly `approved`,\s*`changes-requested`, or `commented`/);
   assert.match(reviewer.body, /Preserve both marker lines during provider readback/);
   assert.match(reviewer.body, /publish no verdict.*head.*differs/is);
+  assert.match(reviewer.body, /GitHub self-approval fallback[\s\S]*native `COMMENT` review/);
+  assert.match(reviewer.body, /successful stage\s+receipt contains only the readable `ReceiptReview`/);
+  assert.doesNotMatch(reviewer.body, /also record the marked provider comment/);
+  assert.match(
+    reviewer.body,
+    /Human-input questions[\s\S]*`artifact=question`[\s\S]*do not include review metadata/,
+  );
 });

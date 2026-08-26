@@ -130,7 +130,7 @@ Every agent-authored provider comment starts with this marker:
 `artifact-kind` is `assessment`, `plan`, `question`, `review`, or `diagnostic`. The controller compares the marker with
 the receipt and reads the provider object back before accepting it.
 
-Every stage-mode review publication, whether a native review or fallback comment, starts with these two lines in this
+Every stage-mode review publication, including a comment-style provider review, starts with these two lines in this
 order:
 
 ```text
@@ -142,6 +142,11 @@ order:
 `commented`. The controller reads both lines back before accepting the review. A changed head invalidates the review,
 so the agent must publish no verdict after observing a different provider head. Human-input questions remain ordinary
 `artifact=question` publications and do not include review metadata.
+
+When GitHub prevents self-approval, the agent submits a native pull-request review with event `COMMENT`. Its second
+marker line carries the intended logical verdict, such as `approved`. The receipt contains that review's ID as one
+`ReceiptReview`, and the controller reads it back from `/pulls/<number>/reviews/<id>`. The fallback is not an issue
+comment. For native `APPROVED` and `CHANGES_REQUESTED` states, the marker verdict must agree with the provider state.
 
 ## Attempt files
 

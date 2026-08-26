@@ -341,8 +341,94 @@ test("reads change request and review state at the provider head", async () => {
     submittedAt: "2026-08-25T10:30:00Z",
     headSha: HEAD_SHA,
     verdict: "changes-requested",
-    body: "Please fix the edge case.",
+    body:
+      "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->\n"
+      + `<!-- agent-flow-review:v1 head=${HEAD_SHA} verdict=changes-requested -->\n`
+      + "Please fix the edge case.",
   });
+});
+
+test("reads the logical verdict from a GitHub COMMENT review", async () => {
+  const review = {
+    ...(fixture.review as Record<string, unknown>),
+    state: "COMMENTED",
+    body:
+      "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->\n"
+      + `<!-- agent-flow-review:v1 head=${HEAD_SHA} verdict=approved -->`,
+  };
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo/pulls/31/reviews/701", { data: review });
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  assert.equal((await adapter(client).readReview(ref, 31, "701")).verdict, "approved");
+});
+
+test("rejects missing or malformed GitHub review metadata", async () => {
+  const missing = {
+    ...(fixture.review as Record<string, unknown>),
+    body: "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->",
+  };
+  const malformed = {
+    ...(fixture.review as Record<string, unknown>),
+    body:
+      "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->\n"
+      + `<!-- agent-flow-review:v1 head=${HEAD_SHA} verdict=changes-requested --> `,
+  };
+  const client = new FixtureClient()
+    .add(
+      "GET",
+      "repos/owner/repo/pulls/31/reviews/701",
+      { data: missing },
+      { data: malformed },
+    );
+  const github = adapter(client);
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  await assert.rejects(github.readReview(ref, 31, "701"), /review metadata/);
+  await assert.rejects(github.readReview(ref, 31, "701"), /review metadata/);
+});
+
+test("rejects GitHub review metadata for a different provider head", async () => {
+  const review = {
+    ...(fixture.review as Record<string, unknown>),
+    body:
+      "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->\n"
+      + "<!-- agent-flow-review:v1 head=1111111111111111111111111111111111111111 verdict=changes-requested -->",
+  };
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo/pulls/31/reviews/701", { data: review });
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  await assert.rejects(adapter(client).readReview(ref, 31, "701"), /head SHA/);
+});
+
+test("rejects logical verdicts that disagree with native GitHub review states", async () => {
+  const approvedWithChanges = {
+    ...(fixture.review as Record<string, unknown>),
+    state: "APPROVED",
+    body:
+      "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->\n"
+      + `<!-- agent-flow-review:v1 head=${HEAD_SHA} verdict=changes-requested -->`,
+  };
+  const changesWithApproval = {
+    ...(fixture.review as Record<string, unknown>),
+    state: "CHANGES_REQUESTED",
+    body:
+      "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->\n"
+      + `<!-- agent-flow-review:v1 head=${HEAD_SHA} verdict=approved -->`,
+  };
+  const client = new FixtureClient()
+    .add(
+      "GET",
+      "repos/owner/repo/pulls/31/reviews/701",
+      { data: approvedWithChanges },
+      { data: changesWithApproval },
+    );
+  const github = adapter(client);
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  await assert.rejects(github.readReview(ref, 31, "701"), /review state and metadata verdict/);
+  await assert.rejects(github.readReview(ref, 31, "701"), /review state and metadata verdict/);
 });
 
 test("rejects an unknown pull request state", async () => {

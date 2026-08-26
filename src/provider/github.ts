@@ -24,6 +24,8 @@ const HEADERS = {
   "x-github-api-version": "2022-11-28",
 };
 const ACTIVATION_LABEL = "agent-flow:development";
+const REVIEW_METADATA =
+  /^<!-- agent-flow-review:v1 head=([0-9a-f]{40}) verdict=(approved|changes-requested|commented) -->$/;
 
 export function createGitHubAdapter(
   config: GitHubConfig,
@@ -328,21 +330,32 @@ function normalizePull(value: unknown, repository: string): NormalizedChangeRequ
 function normalizeReview(value: unknown): NormalizedReview {
   const review = object(value, "GitHub review");
   const state = string(review, "state").toUpperCase();
-  let verdict: NormalizedReview["verdict"];
+  let providerVerdict: NormalizedReview["verdict"] | null;
   switch (state) {
-    case "APPROVED": verdict = "approved"; break;
-    case "CHANGES_REQUESTED": verdict = "changes-requested"; break;
-    case "COMMENTED": verdict = "commented"; break;
+    case "APPROVED": providerVerdict = "approved"; break;
+    case "CHANGES_REQUESTED": providerVerdict = "changes-requested"; break;
+    case "COMMENTED": providerVerdict = null; break;
     default: throw new Error(`unsupported GitHub review state: ${state}`);
+  }
+  const body = optionalString(review.body, "GitHub review body");
+  const metadata = REVIEW_METADATA.exec(body.split(/\r?\n/)[1] ?? "");
+  if (!metadata) throw new Error("invalid GitHub review metadata");
+  const headSha = string(review, "commit_id");
+  if (metadata[1] !== headSha) {
+    throw new Error("GitHub review metadata head SHA does not match the provider head SHA");
+  }
+  const verdict = metadata[2] as NormalizedReview["verdict"];
+  if (providerVerdict !== null && verdict !== providerVerdict) {
+    throw new Error("GitHub review state and metadata verdict do not match");
   }
   return {
     id: identifier(review.id, "GitHub review id"),
     url: string(review, "html_url"),
     actor: normalizeActor(review.user, "GitHub review actor"),
     submittedAt: string(review, "submitted_at"),
-    headSha: string(review, "commit_id"),
+    headSha,
     verdict,
-    body: optionalString(review.body, "GitHub review body"),
+    body,
   };
 }
 

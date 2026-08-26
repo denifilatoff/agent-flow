@@ -455,7 +455,8 @@ targets: [codex]
 
 The entry agent must stop if the provider head differs from the supplied SHA. It publishes an approved,
 changes-requested, or commented verdict tied to that SHA. When GitHub prevents self-approval, it publishes a marked
-comment plus the same machine-readable verdict. It never merges or edits controller labels. Run `apm lock --target
+native `COMMENT` review with the same machine-readable verdict and returns its readable review ID. It never publishes
+an issue-comment fallback, merges, or edits controller labels. Run `apm lock --target
 codex --no-policy` to produce the lockfile without adding generated target files to the source package. The `**/*`
 entry instruction selects `reviewer` and repeats the environment and receipt boundary for target compilation.
 
