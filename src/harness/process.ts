@@ -4,11 +4,23 @@ import {
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, opendir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { constants } from "node:fs";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  opendir,
+  realpath,
+  rm,
+  unlink,
+  type FileHandle,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import { finished } from "node:stream/promises";
+import { finished, pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 import type { HarnessTarget } from "../config/types.ts";
@@ -17,7 +29,20 @@ import type { AttemptSession } from "../runtime/sessions.ts";
 import type { HarnessResult } from "./types.ts";
 
 const MAX_PROMPT_BYTES = 1_048_576;
+const MAX_ENVIRONMENT_VALUE_BYTES = 4_096;
+const POST_EXIT_DRAIN_MS = 1_000;
 const TERMINATION_GRACE_MS = 10_000;
+const INHERITED_ENVIRONMENT = [
+  "PATH",
+  // HOME lets agents use the operator's pre-authorized gh/glab config. Harness state has a separate target home.
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "TMPDIR",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
+] as const;
 
 export interface SpawnedProcess {
   readonly stdin: Writable;
@@ -26,9 +51,12 @@ export interface SpawnedProcess {
   exitCode: number | null;
   signalCode: NodeJS.Signals | null;
   kill(signal: NodeJS.Signals): boolean;
-  once(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
+  once(event: "exit" | "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
   once(event: "error", listener: (error: Error) => void): this;
-  removeListener(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
+  removeListener(
+    event: "exit" | "close",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): this;
   removeListener(event: "error", listener: (error: Error) => void): this;
 }
 
@@ -116,6 +144,20 @@ export function buildPrompt(instructions: string, stagePrompt: string): string {
   return prompt;
 }
 
+export function harnessEnvironment(overrides: Record<string, string>): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const name of INHERITED_ENVIRONMENT) {
+    const value = process.env[name];
+    if (value !== undefined && safeEnvironmentValue(value)) environment[name] = value;
+  }
+  if (!environment.PATH) throw new Error("PATH is required for harness execution");
+  for (const [name, value] of Object.entries(overrides)) {
+    if (!safeEnvironmentValue(value)) throw new Error(`invalid harness environment value: ${name}`);
+    environment[name] = value;
+  }
+  return environment;
+}
+
 export async function createHarnessHome(session: AttemptSession, target: HarnessTarget): Promise<string> {
   const harnessRoot = await assertSafeDirectory(
     session.root,
@@ -126,28 +168,42 @@ export async function createHarnessHome(session: AttemptSession, target: Harness
 }
 
 export async function copyRegularFile(source: string, destination: string, label: string): Promise<void> {
-  const info = await lstat(source);
-  if (info.isSymbolicLink() || !info.isFile()) throw new Error(`${label} must be a regular file`);
-  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-  await copyFile(source, destination);
-  await chmod(destination, 0o600);
+  // Production auth sources are read-only mounts. Component checks plus O_NOFOLLOW and inode comparison protect this
+  // file boundary without introducing a separate filesystem sandbox.
+  const sourceHandle = await openRegularSource(source, label);
+  let destinationHandle: FileHandle | undefined;
+  let copied = false;
+  try {
+    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+    destinationHandle = await open(
+      destination,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    await pipeline(
+      sourceHandle.createReadStream(),
+      destinationHandle.createWriteStream(),
+    );
+    copied = true;
+  } finally {
+    await sourceHandle.close().catch(() => undefined);
+    if (destinationHandle) await destinationHandle.close().catch(() => undefined);
+    if (!copied) await unlink(destination).catch(() => undefined);
+  }
 }
 
 export async function copyRegularTree(source: string, destination: string, label: string): Promise<void> {
-  const info = await lstat(source);
-  if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`${label} must be a regular directory`);
+  const sourceRoot = await assertRegularSource(source, "directory", label);
   await mkdir(destination, { mode: 0o700 });
-  const directory = await opendir(source);
+  const directory = await opendir(sourceRoot.path);
   for await (const entry of directory) {
-    const sourcePath = join(source, entry.name);
+    const sourcePath = join(sourceRoot.path, entry.name);
     const destinationPath = join(destination, entry.name);
-    const entryInfo = await lstat(sourcePath);
-    if (entryInfo.isSymbolicLink()) throw new Error(`${label} must not contain symbolic links`);
-    if (entryInfo.isDirectory()) {
+    if (entry.isSymbolicLink()) throw new Error(`${label} must not contain symbolic links`);
+    if (entry.isDirectory()) {
       await copyRegularTree(sourcePath, destinationPath, label);
-    } else if (entryInfo.isFile()) {
-      await copyFile(sourcePath, destinationPath);
-      await chmod(destinationPath, 0o600);
+    } else if (entry.isFile()) {
+      await copyRegularFile(sourcePath, destinationPath, label);
     } else {
       throw new Error(`${label} must contain only regular files and directories`);
     }
@@ -156,8 +212,8 @@ export async function copyRegularTree(source: string, destination: string, label
 
 export async function pathIsDirectory(path: string): Promise<boolean> {
   try {
-    const info = await lstat(path);
-    return info.isDirectory() && !info.isSymbolicLink();
+    await assertRegularSource(path, "directory", "source directory");
+    return true;
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") return false;
     throw error;
@@ -166,8 +222,8 @@ export async function pathIsDirectory(path: string): Promise<boolean> {
 
 export async function pathIsFile(path: string): Promise<boolean> {
   try {
-    const info = await lstat(path);
-    return info.isFile() && !info.isSymbolicLink();
+    await assertRegularSource(path, "file", "source file");
+    return true;
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") return false;
     throw error;
@@ -176,24 +232,35 @@ export async function pathIsFile(path: string): Promise<boolean> {
 
 export async function preflightHarness(
   target: HarnessTarget,
-  authFiles: Array<string | undefined>,
-  authEnvironment: NodeJS.ProcessEnv,
+  seedHome: (home: string) => Promise<void>,
   dependencies: ProcessDependencies,
 ): Promise<void> {
+  let home: string | undefined;
+  let failed = false;
   try {
-    for (const source of authFiles) {
-      if (source && !(await pathIsFile(source))) throw new Error("missing harness authentication file");
-    }
-    const file = target;
-    await dependencies.runCommand(file, ["--version"], { env: authEnvironment });
+    home = await realpath(await mkdtemp(join(tmpdir(), `agent-flow-${target}-preflight-`)));
+    await chmod(home, 0o700);
+    await seedHome(home);
+    const environment = harnessEnvironment({
+      [target === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]: home,
+    });
+    await dependencies.runCommand(target, ["--version"], { env: environment });
     await dependencies.runCommand(
-      file,
+      target,
       target === "codex" ? ["login", "status"] : ["auth", "status"],
-      { env: authEnvironment },
+      { env: environment },
     );
   } catch {
-    throw new HarnessPreflightError(target);
+    failed = true;
   }
+  if (home) {
+    try {
+      await rm(home, { recursive: true, force: true });
+    } catch {
+      failed = true;
+    }
+  }
+  if (failed) throw new HarnessPreflightError(target);
 }
 
 export async function runHarnessProcess(
@@ -204,11 +271,25 @@ export async function runHarnessProcess(
   if (!Number.isInteger(spec.timeoutSeconds) || spec.timeoutSeconds < 1 || spec.timeoutSeconds > 86_400) {
     throw new Error("harness timeout must be an integer from 1 to 86400 seconds");
   }
-  if (spec.signal.aborted) return { exitCode: null, signal: "SIGTERM", timedOut: false };
+  if (spec.signal.aborted) return cancelledResult();
   await assertSafeFile(dirname(spec.logPath), spec.logPath, "harness log");
-  const log = createWriteStream(spec.logPath, { flags: "a", mode: 0o600 });
+  const logHandle = await open(
+    spec.logPath,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW,
+  );
+  if (spec.signal.aborted) {
+    await logHandle.close();
+    return cancelledResult();
+  }
+  const log = logHandle.createWriteStream({ autoClose: true });
   let logFailed = false;
   const logFinished = finished(log).catch(() => { logFailed = true; });
+  if (spec.signal.aborted) {
+    log.end();
+    await logFinished;
+    return cancelledResult();
+  }
+
   let child: SpawnedProcess;
   try {
     child = dependencies.spawn(spec.file, spec.args, {
@@ -223,49 +304,49 @@ export async function runHarnessProcess(
     throw new HarnessProcessError(target, !isMissingBinary(error));
   }
 
-  child.stdout.pipe(log, { end: false });
-  child.stderr.pipe(log, { end: false });
-  child.stdin.on("error", () => undefined);
-  child.stdin.end(spec.prompt);
-
-  return new Promise<HarnessResult>((resolve, reject) => {
+  return new Promise<HarnessResult>((resolveResult, rejectResult) => {
     let settled = false;
     let timedOut = false;
     let terminating = false;
+    let exited = false;
+    let failure: HarnessProcessError | undefined;
     let graceTimer: TimerHandle | undefined;
+    let drainTimer: TimerHandle | undefined;
     const timeoutTimer = dependencies.setTimeout(() => terminate(true), spec.timeoutSeconds * 1_000);
 
     const cleanup = (): void => {
       dependencies.clearTimeout(timeoutTimer);
       if (graceTimer) dependencies.clearTimeout(graceTimer);
+      if (drainTimer) dependencies.clearTimeout(drainTimer);
       spec.signal.removeEventListener("abort", abort);
+      child.removeListener("exit", exit);
       child.removeListener("close", close);
       child.removeListener("error", processError);
-      log.removeListener("error", logError);
+      child.stdin.removeListener("error", streamError);
+      child.stdout.removeListener("error", streamError);
+      child.stderr.removeListener("error", streamError);
+      log.removeListener("error", streamError);
       child.stdout.unpipe(log);
       child.stderr.unpipe(log);
     };
 
-    const complete = async (
-      exitCode: number | null,
-      signal: NodeJS.Signals | null,
-      error?: HarnessProcessError,
-    ): Promise<void> => {
+    const complete = async (exitCode: number | null, signal: NodeJS.Signals | null): Promise<void> => {
       if (settled) return;
       settled = true;
       cleanup();
       log.end();
       await logFinished;
-      if (logFailed) {
-        reject(new HarnessProcessError(target, false));
-        return;
-      }
-      if (error) reject(error);
-      else resolve({ exitCode, signal, timedOut });
+      if (logFailed) failure = new HarnessProcessError(target, false);
+      if (failure) rejectResult(failure);
+      else resolveResult({ exitCode, signal, timedOut });
     };
 
     function terminate(forTimeout: boolean): void {
       if (settled || terminating) return;
+      if (exited || child.exitCode !== null || child.signalCode !== null) {
+        exit(child.exitCode, child.signalCode);
+        return;
+      }
       terminating = true;
       timedOut = forTimeout;
       dependencies.clearTimeout(timeoutTimer);
@@ -279,24 +360,96 @@ export async function runHarnessProcess(
       terminate(false);
     }
 
+    function exit(exitCode: number | null, signal: NodeJS.Signals | null): void {
+      exited = true;
+      dependencies.clearTimeout(timeoutTimer);
+      if (graceTimer) dependencies.clearTimeout(graceTimer);
+      if (!drainTimer) {
+        drainTimer = dependencies.setTimeout(() => { void complete(exitCode, signal); }, POST_EXIT_DRAIN_MS);
+      }
+    }
+
     function close(exitCode: number | null, signal: NodeJS.Signals | null): void {
       void complete(exitCode, signal);
     }
 
     function processError(error: Error): void {
-      void complete(null, null, new HarnessProcessError(target, !isMissingBinary(error)));
+      failure = new HarnessProcessError(target, !isMissingBinary(error));
+      void complete(null, null);
     }
 
-    function logError(): void {
-      terminate(false);
+    function streamError(): void {
+      failure ??= new HarnessProcessError(target, false);
+      if (!exited) terminate(false);
     }
 
+    child.once("exit", exit);
     child.once("close", close);
     child.once("error", processError);
-    log.once("error", logError);
+    child.stdin.on("error", streamError);
+    child.stdout.on("error", streamError);
+    child.stderr.on("error", streamError);
+    log.on("error", streamError);
     spec.signal.addEventListener("abort", abort, { once: true });
-    if (spec.signal.aborted) abort();
+    if (spec.signal.aborted) {
+      abort();
+      return;
+    }
+    child.stdout.pipe(log, { end: false });
+    child.stderr.pipe(log, { end: false });
+    try {
+      child.stdin.end(spec.prompt);
+    } catch {
+      streamError();
+    }
   });
+}
+
+async function openRegularSource(source: string, label: string): Promise<FileHandle> {
+  const sourcePath = resolve(source);
+  const expected = await assertRegularSource(sourcePath, "file", label);
+  const handle = await open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const actual = await handle.stat();
+    if (actual.isFile() && actual.dev === expected.info.dev && actual.ino === expected.info.ino) return handle;
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+  await handle.close();
+  throw new Error(`${label} changed while opening`);
+}
+
+async function assertRegularSource(
+  source: string,
+  expected: "file" | "directory",
+  label: string,
+): Promise<{ path: string; info: Awaited<ReturnType<typeof lstat>> }> {
+  const sourcePath = resolve(source);
+  const root = parse(sourcePath).root;
+  let current = root;
+  let info = await lstat(root);
+  const components = relative(root, sourcePath).split(sep).filter(Boolean);
+  for (let index = 0; index < components.length; index += 1) {
+    current = join(current, components[index]!);
+    info = await lstat(current);
+    if (info.isSymbolicLink()) throw new Error(`${label} must not contain symbolic links`);
+    if (index < components.length - 1 && !info.isDirectory()) {
+      throw new Error(`${label} parent must be a directory`);
+    }
+  }
+  if (expected === "file" ? !info.isFile() : !info.isDirectory()) {
+    throw new Error(`${label} must be a regular ${expected}`);
+  }
+  return { path: sourcePath, info };
+}
+
+function safeEnvironmentValue(value: string): boolean {
+  return !value.includes("\0") && Buffer.byteLength(value) <= MAX_ENVIRONMENT_VALUE_BYTES;
+}
+
+function cancelledResult(): HarnessResult {
+  return { exitCode: null, signal: "SIGTERM", timedOut: false };
 }
 
 function isMissingBinary(error: unknown): boolean {

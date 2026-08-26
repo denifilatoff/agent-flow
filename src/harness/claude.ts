@@ -1,11 +1,13 @@
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import type { HarnessAdapter, HarnessRunInput, HarnessResult } from "./types.ts";
 import {
+  HarnessPreflightError,
   buildPrompt,
   copyRegularFile,
   copyRegularTree,
   createHarnessHome,
+  harnessEnvironment,
   pathIsDirectory,
   pathIsFile,
   preflightHarness,
@@ -26,50 +28,44 @@ export function createClaudeAdapter(
   const dependencies = processDependencies(dependencyOverrides);
   return {
     target: "claude",
-    preflight: () => preflightHarness(
-      "claude",
-      [auth.credentialsFile, auth.settingsFile],
-      { ...process.env, CLAUDE_CONFIG_DIR: dirname(auth.credentialsFile) },
-      dependencies,
-    ),
+    preflight: () => preflightHarness("claude", (home) => seedClaudeAuth(auth, home), dependencies),
     async run(input: HarnessRunInput): Promise<HarnessResult> {
       assertTarget(input, "claude");
       const prompt = buildPrompt(input.compiledAgent.instructions, input.stagePrompt);
       if (input.signal.aborted) return { exitCode: null, signal: "SIGTERM", timedOut: false };
-      const home = await createHarnessHome(input.session, "claude");
-      await copyRegularFile(
-        auth.credentialsFile,
-        join(home, ".credentials.json"),
-        "Claude authentication file",
-      );
-      if (auth.settingsFile) {
-        await copyRegularFile(auth.settingsFile, join(home, "settings.json"), "Claude settings file");
-      }
-      const runtime = input.compiledAgent.runtimeDirectory;
-      await copyRegularFile(
-        join(runtime, ".claude/agents", `${input.compiledAgent.agentId}.md`),
-        join(home, "agents", `${input.compiledAgent.agentId}.md`),
-        "Claude deployed agent",
-      );
-      const rules = join(runtime, ".claude/rules");
-      const rootInstructions = join(runtime, "CLAUDE.md");
-      if (await pathIsDirectory(rules)) {
-        await copyRegularTree(rules, join(home, "rules"), "Claude rules");
-      } else if (await pathIsFile(rootInstructions)) {
-        await copyRegularFile(rootInstructions, join(home, "CLAUDE.md"), "Claude root instructions");
-      } else {
-        throw new Error("Claude runtime has no root instructions");
+      let home: string;
+      let environment: NodeJS.ProcessEnv;
+      try {
+        home = await createHarnessHome(input.session, "claude");
+        await seedClaudeAuth(auth, home);
+        const runtime = input.compiledAgent.runtimeDirectory;
+        await copyRegularFile(
+          join(runtime, ".claude/agents", `${input.compiledAgent.agentId}.md`),
+          join(home, "agents", `${input.compiledAgent.agentId}.md`),
+          "Claude deployed agent",
+        );
+        const rules = join(runtime, ".claude/rules");
+        const rootInstructions = join(runtime, "CLAUDE.md");
+        if (await pathIsDirectory(rules)) {
+          await copyRegularTree(rules, join(home, "rules"), "Claude rules");
+        } else if (await pathIsFile(rootInstructions)) {
+          await copyRegularFile(rootInstructions, join(home, "CLAUDE.md"), "Claude root instructions");
+        } else {
+          throw new Error("Claude runtime has no root instructions");
+        }
+        environment = harnessEnvironment({
+          CLAUDE_CONFIG_DIR: home,
+          AGENT_FLOW_CONTEXT_PATH: input.session.contextPath,
+          AGENT_FLOW_RECEIPT_PATH: input.session.receiptPath,
+        });
+      } catch {
+        throw new HarnessPreflightError("claude");
       }
       return runHarnessProcess("claude", {
         file: "claude",
         args: ["--agent", input.compiledAgent.agentId, "-p"],
         cwd: input.workspace.worktree,
-        env: {
-          ...process.env,
-          CLAUDE_CONFIG_DIR: home,
-          AGENT_FLOW_CONTEXT_PATH: input.session.contextPath,
-          AGENT_FLOW_RECEIPT_PATH: input.session.receiptPath,
-        },
+        env: environment,
         logPath: input.session.logPath,
         prompt,
         timeoutSeconds: input.timeoutSeconds,
@@ -77,6 +73,17 @@ export function createClaudeAdapter(
       }, dependencies);
     },
   };
+}
+
+async function seedClaudeAuth(auth: ClaudeAuthSources, home: string): Promise<void> {
+  await copyRegularFile(
+    auth.credentialsFile,
+    join(home, ".credentials.json"),
+    "Claude authentication file",
+  );
+  if (auth.settingsFile) {
+    await copyRegularFile(auth.settingsFile, join(home, "settings.json"), "Claude settings file");
+  }
 }
 
 function assertTarget(input: HarnessRunInput, target: "claude"): void {
