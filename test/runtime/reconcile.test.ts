@@ -989,6 +989,43 @@ test("human cancellation reaches terminal cancelled without relaunching reviewer
   assert.deepEqual(launcher.requests, []);
 });
 
+test("human cancellation reaches terminal cancelled from both review gates without relaunching", async (t) => {
+  for (const [stateId, agentId] of [
+    ["assessment-review", "architect"],
+    ["plan-review", "planner"],
+  ] as const) {
+    await t.test(stateId, async () => {
+      const provider = new FakeProvider();
+      const source = comment("cancel-answer", "Cancel this flow.", MAINTAINER, "2026-08-26T12:02:00.000Z");
+      installControl(provider, controlState({
+        stateId,
+        attemptSeries: attemptSeries({ agentId, stateId }),
+        latestReceipt: humanReceipt("cancelled", source.id),
+        humanGate: {
+          sourceCommentId: source.id,
+          actor: source.actor,
+          verdict: "cancelled",
+          interpretedByAttemptId: ATTEMPT,
+          notes: [],
+        },
+      }));
+      provider.snapshot.comments.push(source);
+      const launcher = new FakeLauncher();
+
+      const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+      assert.equal(outcome.stateId, "cancelled");
+      assert.ok(provider.snapshot.labels.includes("agent-flow:managed"));
+      assert.ok(!provider.snapshot.labels.includes("agent-flow:development"));
+      assert.deepEqual(
+        provider.snapshot.labels.filter((label) => label.startsWith("agent-stage:")),
+        ["agent-stage:cancelled"],
+      );
+      assert.deepEqual(launcher.requests, []);
+    });
+  }
+});
+
 test("fails closed when an awaiting-merge snapshot replaces the linked change identity", async (t) => {
   for (const state of ["open", "merged"] as const) {
     await t.test(state, async () => {

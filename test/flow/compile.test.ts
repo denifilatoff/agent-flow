@@ -140,6 +140,26 @@ test("cancels needs-human after an authorized cancelled answer", async () => {
   });
 });
 
+test("cancels both human review gates after an authorized cancelled verdict", async () => {
+  const machine = compileFlow(await loadDevelopmentFlow());
+
+  for (const stateId of ["assessment-review", "plan-review"]) {
+    assert.deepEqual(machine.transition({
+      stateId,
+      resumeStateId: null,
+      event: event("human-cancelled", {
+        authorizedActor: true,
+        receiptValid: true,
+      }),
+    }), {
+      changed: true,
+      stateId: "cancelled",
+      resumeStateId: null,
+      actions: ["record-receipt", "clear-resume-state", "remove-activation-label"],
+    });
+  }
+});
+
 test("resumes a blocked stage and returns the retry reset action", async () => {
   const machine = compileFlow(await loadDevelopmentFlow());
 
@@ -180,21 +200,21 @@ test("refuses a review result for a different change-request head", async () => 
 
 test("final states refuse every machine event", async () => {
   const machine = compileFlow(await loadDevelopmentFlow());
-  const input = {
-    resumeStateId: null,
-    event: event("authorized-comment", {
-      authorizedActor: true,
-      activationPresent: true,
-      ticketOpen: true,
-    }),
+  const values = {
+    authorizedActor: true,
+    activationPresent: true,
+    ticketOpen: true,
+    receiptValid: true,
   };
 
   for (const stateId of ["done", "cancelled"]) {
-    assert.deepEqual(machine.transition({ ...input, stateId }), {
-      changed: false,
-      stateId,
-      resumeStateId: null,
-      actions: [],
-    });
+    for (const type of ["authorized-comment", "human-cancelled"] as const) {
+      assert.deepEqual(machine.transition({ stateId, resumeStateId: null, event: event(type, values) }), {
+        changed: false,
+        stateId,
+        resumeStateId: null,
+        actions: [],
+      });
+    }
   }
 });

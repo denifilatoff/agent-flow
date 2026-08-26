@@ -94,3 +94,13 @@ test("accepts the human-answer-cancelled flow event", async () => {
   };
   validateDocument("Flow", flow);
 });
+
+test("accepts the human-cancelled review-gate event", async () => {
+  const flow = await parseYaml("config/flows/development.yaml") as FlowDefinition;
+  flow.spec.states["assessment-review"]!.on!["human-cancelled"] = {
+    target: "cancelled",
+    guards: ["authorized-actor", "receipt-valid"],
+    actions: ["record-receipt", "clear-resume-state", "remove-activation-label"],
+  };
+  validateDocument("Flow", flow);
+});

@@ -46,6 +46,10 @@ spec:
           target: assessment-review
           guards: [authorized-actor, receipt-valid]
           actions: [record-receipt]
+        human-cancelled:
+          target: cancelled
+          guards: [authorized-actor, receipt-valid]
+          actions: [record-receipt, clear-resume-state, remove-activation-label]
     planning:
       kind: agent
       agent: planner
@@ -85,6 +89,10 @@ spec:
           target: plan-review
           guards: [authorized-actor, receipt-valid]
           actions: [record-receipt]
+        human-cancelled:
+          target: cancelled
+          guards: [authorized-actor, receipt-valid]
+          actions: [record-receipt, clear-resume-state, remove-activation-label]
     development:
       kind: agent
       agent: developer
