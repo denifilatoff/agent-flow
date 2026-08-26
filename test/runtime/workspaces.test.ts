@@ -37,6 +37,7 @@ async function fixture(): Promise<{
   source: string;
   run: CommandRunner;
   cloneCommands: Array<{ file: string; args: string[] }>;
+  cloneEnvironments: Array<NodeJS.ProcessEnv | undefined>;
 }> {
   const root = await mkdtemp(join(tmpdir(), "agent-flow-workspaces-"));
   const source = join(root, "source");
@@ -50,9 +51,11 @@ async function fixture(): Promise<{
   await git(source, "commit", "-m", "fixture");
 
   const cloneCommands: Array<{ file: string; args: string[] }> = [];
+  const cloneEnvironments: Array<NodeJS.ProcessEnv | undefined> = [];
   const run: CommandRunner = async (file, args, options = {}) => {
     if (file === "gh" || file === "glab") {
       cloneCommands.push({ file, args: [...args] });
+      cloneEnvironments.push(options.env);
       assert.deepEqual(args.slice(0, 2), ["repo", "clone"]);
       await execFile("git", ["clone", source, args[3]!]);
       await execFile("git", ["remote", "set-url", "origin", args[2]!], {
@@ -62,7 +65,7 @@ async function fixture(): Promise<{
     }
     return execFile(file, args, options);
   };
-  return { root, data, source, run, cloneCommands };
+  return { root, data, source, run, cloneCommands, cloneEnvironments };
 }
 
 test("different tickets never share a worktree", async (t) => {
@@ -403,4 +406,47 @@ test("uses glab for a GitLab repository", async (t) => {
 
   assert.equal(cloneCommands[0]?.file, "glab");
   assert.equal(cloneCommands[0]?.args[2], repository.cloneUrl);
+});
+
+test("passes canonical provider credentials to Git without allowing prompts", async (t) => {
+  for (const [provider, host, helper] of [
+    ["github", "github.com", "gh auth git-credential"],
+    ["gitlab", "gitlab.com", "glab auth git-credential"],
+  ] as const) {
+    const { root, data, run, cloneCommands, cloneEnvironments } = await fixture();
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const repository: ProviderRepository = {
+      provider,
+      name: "owner/repo",
+      host,
+      cloneRoot: `https://${host}/`,
+      cloneUrl: `https://${host}/owner/repo.git`,
+    };
+
+    await new WorkspaceManager(data, run).prepareWorkspace(
+      repository,
+      { provider, repository: repository.name, number: 9 },
+      FLOW_1,
+    );
+
+    assert.deepEqual(cloneCommands[0]?.args.slice(-5), [
+      "--",
+      "-c",
+      `credential.https://${host}.helper=`,
+      "-c",
+      `credential.https://${host}.helper=!${helper}`,
+    ]);
+    assert.equal(cloneEnvironments[0]?.GIT_TERMINAL_PROMPT, "0");
+  }
+});
+
+test("disables Git prompts for a self-managed provider without injecting credentials", async (t) => {
+  const { root, data, run, cloneCommands, cloneEnvironments } = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await new WorkspaceManager(data, run).prepareWorkspace(REPOSITORY, ticket(9), FLOW_1);
+
+  assert.deepEqual(cloneCommands[0]?.args.slice(0, 3), ["repo", "clone", REPOSITORY.cloneUrl]);
+  assert.equal(cloneCommands[0]?.args.length, 4);
+  assert.equal(cloneEnvironments[0]?.GIT_TERMINAL_PROMPT, "0");
 });

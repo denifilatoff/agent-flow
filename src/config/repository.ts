@@ -36,12 +36,10 @@ export interface GitAuthentication {
   environment: NodeJS.ProcessEnv;
 }
 
-export function configurationGitAuthentication(source: string): GitAuthentication {
-  const normalized = normalizeConfigurationSource(source);
-  const url = isAbsolute(normalized) ? undefined : new URL(normalized);
-  const helper = url?.hostname === "github.com" && !url.port
+export function gitAuthentication(url?: URL): GitAuthentication {
+  const helper = url?.protocol === "https:" && url.hostname === "github.com" && !url.port
     ? "gh auth git-credential"
-    : url?.hostname === "gitlab.com" && !url.port
+    : url?.protocol === "https:" && url.hostname === "gitlab.com" && !url.port
       ? "glab auth git-credential"
       : undefined;
   const key = url && helper ? `credential.https://${url.hostname}.helper` : undefined;
@@ -49,6 +47,11 @@ export function configurationGitAuthentication(source: string): GitAuthenticatio
     arguments: key ? ["-c", `${key}=`, "-c", `${key}=!${helper}`] : [],
     environment: { GIT_TERMINAL_PROMPT: "0" },
   };
+}
+
+export function configurationGitAuthentication(source: string): GitAuthentication {
+  const normalized = normalizeConfigurationSource(source);
+  return gitAuthentication(isAbsolute(normalized) ? undefined : new URL(normalized));
 }
 
 interface ConfigurationSource {

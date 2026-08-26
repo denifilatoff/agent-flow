@@ -4,6 +4,7 @@ import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { gitAuthentication } from "../config/repository.ts";
 import type { ProviderRepository, TicketRef } from "../provider/types.js";
 import {
   assertCanonicalUuid,
@@ -31,7 +32,7 @@ export interface CommandResult {
 export type CommandRunner = (
   file: string,
   args: string[],
-  options?: { cwd?: string },
+  options?: { cwd?: string; env?: NodeJS.ProcessEnv },
 ) => Promise<CommandResult>;
 
 interface RepositoryIdentity {
@@ -52,7 +53,11 @@ interface WorkspaceBinding extends RepositoryIdentity {
 const execFile = promisify(execFileCallback);
 
 const runCommand: CommandRunner = async (file, args, options = {}) => {
-  const result = await execFile(file, args, { cwd: options.cwd, encoding: "utf8" });
+  const result = await execFile(file, args, {
+    cwd: options.cwd,
+    encoding: "utf8",
+    ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
+  });
   return { stdout: result.stdout, stderr: result.stderr };
 };
 
@@ -224,7 +229,14 @@ export class WorkspaceManager {
         if (!(await pathExists(baseClone))) {
           await assertSafeWritableFile(dataRoot, baseClone, "base clone path");
           const executable = identity.provider === "github" ? "gh" : "glab";
-          await this.#run(executable, ["repo", "clone", repository.cloneUrl, baseClone]);
+          const authentication = gitAuthentication(new URL(identity.cloneUrl));
+          await this.#run(executable, [
+            "repo",
+            "clone",
+            repository.cloneUrl,
+            baseClone,
+            ...(authentication.arguments.length > 0 ? ["--", ...authentication.arguments] : []),
+          ], { env: authentication.environment });
         }
       })();
       this.#baseClonePreparations.set(baseClone, preparation);
