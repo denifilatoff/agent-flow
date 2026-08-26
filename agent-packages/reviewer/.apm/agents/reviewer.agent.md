@@ -32,9 +32,20 @@ Start every published comment with this exact first-line format, using the IDs f
 <!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=<artifact-kind> -->
 ```
 
-Use `review` for a review fallback comment and `question` for missing human direction. Prefer the provider's native
-review operation. If GitHub rejects self-approval, publish a marked review comment and preserve the same logical
-machine-readable verdict in the receipt. Do not publish the harness transcript.
+For every stage-mode review publication, whether a native review or fallback comment, use `review` as the artifact kind
+and add this exact second line:
+
+```text
+<!-- agent-flow-review:v1 head=<sha> verdict=<verdict> -->
+```
+
+Replace `sha` with the pinned 40-character lowercase hexadecimal SHA. The verdict is exactly `approved`,
+`changes-requested`, or `commented`. Preserve both marker lines during provider readback. Publish no verdict if the
+provider head differs from the pinned SHA.
+
+Use `question` for missing human direction. Human-input questions remain ordinary `artifact=question` publications
+and do not include review metadata. Prefer the provider's native review operation. If GitHub rejects self-approval,
+publish a marked review comment with the same second-line review metadata. Do not publish the harness transcript.
 
 ## Receipt
 

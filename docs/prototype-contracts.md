@@ -130,6 +130,19 @@ Every agent-authored provider comment starts with this marker:
 `artifact-kind` is `assessment`, `plan`, `question`, `review`, or `diagnostic`. The controller compares the marker with
 the receipt and reads the provider object back before accepting it.
 
+Every stage-mode review publication, whether a native review or fallback comment, starts with these two lines in this
+order:
+
+```text
+<!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=review -->
+<!-- agent-flow-review:v1 head=<sha> verdict=<verdict> -->
+```
+
+`head` is the pinned 40-character lowercase hexadecimal SHA. `verdict` is exactly `approved`, `changes-requested`, or
+`commented`. The controller reads both lines back before accepting the review. A changed head invalidates the review,
+so the agent must publish no verdict after observing a different provider head. Human-input questions remain ordinary
+`artifact=question` publications and do not include review metadata.
+
 ## Attempt files
 
 The controller creates one immutable session directory per attempt:

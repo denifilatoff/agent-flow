@@ -89,3 +89,20 @@ test("reviewer accepts a closed change request only for human input", async () =
     /Human-input mode may receive[\s\S]*after it closes[\s\S]*reopening that same request or cancelling the flow/,
   );
 });
+
+test("reviewer publishes review metadata immediately after the common marker", async () => {
+  const reviewer = parsePrimitive(
+    await readFile(
+      new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(
+    reviewer.body,
+    /exact second line:\s*```text\s*<!-- agent-flow-review:v1 head=<sha> verdict=<verdict> -->\s*```/,
+  );
+  assert.match(reviewer.body, /40-character lowercase hexadecimal SHA/);
+  assert.match(reviewer.body, /exactly `approved`,\s*`changes-requested`, or `commented`/);
+  assert.match(reviewer.body, /Preserve both marker lines during provider readback/);
+  assert.match(reviewer.body, /publish no verdict.*head.*differs/is);
+});
