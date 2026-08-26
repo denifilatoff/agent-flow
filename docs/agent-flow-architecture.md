@@ -43,6 +43,10 @@ without weakening these invariants.
 
 - Flow and agent configuration lives in one Git repository.
 - A new flow instance pins the configuration repository commit SHA that was current when the instance started.
+- The controller accepts an absolute local repository path or a credential-free `https://` or `file://` Git URL. For
+  a URL, it clones or fetches one bare mirror under the data directory during startup.
+- A controller process prepares that mirror once. Reconciliation reads only the prepared repository, so remote changes
+  become available after a service restart and never move an active flow implicitly.
 - The controller records that SHA in the control comment it creates for the instance.
 - The pinned configuration revision includes every `apm.lock.yaml` produced for the agent catalog. External APM
   artifacts must resolve through a committed lockfile.

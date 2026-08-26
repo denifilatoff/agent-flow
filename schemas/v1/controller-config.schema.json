@@ -13,7 +13,7 @@
       "additionalProperties": false,
       "required": ["repository", "flow", "catalog"],
       "properties": {
-        "repository": { "$ref": "#/$defs/absolutePath" },
+        "repository": { "$ref": "#/$defs/configurationRepository" },
         "flow": { "type": "string", "pattern": "^config/flows/[a-z][a-z0-9-]*\\.ya?ml$" },
         "catalog": { "type": "string", "const": "config/agents.yaml" }
       }
@@ -52,6 +52,12 @@
     "absolutePath": {
       "type": "string",
       "pattern": "^/"
+    },
+    "configurationRepository": {
+      "oneOf": [
+        { "$ref": "#/$defs/absolutePath" },
+        { "type": "string", "format": "uri", "pattern": "^(?:https://|file:///)(?![^/]*@)" }
+      ]
     },
     "repository": {
       "type": "string",

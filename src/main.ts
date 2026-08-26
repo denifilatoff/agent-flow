@@ -4,7 +4,12 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { loadConfigBundle, type ConfigBundle } from "./config/load.ts";
-import { materializeRevision, resolveRevision } from "./config/repository.ts";
+import {
+  materializeRevision,
+  normalizeConfigurationSource,
+  prepareConfigurationRepository,
+  resolveRevision,
+} from "./config/repository.ts";
 import { validateSemantics } from "./config/semantic.ts";
 import { createClaudeAdapter } from "./harness/claude.ts";
 import { createCodexAdapter } from "./harness/codex.ts";
@@ -108,22 +113,25 @@ export function createProductionDependencies(
   healthPort: number,
   rateLimiterClock?: RateLimiterClock,
 ) {
-  const configRepository = resolve(environment.AGENT_FLOW_CONFIG_REPOSITORY ?? "/config");
+  const configSource = normalizeConfigurationSource(environment.AGENT_FLOW_CONFIG_REPOSITORY ?? "/config");
   const dataDirectory = resolve(environment.AGENT_FLOW_DATA_DIRECTORY ?? "/data");
   const controllerPath = environment.AGENT_FLOW_CONTROLLER_CONFIG ?? "config/controller.example.yaml";
   const requestedRevision = environment.AGENT_FLOW_CONFIG_REVISION;
   let current: ConfigBundle;
+  let prepared: ReturnType<typeof prepareConfigurationRepository> | undefined;
 
   const load = async (revision?: string): Promise<ConfigBundle> => {
-    const sha = await resolveRevision(configRepository, revision);
-    const root = await materializeRevision(configRepository, sha, dataDirectory);
+    prepared ??= prepareConfigurationRepository(configSource, dataDirectory);
+    const { repository } = await prepared;
+    const sha = await resolveRevision(repository, revision);
+    const root = await materializeRevision(repository, sha, dataDirectory);
     return loadConfigBundle(root, controllerPath, sha);
   };
 
   return {
     async loadConfig() {
       current = await load(requestedRevision);
-      if (resolve(current.controller.configuration.repository) !== configRepository
+      if (normalizeConfigurationSource(current.controller.configuration.repository) !== configSource
         || resolve(current.controller.runtime.dataDirectory) !== dataDirectory
         || current.controller.runtime.healthPort !== healthPort) {
         throw new Error("runtime paths do not match startup configuration");

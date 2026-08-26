@@ -5,6 +5,7 @@ services:
       context: .
     environment:
       AGENT_FLOW_CONTROLLER_CONFIG: ${AGENT_FLOW_CONTROLLER_CONFIG:-config/controller.example.yaml}
+      AGENT_FLOW_CONFIG_REPOSITORY: ${AGENT_FLOW_CONFIG_REPOSITORY:-/config}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITLAB_TOKEN: ${GITLAB_TOKEN:-}
     ports:

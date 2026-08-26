@@ -16,6 +16,19 @@ test("accepts every shipped YAML document", async () => {
   validateDocument("ControllerConfig", await parseYaml("config/controller.example.yaml"));
 });
 
+test("accepts credential-free Git configuration URLs", async () => {
+  const value = await parseYaml("config/controller.example.yaml") as Record<string, unknown>;
+  const configuration = value.configuration as Record<string, unknown>;
+  validateDocument("ControllerConfig", {
+    ...value,
+    configuration: { ...configuration, repository: "https://example.test/agent-flow-config.git" },
+  });
+  assert.throws(() => validateDocument("ControllerConfig", {
+    ...value,
+    configuration: { ...configuration, repository: "https://user:secret@example.test/config.git" },
+  }));
+});
+
 test("accepts a cancelled AgentReceipt human gate", () => {
   validateDocument("AgentReceipt", {
     apiVersion: "agent-flow/v1alpha1",

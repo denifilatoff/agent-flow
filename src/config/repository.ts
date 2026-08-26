@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { loadConfigBundle } from "./load.ts";
@@ -25,6 +26,103 @@ function isSafePath(path: string): boolean {
 async function git(repository: string, arguments_: string[]): Promise<Buffer> {
   const { stdout } = await exec("git", ["-C", repository, ...arguments_], { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
   return stdout as Buffer;
+}
+
+interface ConfigurationSource {
+  kind: "local" | "remote";
+  normalized: string;
+}
+
+function configurationSource(source: string): ConfigurationSource {
+  if (isAbsolute(source)) return { kind: "local", normalized: resolve(source) };
+  if (/\s|\\/.test(source)) throw new Error("configuration repository source is invalid");
+
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    throw new Error("configuration repository source is invalid");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("configuration repository source is invalid");
+  }
+  if (url.protocol === "https:" && url.pathname !== "/") {
+    return { kind: "remote", normalized: url.href };
+  }
+  if (url.protocol === "file:" && !url.hostname) {
+    return { kind: "remote", normalized: pathToFileURL(resolve(fileURLToPath(url))).href };
+  }
+  throw new Error("configuration repository source is invalid");
+}
+
+export function normalizeConfigurationSource(source: string): string {
+  return configurationSource(source).normalized;
+}
+
+export interface PreparedConfigurationRepository {
+  source: string;
+  repository: string;
+}
+
+export async function prepareConfigurationRepository(
+  source: string,
+  dataDirectory: string,
+): Promise<PreparedConfigurationRepository> {
+  const configured = configurationSource(source);
+  if (configured.kind === "local") {
+    return { source: configured.normalized, repository: configured.normalized };
+  }
+
+  const dataRoot = await prepareDataRoot(dataDirectory);
+  const target = resolve(dataRoot, "config-repository");
+  try {
+    const entry = await lstat(target);
+    if (entry.isSymbolicLink()) throw new Error("configuration repository must not be a symbolic link");
+    if (!entry.isDirectory()) throw new Error("configuration repository is incomplete");
+    let origin: string;
+    try {
+      origin = (await git(target, ["remote", "get-url", "origin"])).toString("utf8").trim();
+      const bare = (await git(target, ["rev-parse", "--is-bare-repository"])).toString("utf8").trim();
+      const mirror = (await git(target, ["config", "--bool", "remote.origin.mirror"])).toString("utf8").trim();
+      if (bare !== "true" || mirror !== "true") throw new Error("not a mirror");
+    } catch {
+      throw new Error("configuration repository is incomplete");
+    }
+    if (normalizeConfigurationSource(origin) !== configured.normalized) {
+      throw new Error("configuration repository origin does not match the configured source");
+    }
+    try {
+      await git(target, ["fetch", "--prune", "origin"]);
+    } catch {
+      throw new Error("configuration repository fetch failed");
+    }
+    return { source: configured.normalized, repository: target };
+  } catch (error) {
+    if (!isNodeError(error, "ENOENT")) throw error;
+  }
+
+  const temporaryRoot = await mkdtemp(resolve(dataRoot, ".config-repository."));
+  const temporary = resolve(temporaryRoot, "mirror");
+  try {
+    try {
+      await exec("git", ["clone", "--mirror", configured.normalized, temporary], {
+        encoding: "buffer",
+        maxBuffer: 16 * 1024 * 1024,
+      });
+    } catch {
+      throw new Error("configuration repository clone failed");
+    }
+    await rename(temporary, target);
+  } catch (error) {
+    await rm(temporaryRoot, { recursive: true, force: true });
+    throw error;
+  }
+  await rm(temporaryRoot, { recursive: true, force: true });
+  return { source: configured.normalized, repository: target };
+}
+
+function isNodeError(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 async function completeDirectory(path: string, sha: string): Promise<boolean> {

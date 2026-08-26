@@ -41,7 +41,7 @@ test("locks the runtime image, tools, and controller service", async () => {
   assert.equal(controller.init, true);
   assert.deepEqual(controller.ports, ["8080:8080"]);
   assert.deepEqual(Object.keys(controller.environment ?? {}).sort(), [
-    "AGENT_FLOW_CONTROLLER_CONFIG", "GITHUB_TOKEN", "GITLAB_TOKEN",
+    "AGENT_FLOW_CONFIG_REPOSITORY", "AGENT_FLOW_CONTROLLER_CONFIG", "GITHUB_TOKEN", "GITLAB_TOKEN",
   ]);
   assert.match(JSON.stringify(controller.healthcheck), /health\/ready/);
   assert.doesNotMatch(JSON.stringify(controller), /docker\.sock/);
