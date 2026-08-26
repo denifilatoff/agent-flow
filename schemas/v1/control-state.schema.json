@@ -146,7 +146,7 @@
         "actor": { "$ref": "#/$defs/actor" },
         "verdict": {
           "type": "string",
-          "enum": ["approved", "changes-requested", "question", "unclear"]
+          "enum": ["approved", "changes-requested", "cancelled", "question", "unclear"]
         },
         "interpretedByAttemptId": { "$ref": "#/$defs/uuid" },
         "notes": {

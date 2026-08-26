@@ -30,6 +30,7 @@ import {
   type AttemptRequest,
   type ReconcileDependencies,
 } from "../../src/runtime/reconcile.ts";
+import { deriveEvent } from "../../src/runtime/derive-event.ts";
 
 const SHA = "a".repeat(40);
 const OLD_HEAD = "1".repeat(40);
@@ -221,7 +222,7 @@ function humanReceipt(verdict: ControlHumanGate["verdict"], sourceCommentId: str
     attemptId: ATTEMPT,
     outcome: "succeeded",
     summary: "Human answer interpreted.",
-    artifacts: verdict === "approved" || verdict === "changes-requested" ? [] : [{
+    artifacts: verdict === "approved" || verdict === "changes-requested" || verdict === "cancelled" ? [] : [{
       kind: "comment",
       id: "clarification",
       url: "https://github.example.test/comments/clarification",
@@ -584,6 +585,60 @@ test("enters needs-human for a closed change and reviews a new head", async (t) 
     assert.equal(launcher.requests[0]?.agentId, "reviewer");
     assert.equal(launcher.requests[0]?.snapshot.changeRequest?.headSha, NEW_HEAD);
   });
+});
+
+test("derives explicit cancellation from a needs-human answer", () => {
+  const verdict = "cancelled" as const;
+  const source = comment("cancel-answer", "Cancel this flow.", MAINTAINER, "2026-08-26T12:02:00.000Z");
+  const control = controlState({
+    stateId: "needs-human",
+    resumeStateId: "review",
+    attemptSeries: attemptSeries({ agentId: "reviewer", stateId: "needs-human" }),
+    latestReceipt: humanReceipt(verdict, source.id),
+    humanGate: {
+      sourceCommentId: source.id,
+      actor: source.actor,
+      verdict,
+      interpretedByAttemptId: ATTEMPT,
+      notes: [],
+    },
+  });
+
+  assert.equal(deriveEvent(snapshot(), control, BUNDLE.flow)?.type, "human-answer-cancelled");
+});
+
+test("human cancellation reaches terminal cancelled without relaunching reviewer", async () => {
+  const verdict = "cancelled" as const;
+  const provider = new FakeProvider();
+  const source = comment("cancel-answer", "Cancel this flow.", MAINTAINER, "2026-08-26T12:02:00.000Z");
+  installControl(provider, controlState({
+    stateId: "needs-human",
+    resumeStateId: "review",
+    attemptSeries: attemptSeries({ agentId: "reviewer", stateId: "needs-human" }),
+    latestReceipt: humanReceipt(verdict, source.id),
+    humanGate: {
+      sourceCommentId: source.id,
+      actor: source.actor,
+      verdict,
+      interpretedByAttemptId: ATTEMPT,
+      notes: [],
+    },
+    changeRequest: controlChange({ state: "closed" }),
+  }));
+  provider.snapshot.changeRequest = changeRequest({ state: "closed" });
+  provider.snapshot.comments.push(source);
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.stateId, "cancelled");
+  assert.ok(provider.snapshot.labels.includes("agent-flow:managed"));
+  assert.ok(!provider.snapshot.labels.includes("agent-flow:development"));
+  assert.deepEqual(
+    provider.snapshot.labels.filter((label) => label.startsWith("agent-stage:")),
+    ["agent-stage:cancelled"],
+  );
+  assert.deepEqual(launcher.requests, []);
 });
 
 test("fails closed when an awaiting-merge snapshot replaces the linked change identity", async (t) => {

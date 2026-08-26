@@ -87,7 +87,7 @@
         "sourceCommentId": { "type": "string", "minLength": 1, "maxLength": 255 },
         "verdict": {
           "type": "string",
-          "enum": ["approved", "changes-requested", "question", "unclear"]
+          "enum": ["approved", "changes-requested", "cancelled", "question", "unclear"]
         },
         "notes": {
           "type": "array",

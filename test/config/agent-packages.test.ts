@@ -120,12 +120,25 @@ test("reviewer interprets a later authorized answer without reviewing", async ()
     reviewer.body,
     /Human-input mode interprets the authorized unmarked comment as `reopen`, `cancel`, or `unclear`/,
   );
+  assert.match(reviewer.body, /Map a request to cancel to `cancelled`/);
   assert.match(
     reviewer.body,
     /In human-input mode, always set receipt `outcome` to `succeeded`[\s\S]*Also include `humanGate`/,
   );
   assert.match(reviewer.body, /`unclear` or question result publishes a marked clarification question/);
   assert.match(reviewer.body, /Do not publish a review verdict in human-input\s+mode\./);
+});
+
+test("reviewer limits pinned-head and review receipts to open stage mode", async () => {
+  const reviewer = parsePrimitive(
+    await readFile(
+      new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(reviewer.body, /Only open stage mode reviews the pinned head/);
+  assert.match(reviewer.body, /Only a successful open stage-mode review writes a `ReceiptReview`/);
+  assert.match(reviewer.body, /Closed stage mode and human-input mode never review code or emit a review verdict/);
 });
 
 test("reviewer publishes review metadata immediately after the common marker", async () => {
@@ -144,7 +157,7 @@ test("reviewer publishes review metadata immediately after the common marker", a
   assert.match(reviewer.body, /Preserve both marker lines during provider readback/);
   assert.match(reviewer.body, /publish no verdict.*head.*differs/is);
   assert.match(reviewer.body, /GitHub self-approval fallback[\s\S]*native `COMMENT` review/);
-  assert.match(reviewer.body, /successful stage\s+receipt contains only the readable `ReceiptReview`/);
+  assert.match(reviewer.body, /successful open stage-mode review writes a `ReceiptReview`/);
   assert.doesNotMatch(reviewer.body, /also record the marked provider comment/);
   assert.match(
     reviewer.body,

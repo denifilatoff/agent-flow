@@ -122,6 +122,24 @@ test("prefers an explicit resume target over the paused source state", async () 
   });
 });
 
+test("cancels needs-human after an authorized cancelled answer", async () => {
+  const machine = compileFlow(await loadDevelopmentFlow());
+
+  assert.deepEqual(machine.transition({
+    stateId: "needs-human",
+    resumeStateId: "review",
+    event: event("human-answer-cancelled", {
+      authorizedActor: true,
+      receiptValid: true,
+    }),
+  }), {
+    changed: true,
+    stateId: "cancelled",
+    resumeStateId: null,
+    actions: ["record-receipt", "clear-resume-state", "remove-activation-label"],
+  });
+});
+
 test("resumes a blocked stage and returns the retry reset action", async () => {
   const machine = compileFlow(await loadDevelopmentFlow());
 

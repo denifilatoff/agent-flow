@@ -207,7 +207,9 @@ function assertResultContract(receipt: AgentReceipt, contract: ResultContract): 
         || receipt.artifacts.some((artifact) => artifact.kind !== "comment" || artifact.artifactKind !== "question")) {
         invalid("human-gate success requires one human gate and a valid question artifact set");
       }
-      if ((receipt.humanGate.verdict === "approved" || receipt.humanGate.verdict === "changes-requested")
+      if ((receipt.humanGate.verdict === "approved"
+        || receipt.humanGate.verdict === "changes-requested"
+        || receipt.humanGate.verdict === "cancelled")
         ? receipt.artifacts.length !== 0
         : receipt.artifacts.length !== 1) {
         invalid("human-gate question does not match its verdict");

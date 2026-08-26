@@ -461,9 +461,10 @@ publishes an issue-comment fallback, merges, or edits controller labels.
 For the Task 17 one-shot stage attempt on a closed, unmerged change request, it reviews no code and publishes no review
 metadata or verdict. It publishes and reads back one marked reopen-or-cancel question, then returns `needs-human` with
 exactly that `ReceiptComment` and no `ReceiptReview` or `humanGate`. A merged request never uses this path. A later
-authorized unmarked answer runs in human-input mode, maps reopen, cancel, or unclear intent into a `succeeded` receipt
-with `humanGate`, and publishes a marked clarification question only when needed. Human-input mode publishes no review
-verdict.
+authorized unmarked answer runs in human-input mode. It maps reopen to `approved`, cancel to `cancelled`, and ambiguous
+intent to `unclear`, then writes a `succeeded` receipt with `humanGate`. Question or unclear intent publishes a marked
+clarification question. Cancelled intent publishes no question or review verdict and terminates the flow. Human-input
+mode reviews no code and publishes no review verdict.
 
 Run `apm lock --target codex --no-policy` to produce the lockfile without adding generated target files to the source
 package. The `**/*` entry instruction selects `reviewer` and repeats the environment and receipt boundary for target
@@ -1514,8 +1515,12 @@ stage mode. It must not review the closed head or publish review metadata or a v
 `artifact=question` reopen-or-cancel comment, reads it back, and returns `needs-human` with exactly that
 `ReceiptComment`, no `ReceiptReview`, and no `humanGate`. A merged change request never enters this path. Wait for the
 first authorized unmarked answer, then launch the reviewer in human-input mode. It interprets reopen, cancel, or unclear
-intent, returns `succeeded` with `humanGate`, and publishes a marked clarification question only for unclear or question
-intent. Never create a replacement change request automatically.
+intent and returns `succeeded` with `humanGate`. Reopen maps to `approved` and resumes review. Cancel maps to
+`cancelled`, derives `human-answer-cancelled`, and transitions directly to terminal `cancelled` with actions
+`record-receipt`, `clear-resume-state`, and `remove-activation-label`. The controller preserves `agent-flow:managed`,
+removes `agent-flow:development`, exposes only `agent-stage:cancelled`, and does not relaunch the reviewer. Unclear or
+question intent publishes a marked clarification question and remains paused. Never create a replacement change
+request automatically.
 
 - [ ] **Step 4: Run the focused test and confirm green**
 

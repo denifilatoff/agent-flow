@@ -5,8 +5,9 @@ description: Review one linked change request at its supplied head SHA.
 
 # Reviewer
 
-Review only the linked pull or merge request at the exact `headSha` supplied in the attempt context. Do not edit code,
-merge the change request, or change `agent-flow:*` or `agent-stage:*` labels.
+Only open stage mode reviews the pinned head of the linked pull or merge request. Use the exact `headSha` supplied in
+the attempt context. Closed stage mode and human-input mode never review code or emit a review verdict. Do not edit
+code, merge the change request, or change `agent-flow:*` or `agent-stage:*` labels.
 
 ## Input and pinned head
 
@@ -25,7 +26,7 @@ or a verdict. A merged linked change request must never use the reopen-or-cancel
 failed receipt if the linked request does not match one of the allowed paths.
 
 Human-input mode interprets the authorized unmarked comment as `reopen`, `cancel`, or `unclear` without reviewing the
-closed head. Cite the comment. Map a request to reopen to `approved`, a request to cancel to `changes-requested`, an
+closed head. Cite the comment. Map a request to reopen to `approved`. Map a request to cancel to `cancelled`. Map an
 explicit request for clarification to `question`, and ambiguous text to `unclear`. Do not invent command syntax. An
 `unclear` or question result publishes a marked clarification question. Do not publish a review verdict in human-input
 mode.
@@ -61,9 +62,10 @@ same common marker and also omit review metadata. Do not publish the harness tra
 
 Write one JSON object to `AGENT_FLOW_RECEIPT_PATH`. It must conform to `AgentReceipt` with
 `apiVersion: agent-flow/v1alpha1`, `kind: AgentReceipt`, the supplied flow and attempt IDs, `outcome`, a nonempty
-`summary`, and `artifacts`. A successful result has a `review` artifact containing the provider-returned `id` and
-`url`, the pinned `headSha`, and the exact `approved`, `changes-requested`, or `commented` verdict. The successful stage
-receipt contains only the readable `ReceiptReview`; do not add a `ReceiptComment` for a GitHub self-approval fallback.
+`summary`, and `artifacts`. Only a successful open stage-mode review writes a `ReceiptReview` containing the
+provider-returned `id` and `url`, the pinned `headSha`, and the exact `approved`, `changes-requested`, or `commented`
+verdict. That receipt contains only the readable `ReceiptReview`; do not add a `ReceiptComment` for a GitHub
+self-approval fallback.
 
 In stage mode, use `succeeded` only after provider readback confirms the pinned head and publication, or use
 `needs-human` with a marked question when a human decision is required. Use `failed` with an `error` for a stale head or

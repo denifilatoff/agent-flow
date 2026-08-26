@@ -139,6 +139,10 @@ spec:
     needs-human:
       kind: paused
       "on":
+        human-answer-cancelled:
+          target: cancelled
+          guards: [authorized-actor, receipt-valid]
+          actions: [record-receipt, clear-resume-state, remove-activation-label]
         human-answer-accepted:
           target: $resume
           guards: [authorized-actor, receipt-valid, activation-present, ticket-open]

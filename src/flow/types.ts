@@ -11,6 +11,7 @@ export type FlowEventType =
   | "human-question"
   | "human-unclear"
   | "human-answer-accepted"
+  | "human-answer-cancelled"
   | "human-answer-unclear"
   | "authorized-comment"
   | "change-request-updated"

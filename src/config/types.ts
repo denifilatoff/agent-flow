@@ -91,7 +91,7 @@ export interface ReceiptReview {
 
 export interface ReceiptHumanGate {
   sourceCommentId: string;
-  verdict: "approved" | "changes-requested" | "question" | "unclear";
+  verdict: "approved" | "changes-requested" | "cancelled" | "question" | "unclear";
   notes: string[];
 }
 
@@ -145,7 +145,7 @@ export interface Attempt {
 export interface ControlHumanGate {
   sourceCommentId: string;
   actor: Actor;
-  verdict: "approved" | "changes-requested" | "question" | "unclear";
+  verdict: "approved" | "changes-requested" | "cancelled" | "question" | "unclear";
   interpretedByAttemptId: string;
   notes: string[];
 }

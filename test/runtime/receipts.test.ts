@@ -539,13 +539,13 @@ test("verifies human-gate source identity, content, and permission", async (cont
 
 test("enforces the human-gate verdict and question matrix", async (context) => {
   const humanReceipt = (
-    verdict: "approved" | "changes-requested" | "question" | "unclear",
+    verdict: "approved" | "changes-requested" | "cancelled" | "question" | "unclear",
     withQuestion: boolean,
   ) => receipt(withQuestion ? [commentArtifact("question")] : [], {
     humanGate: { sourceCommentId: "201", verdict, notes: [] },
   });
 
-  for (const verdict of ["approved", "changes-requested"] as const) {
+  for (const verdict of ["approved", "changes-requested", "cancelled"] as const) {
     await context.test(`accepts ${verdict} without a question`, () =>
       verify(humanReceipt(verdict, false), "human-gate"));
     await context.test(`rejects ${verdict} with a question`, () => {
