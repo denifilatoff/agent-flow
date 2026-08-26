@@ -3,7 +3,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { access, mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
+import { inspect, promisify } from "node:util";
 import test from "node:test";
 
 import {
@@ -124,13 +124,31 @@ test("classifies an APM command failure as non-retryable", async (t) => {
   const outputDirectory = join(root, "output");
   await mkdir(outputDirectory);
 
+  const sentinel = "COMMAND_OUTPUT_SECRET_91b79c";
   await assert.rejects(
     compileAgentContext("architect", packageDirectory, "claude", outputDirectory, async (_file, args) => {
-      if (args[0] === "compile") throw new Error("compile broke");
+      if (args[0] === "compile") {
+        throw Object.assign(new Error(`compile broke: ${sentinel}`), {
+          cmd: `apm compile --token ${sentinel}`,
+          stdout: sentinel,
+          stderr: sentinel,
+          code: 23,
+          signal: "SIGTERM",
+        });
+      }
     }),
     (error: unknown) => {
       assertPreflight(error);
       assert.match((error as Error).message, /APM compile failed/);
+      assert.equal("cause" in (error as object), false);
+      for (const exposed of [
+        (error as Error).message,
+        JSON.stringify(error),
+        inspect(error, { depth: null }),
+        inspect(Object.getOwnPropertyDescriptors(error as object), { depth: null }),
+      ]) {
+        assert.doesNotMatch(exposed, /COMMAND_OUTPUT_SECRET_91b79c|--token|stdout|stderr/);
+      }
       return true;
     },
   );

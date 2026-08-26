@@ -24,8 +24,8 @@ export class ApmPreflightError extends Error {
   readonly code = "APM_PREFLIGHT_FAILED";
   readonly retryable = false;
 
-  constructor(message: string, cause?: unknown) {
-    super(message, cause === undefined ? undefined : { cause });
+  constructor(message: string) {
+    super(message);
     this.name = "ApmPreflightError";
   }
 }
@@ -76,10 +76,7 @@ export async function compileAgentContext(
     return { agentId, target, instructions, runtimeDirectory };
   } catch (error) {
     if (error instanceof ApmPreflightError) throw error;
-    throw new ApmPreflightError(
-      error instanceof Error ? error.message : "APM compilation failed",
-      error,
-    );
+    throw new ApmPreflightError(error instanceof Error ? error.message : "APM compilation failed");
   }
 }
 
@@ -91,8 +88,8 @@ async function runApm(
 ): Promise<void> {
   try {
     await run("apm", args, { cwd });
-  } catch (error) {
-    throw new ApmPreflightError(`APM ${phase} failed`, error);
+  } catch {
+    throw new ApmPreflightError(`APM ${phase} failed`);
   }
 }
 
