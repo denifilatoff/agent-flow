@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -68,6 +68,28 @@ test("uses and requires schemas from the pinned root", async () => {
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a pinned schema symlink outside the pinned root", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "agent-flow-schema-symlink-"));
+  const root = join(workspace, "root");
+  try {
+    await mkdir(root);
+    await cp("config", join(root, "config"), { recursive: true });
+    await cp("schemas", join(root, "schemas"), { recursive: true });
+    const flowSchemaPath = join(root, "schemas/v1/flow.schema.json");
+    const outsideSchemaPath = join(workspace, "outside-flow.schema.json");
+    await cp(flowSchemaPath, outsideSchemaPath);
+    await unlink(flowSchemaPath);
+    await symlink(outsideSchemaPath, flowSchemaPath);
+
+    await assert.rejects(
+      loadConfigBundle(root, "config/controller.example.yaml", REVISION),
+      /pinned schema flow\.schema\.json.*escapes the pinned root/,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 

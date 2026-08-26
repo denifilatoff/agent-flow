@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
 
 import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
 import * as formatsPlugin from "ajv-formats";
@@ -76,11 +76,23 @@ export function validateDocument<T>(kind: SchemaKind, value: unknown): T {
 }
 
 export async function createDocumentValidator(schemaDirectory: string): Promise<DocumentValidator> {
+  const canonicalDirectory = await realpath(schemaDirectory);
   const schemas: JsonSchema[] = [];
   for (const file of schemaFiles) {
+    let schemaPath: string;
+    try {
+      schemaPath = await realpath(join(canonicalDirectory, file));
+    } catch (error) {
+      throw new Error(`pinned schema ${file} could not be read`, { cause: error });
+    }
+    const child = relative(canonicalDirectory, schemaPath);
+    if (child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) {
+      throw new Error(`pinned schema ${file} escapes the pinned root`);
+    }
+
     let source: string;
     try {
-      source = await readFile(join(schemaDirectory, file), "utf8");
+      source = await readFile(schemaPath, "utf8");
     } catch (error) {
       throw new Error(`pinned schema ${file} could not be read`, { cause: error });
     }
