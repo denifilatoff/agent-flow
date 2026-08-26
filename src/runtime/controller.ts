@@ -54,6 +54,7 @@ export function createController(dependencies: ControllerDependencies): Controll
   const allowed = new Set(repositories.map(({ key }) => key));
   const cursors = new Map<string, string>();
   const flowInstances = new Set<string>();
+  const activeTickets = new Map<string, TicketRef>();
   let lifecycle: Lifecycle = "created";
   let stopping = false;
 
@@ -65,6 +66,11 @@ export function createController(dependencies: ControllerDependencies): Controll
     run: async (ref) => {
       const result = await dependencies.reconcile(ref);
       if (result.flowInstanceId) flowInstances.add(result.flowInstanceId);
+      if (result.flowInstanceId && result.stateId !== "done" && result.stateId !== "cancelled") {
+        activeTickets.set(ticketKey(ref), ref);
+      } else {
+        activeTickets.delete(ticketKey(ref));
+      }
     },
   });
   const scanCalls = createScheduler<ScanCall>({
@@ -162,7 +168,13 @@ export function createController(dependencies: ControllerDependencies): Controll
     const call: ScanCall = { scan: { ...scan, windowStartedAt }, tickets: [] };
     await scanCalls.schedule(call);
     if (stopping) return;
-    await Promise.all(call.tickets.map((ref) => tickets.schedule(ref)));
+    const found = new Map(call.tickets.map((ref) => [ticketKey(ref), ref]));
+    for (const ref of activeTickets.values()) {
+      if (ref.provider === scan.provider.adapter.kind && ref.repository === scan.repository) {
+        found.set(ticketKey(ref), ref);
+      }
+    }
+    await Promise.all([...found.values()].map((ref) => tickets.schedule(ref)));
     cursors.set(key, scan.nextWindowStartedAt);
   }
 

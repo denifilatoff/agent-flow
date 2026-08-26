@@ -148,6 +148,39 @@ test("polls serialized repository scans with an in-memory cursor and one-second 
   ].toSorted());
 });
 
+test("reconciles active tickets when their provider discovery timestamp does not change", async () => {
+  const adapter: DiscoveryAdapter = {
+    kind: "gitlab",
+    async bootstrap() { return [GITLAB_ONE]; },
+    async discover() { return { tickets: [], nextCursor: null }; },
+  };
+  const abort = new AbortController();
+  let reconcileCalls = 0;
+  let intervals = 0;
+  const controller = createController({
+    providers: [{ adapter, repositories: ["group/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => {
+      reconcileCalls += 1;
+      return {
+        ...outcome(ref),
+        stateId: reconcileCalls === 1 ? "awaiting-merge" : "done",
+      };
+    },
+    launcher: launcher(),
+    delay: async () => {
+      intervals += 1;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (intervals === 3) abort.abort();
+    },
+  });
+
+  await controller.bootstrap();
+  await controller.run(abort.signal);
+
+  assert.equal(reconcileCalls, 2);
+});
+
 test("excludes duplicate reconcileNow work and cancels tracked attempts on shutdown", async () => {
   const gate = Promise.withResolvers<void>();
   let active = 0;
