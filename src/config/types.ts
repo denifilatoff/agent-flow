@@ -1,4 +1,5 @@
 export type SchemaKind = "Flow" | "AgentCatalog" | "ControllerConfig" | "ControlState" | "AgentReceipt";
+export type HarnessTarget = "codex" | "claude";
 
 export interface FlowDefinition {
   apiVersion: "agent-flow/v1alpha1";
@@ -25,7 +26,7 @@ export interface FlowTransition {
 export interface AgentCatalog {
   apiVersion: "agent-flow/v1alpha1";
   kind: "AgentCatalog";
-  agents: Record<string, { package: string; target: "codex" | "claude"; retry: RetryConfig }>;
+  agents: Record<string, { package: string; target: HarnessTarget; retry: RetryConfig }>;
 }
 
 export interface RetryConfig {
