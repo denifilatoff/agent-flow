@@ -104,7 +104,7 @@ interface Fixture {
 function fixture(options: {
   request?: AttemptRequest; results?: Array<HarnessResult | Error | Promise<HarnessResult>>;
   verify?: (attemptId: string) => Promise<AgentReceipt>; write?: AttemptRunnerDependencies["writeControl"];
-  ids?: string[]; compileError?: Error;
+  ids?: string[]; compileError?: Error; delay?: (milliseconds: number) => Promise<void>;
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
   const process = deferred<HarnessResult>();
@@ -143,7 +143,7 @@ function fixture(options: {
       return { agentId, target, instructions: "instructions", runtimeDirectory: "/runtime" }; },
     async verifyReceipt(_path, expected) { events.push("receipt:verify");
       return options.verify?.(expected.attemptId) ?? receipt(expected.attemptId); },
-    async delay(milliseconds) { delays.push(milliseconds); events.push("delay"); },
+    async delay(milliseconds) { delays.push(milliseconds); events.push("delay"); await options.delay?.(milliseconds); },
     now: () => NOW, newId: () => ids.shift()!,
   });
   return { events, controls, attempts, delays, process, runner, request: configuredRequest };
@@ -352,4 +352,28 @@ test("sanitizes a transient initial control persistence failure", async () => {
     return true;
   });
   assert.equal(subject.runner.isRunning(FLOW), false);
+});
+
+test("restart and failed recovery resolve readiness before a deferred retry delay", async () => {
+  for (const status of ["started", "failed"] as const) {
+    const never = deferred<void>();
+    const configured = bundle();
+    configured.catalog.agents.developer!.retry.delaySeconds = 3_600;
+    const current = status === "started"
+      ? { attemptId: ATTEMPT_1, status, startedAt: NOW }
+      : { attemptId: ATTEMPT_1, status, startedAt: NOW, finishedAt: NOW,
+        error: { code: "HARNESS_TIMEOUT", message: "harness timed out" } };
+    const existing = control({ attemptSeries: { seriesId: SERIES, agentId: "developer", stateId: "development",
+      inputRevision: "input:one", maxAttempts: 3, consumed: 1, current } });
+    const subject = fixture({ request: request({ bundle: configured, control: existing }),
+      ids: [ATTEMPT_2], delay: () => never.promise });
+
+    await subject.runner.start(subject.request);
+
+    assert.equal(subject.runner.isRunning(FLOW), true);
+    assert.deepEqual(subject.delays, [3_600_000]);
+    assert.equal(subject.events.includes("harness:spawn"), false);
+    await subject.runner.cancel(FLOW);
+    assert.equal(subject.runner.isRunning(FLOW), false);
+  }
 });

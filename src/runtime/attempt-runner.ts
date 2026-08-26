@@ -15,28 +15,20 @@ import { validateDocument } from "../config/schema-validator.ts";
 import { compileAgentContext, type CompiledAgent } from "../harness/apm.ts";
 import type { HarnessAdapter, HarnessResult } from "../harness/types.ts";
 import { advanceControlState, type ControlStatePatch } from "../provider/control-comment.ts";
-import type { ProviderAdapter, ProviderArtifact, TicketRef } from "../provider/types.js";
+import type { ProviderAdapter, ProviderArtifact } from "../provider/types.js";
 import type { AttemptLauncher, AttemptRequest } from "./reconcile.ts";
 import { readAndVerifyReceipt } from "./receipts.ts";
 import { createAttemptSession, type AttemptContext } from "./sessions.ts";
 import { WorkspaceManager } from "./workspaces.ts";
 import { AttemptError, classifyAttemptError, controlError } from "./errors.ts";
-
-export interface ControlWriteExpectation {
-  flowInstanceId: string;
-  sequence: number;
-}
+import { writeControlCas, type ControlWriter } from "./control-state.ts";
 
 export interface AttemptRunnerDependencies {
   dataDirectory: string;
   provider: ProviderAdapter;
   workspaceManager: Pick<WorkspaceManager, "prepareWorkspace">;
   harnesses: Partial<Record<"claude" | "codex", HarnessAdapter>>;
-  writeControl(
-    ref: TicketRef,
-    expected: ControlWriteExpectation,
-    next: ControlState,
-  ): Promise<ControlState>;
+  writeControl: ControlWriter;
   createSession?: typeof createAttemptSession;
   compileAgent?: typeof compileAgentContext;
   verifyReceipt?: typeof readAndVerifyReceipt;
@@ -159,9 +151,11 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         { attemptSeries: interrupted },
       );
       series = interrupted;
+      running.resolveReady();
       await cancellableDelay(config.retry.delaySeconds * 1_000, running, delay);
       if (running.cancelled) return;
     } else if (series.current?.status === "failed" && series.consumed < series.maxAttempts) {
+      running.resolveReady();
       await cancellableDelay(config.retry.delaySeconds * 1_000, running, delay);
       if (running.cancelled) return;
     }
@@ -418,14 +412,7 @@ async function persist(
     throw new AttemptError("CONTROL_CONFLICT", "control state changed concurrently", false);
   }
   const next = advanceControlState(control, patch, timestamp);
-  const readback = await dependencies.writeControl(
-    request.ref,
-    { flowInstanceId: control.flowInstanceId, sequence: control.sequence },
-    next,
-  );
-  if (JSON.stringify(readback) !== JSON.stringify(next)) {
-    throw new AttemptError("CONTROL_READBACK_MISMATCH", "control state readback does not match", false);
-  }
+  const readback = await writeControlCas(dependencies.writeControl, request.ref, control, next);
   running.control = readback;
   return readback;
 }

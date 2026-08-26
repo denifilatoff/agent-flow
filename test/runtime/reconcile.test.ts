@@ -354,6 +354,19 @@ function dependencies(provider = new FakeProvider(), launcher = new FakeLauncher
       },
     },
     launcher,
+    writeControl: async (ref, expected, next) => {
+      const matches = provider.snapshot.comments.filter((candidate) => {
+        const parsed = parseControlComment(candidate.body);
+        return parsed?.flowInstanceId === expected.flowInstanceId;
+      });
+      assert.equal(matches.length, 1);
+      const comment = matches[0]!;
+      const current = parseControlComment(comment.body)!;
+      if (current.sequence !== expected.sequence) throw new Error("control sequence conflict");
+      await provider.updateComment(ref, comment.id, renderControlComment(next));
+      const readback = await provider.readComment(ref, comment.id);
+      return parseControlComment(readback.body)!;
+    },
     now: () => NOW,
     newFlowInstanceId: () => FLOW_2,
   };
@@ -400,6 +413,12 @@ async function assertRunnerAccepts(request: AttemptRequest, provider: ProviderAd
 function installControl(provider: FakeProvider, state: ControlState): void {
   provider.snapshot.comments.push(controlComment(state));
   provider.snapshot.labels.push(`agent-stage:${state.stateId}`, "agent-flow:managed");
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((yes) => { resolve = yes; });
+  return { promise, resolve };
 }
 
 test("accepts one authorized activation and owns one stage label", async () => {
@@ -512,6 +531,31 @@ test("cancellation fails closed if process settlement replaced the control ident
   assert.equal(provider.events.includes("provider:set-labels"), false);
 });
 
+test("terminal cancellation does not overwrite a sequence change between reread and CAS", async () => {
+  const provider = new FakeProvider();
+  installControl(provider, controlState());
+  provider.snapshot.open = false;
+  const configured = dependencies(provider, new FakeLauncher());
+  configured.writeControl = async (_ref, expected) => {
+    const index = provider.snapshot.comments.findIndex((item) => item.id.startsWith("control-"));
+    const concurrent = parseControlComment(provider.snapshot.comments[index]!.body)!;
+    provider.snapshot.comments[index] = controlComment({
+      ...concurrent,
+      sequence: concurrent.sequence + 1,
+      updatedAt: "2026-08-26T12:01:00.000Z",
+    }, provider.snapshot.comments[index]!.id);
+    if (expected.sequence !== concurrent.sequence + 1) throw new Error("control sequence conflict");
+    throw new Error("test expected a sequence conflict");
+  };
+
+  await assert.rejects(reconcileTicket(configured, TICKET), /provider control comment update failed/);
+
+  const final = parseControlComment(provider.snapshot.comments.find((item) => item.id.startsWith("control-"))!.body)!;
+  assert.equal(final.sequence, 1);
+  assert.equal(final.stateId, "assessment");
+  assert.ok(provider.snapshot.labels.includes("agent-flow:development"));
+});
+
 test("reconciler owns terminal cancellation for an actual running attempt", async () => {
   const provider = new FakeProvider();
   installControl(provider, controlState());
@@ -558,6 +602,69 @@ test("reconciler owns terminal cancellation for an actual running attempt", asyn
   assert.equal(runner.isRunning(FLOW_1), false);
   assert.equal(persisted.stateId, "cancelled");
   assert.equal(persisted.attemptSeries?.current?.status, "cancelled");
+});
+
+test("terminal cancellation overrides an in-flight success from the same attempt", async () => {
+  const provider = new FakeProvider();
+  installControl(provider, controlState());
+  const harnessResult = deferred<{ exitCode: number; signal: null; timedOut: false }>();
+  const successCasStarted = deferred<void>();
+  const releaseSuccessCas = deferred<void>();
+  const abortObserved = deferred<void>();
+  const runner = createAttemptRunner({
+    dataDirectory: "/data", provider,
+    workspaceManager: { async prepareWorkspace() { return {
+      baseClone: "/data/repository", worktree: "/data/worktree", repository: TICKET.repository,
+      ticketNumber: TICKET.number, flowInstanceId: FLOW_1,
+    }; } },
+    harnesses: { claude: { target: "claude", async preflight() {}, async run(input) {
+      input.signal.addEventListener("abort", () => abortObserved.resolve(), { once: true });
+      return harnessResult.promise;
+    } } },
+    async writeControl(ref, expected, next) {
+      const existing = provider.snapshot.comments.find((item) => item.id.startsWith("control-"))!;
+      const parsed = parseControlComment(existing.body)!;
+      assert.equal(expected.sequence, parsed.sequence);
+      if (next.attemptSeries?.current?.status === "succeeded") {
+        successCasStarted.resolve();
+        await releaseSuccessCas.promise;
+      }
+      await provider.updateComment(ref, existing.id, renderControlComment(next));
+      return parseControlComment((await provider.readComment(ref, existing.id)).body)!;
+    },
+    async createSession(_data, _flow, attemptId) { return {
+      root: `/data/${attemptId}`, contextPath: `/data/${attemptId}/context.json`,
+      receiptPath: `/data/${attemptId}/receipt.json`, logPath: `/data/${attemptId}/harness.log`,
+      harnessSessionDirectory: `/data/${attemptId}/harness-session`,
+    }; },
+    async compileAgent(agentId, _package, target) {
+      return { agentId, target, instructions: "test", runtimeDirectory: "/runtime" };
+    },
+    async verifyReceipt(_path, expected) { return {
+      apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt", flowInstanceId: FLOW_1,
+      attemptId: expected.attemptId, outcome: "succeeded", summary: "late success",
+      artifacts: [{ kind: "change-request", number: 31,
+        url: "https://github.example.test/example-owner/example-repository/pull/31",
+        headSha: OLD_HEAD, state: "open" }],
+    }; },
+    now: () => NOW,
+  });
+
+  await reconcileTicket(dependencies(provider, runner), TICKET);
+  harnessResult.resolve({ exitCode: 0, signal: null, timedOut: false });
+  await successCasStarted.promise;
+  provider.snapshot.open = false;
+  const cancelling = reconcileTicket(dependencies(provider, runner), TICKET);
+  await abortObserved.promise;
+  releaseSuccessCas.resolve();
+  await cancelling;
+
+  const final = parseControlComment(provider.snapshot.comments.find((item) => item.id.startsWith("control-"))!.body)!;
+  assert.equal(final.stateId, "cancelled");
+  assert.equal(final.attemptSeries?.current?.status, "cancelled");
+  assert.equal(final.latestReceipt, null);
+  assert.equal(final.humanGate, null);
+  assert.equal(final.changeRequest, null);
 });
 
 test("merge completion wins over ticket closure", async () => {

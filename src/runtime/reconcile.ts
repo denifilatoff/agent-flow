@@ -25,6 +25,7 @@ import type {
   TicketRef,
 } from "../provider/types.js";
 import { deriveEvent } from "./derive-event.ts";
+import { writeControlCas, type ControlWriter } from "./control-state.ts";
 
 const AUTHORIZED = new Set<Permission>(["write", "maintain", "admin"]);
 const AGENT_MARKER = "<!-- agent-flow";
@@ -58,6 +59,7 @@ export interface ReconcileDependencies {
   provider: ProviderAdapter;
   config: ReconcileConfigSource;
   launcher: AttemptLauncher;
+  writeControl: ControlWriter;
   now?: () => string;
   newFlowInstanceId?: () => string;
 }
@@ -145,13 +147,13 @@ export async function reconcileTicket(
       attemptSeries: applyAttemptActions(control.attemptSeries, result.actions),
       changeRequest: normalizedChange(snapshot.changeRequest) ?? control.changeRequest,
     }, now(dependencies));
-    await writeControl(provider, ref, current.parsed.comment.id, next);
+    await writeExistingControl(dependencies, ref, control, next);
     changed = true;
   } else if (control.stateId === "review"
     && snapshot.changeRequest
     && control.changeRequest?.headSha !== snapshot.changeRequest.headSha) {
     next = advanceControlState(control, { changeRequest: normalizedChange(snapshot.changeRequest) }, now(dependencies));
-    await writeControl(provider, ref, current.parsed.comment.id, next);
+    await writeExistingControl(dependencies, ref, control, next);
     changed = true;
   }
 
@@ -215,7 +217,11 @@ async function cancel(
   snapshot: ProviderTicketSnapshot,
   current: LoadedControl,
 ): Promise<ReconcileOutcome> {
-  await dependencies.launcher.cancel(current.parsed.state.flowInstanceId);
+  const beforeCancel = current.parsed.state;
+  const hadActiveProcess = dependencies.launcher.isRunning(beforeCancel.flowInstanceId);
+  const activeAttemptId = hadActiveProcess ? beforeCancel.attemptSeries?.current?.attemptId ?? null : null;
+  const activeSeriesId = activeAttemptId ? beforeCancel.attemptSeries?.seriesId ?? null : null;
+  await dependencies.launcher.cancel(beforeCancel.flowInstanceId);
   const readback = await providerCall(
     "provider control comment readback failed",
     () => dependencies.provider.readComment(snapshot.ref, current.parsed.comment.id),
@@ -232,17 +238,26 @@ async function cancel(
   }
   const timestamp = now(dependencies);
   const currentAttempt = latest.attemptSeries?.current;
-  const attemptSeries = latest.attemptSeries && currentAttempt?.status === "started" ? {
+  if (activeAttemptId && (currentAttempt?.attemptId !== activeAttemptId
+    || latest.attemptSeries?.seriesId !== activeSeriesId)) {
+    throw new Error("active attempt changed during cancellation");
+  }
+  const attemptSeries = activeAttemptId && latest.attemptSeries && currentAttempt ? {
     ...latest.attemptSeries,
     current: { ...currentAttempt, status: "cancelled" as const, finishedAt: timestamp },
   } : latest.attemptSeries;
+  const lateReceipt = activeAttemptId !== null && latest.latestReceipt?.attemptId === activeAttemptId;
   const control = advanceControlState(latest, {
     stateId: "cancelled",
     resumeStateId: null,
     attemptSeries,
-    changeRequest: normalizedChange(snapshot.changeRequest) ?? latest.changeRequest,
+    latestReceipt: lateReceipt ? beforeCancel.latestReceipt : latest.latestReceipt,
+    humanGate: lateReceipt ? beforeCancel.humanGate : latest.humanGate,
+    changeRequest: lateReceipt
+      ? beforeCancel.changeRequest
+      : normalizedChange(snapshot.changeRequest) ?? latest.changeRequest,
   }, timestamp);
-  await writeControl(dependencies.provider, snapshot.ref, current.parsed.comment.id, control);
+  await writeExistingControl(dependencies, snapshot.ref, latest, control);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, current.bundle, "cancelled", true);
   return outcome(control, true, false);
 }
@@ -302,19 +317,16 @@ async function createControl(provider: ProviderAdapter, ref: TicketRef, control:
   await assertControlReadback(provider, ref, created.id, body);
 }
 
-async function writeControl(
-  provider: ProviderAdapter,
+async function writeExistingControl(
+  dependencies: ReconcileDependencies,
   ref: TicketRef,
-  commentId: string,
-  control: ControlState,
+  expected: ControlState,
+  next: ControlState,
 ): Promise<void> {
-  const body = renderControlComment(control);
-  const updated = await providerCall(
+  await providerCall(
     "provider control comment update failed",
-    () => provider.updateComment(ref, commentId, body),
+    () => writeControlCas(dependencies.writeControl, ref, expected, next),
   );
-  if (updated.id !== commentId) throw new Error("control comment readback mismatch");
-  await assertControlReadback(provider, ref, commentId, body);
 }
 
 async function assertControlReadback(
