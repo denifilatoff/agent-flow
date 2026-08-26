@@ -49,7 +49,9 @@ export function deriveEvent(
     const type = control.stateId === "needs-human"
       ? receipt.humanGate.verdict === "cancelled"
         ? "human-answer-cancelled"
-        : receipt.humanGate.verdict === "unclear" ? "human-answer-unclear" : "human-answer-accepted"
+        : receipt.humanGate.verdict === "question" || receipt.humanGate.verdict === "unclear"
+          ? "human-answer-unclear"
+          : "human-answer-accepted"
       : `human-${receipt.humanGate.verdict}` as FlowEvent["type"];
     return event(type, snapshot, control, { authorizedActor: true, receiptValid: true });
   }

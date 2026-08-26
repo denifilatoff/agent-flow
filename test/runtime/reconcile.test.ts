@@ -607,6 +607,68 @@ test("derives explicit cancellation from a needs-human answer", () => {
   assert.equal(deriveEvent(snapshot(), control, BUNDLE.flow)?.type, "human-answer-cancelled");
 });
 
+test("derives the needs-human question verdict as the unclear self-loop", () => {
+  const source = comment("question-answer", "Can you explain the options?", MAINTAINER, "2026-08-26T12:02:00.000Z");
+  const control = controlState({
+    stateId: "needs-human",
+    resumeStateId: "review",
+    attemptSeries: attemptSeries({ agentId: "reviewer", stateId: "needs-human" }),
+    latestReceipt: humanReceipt("question", source.id),
+    humanGate: {
+      sourceCommentId: source.id,
+      actor: source.actor,
+      verdict: "question",
+      interpretedByAttemptId: ATTEMPT,
+      notes: [],
+    },
+  });
+
+  assert.equal(deriveEvent(snapshot(), control, BUNDLE.flow)?.type, "human-answer-unclear");
+});
+
+test("needs-human question stays paused until a later authorized comment", async () => {
+  const provider = new FakeProvider();
+  const source = comment("question-answer", "Can you explain the options?", MAINTAINER, "2026-08-26T12:02:00.000Z");
+  const clarification = comment(
+    "clarification",
+    `<!-- agent-flow:v1 flow=${FLOW_1} attempt=${ATTEMPT} artifact=question -->\nPlease choose reopen or cancel.`,
+    MAINTAINER,
+    "2026-08-26T12:03:00.000Z",
+  );
+  installControl(provider, controlState({
+    stateId: "needs-human",
+    resumeStateId: "review",
+    attemptSeries: attemptSeries({ agentId: "reviewer", stateId: "needs-human" }),
+    latestReceipt: humanReceipt("question", source.id),
+    humanGate: {
+      sourceCommentId: source.id,
+      actor: source.actor,
+      verdict: "question",
+      interpretedByAttemptId: ATTEMPT,
+      notes: [],
+    },
+    changeRequest: controlChange({ state: "closed" }),
+  }));
+  provider.snapshot.changeRequest = changeRequest({ state: "closed" });
+  provider.snapshot.comments.push(source, clarification);
+  const launcher = new FakeLauncher();
+
+  const paused = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(paused.stateId, "needs-human");
+  assert.deepEqual(launcher.requests, []);
+  const controlCommentBody = provider.snapshot.comments.find((candidate) => candidate.id.startsWith("control-"))!.body;
+  assert.equal(parseControlComment(controlCommentBody)?.humanGate?.verdict, "question");
+
+  const later = comment("later-answer", "Reopen it.", MAINTAINER, "2026-08-26T12:04:00.000Z");
+  provider.snapshot.comments.push(later);
+  await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(launcher.requests.length, 1);
+  assert.equal(launcher.requests[0]?.mode, "human-input");
+  assert.equal(launcher.requests[0]?.sourceComment?.id, later.id);
+});
+
 test("human cancellation reaches terminal cancelled without relaunching reviewer", async () => {
   const verdict = "cancelled" as const;
   const provider = new FakeProvider();

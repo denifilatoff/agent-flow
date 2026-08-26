@@ -141,6 +141,22 @@ test("reviewer limits pinned-head and review receipts to open stage mode", async
   assert.match(reviewer.body, /Closed stage mode and human-input mode never review code or emit a review verdict/);
 });
 
+test("reviewer package instruction preserves the mode-specific receipt contract", async () => {
+  const instruction = parsePrimitive(
+    await readFile(
+      new URL(
+        "../../agent-packages/reviewer/.apm/instructions/reviewer.instructions.md",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.match(instruction.body, /Open\s+stage mode reviews only the pinned head and writes a review receipt/);
+  assert.match(instruction.body, /Closed stage mode publishes the reopen-or-cancel\s+question/);
+  assert.match(instruction.body, /Human-input mode interprets the authorized answer without reviewing code/);
+  assert.match(instruction.body, /Every mode\s+writes its appropriate `AgentReceipt` to `AGENT_FLOW_RECEIPT_PATH`/);
+});
+
 test("reviewer publishes review metadata immediately after the common marker", async () => {
   const reviewer = parsePrimitive(
     await readFile(

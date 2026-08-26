@@ -444,10 +444,14 @@ function attemptInputRevision(
 
 function hasAcceptedQuestion(control: ControlState): boolean {
   const current = control.attemptSeries?.current;
+  const receipt = control.latestReceipt;
+  const awaitingAnswer = receipt?.outcome === "needs-human"
+    || receipt?.humanGate?.verdict === "question"
+    || receipt?.humanGate?.verdict === "unclear";
   return control.attemptSeries?.stateId === control.stateId
     && current?.status === "succeeded"
-    && control.latestReceipt?.outcome === "needs-human"
-    && control.latestReceipt.attemptId === current.attemptId;
+    && awaitingAnswer
+    && receipt.attemptId === current.attemptId;
 }
 
 async function firstAuthorizedComment(
