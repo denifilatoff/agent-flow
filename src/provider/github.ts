@@ -29,6 +29,8 @@ export function createGitHubAdapter(
   client: RateLimitedHttpClient,
 ): ProviderAdapter {
   const allowlist = new Set(config.repositories);
+  const apiBase = new URL(config.apiUrl);
+  if (!apiBase.pathname.endsWith("/")) apiBase.pathname += "/";
 
   function repositoryPath(repository: string): string {
     if (!allowlist.has(repository)) throw new Error(`GitHub repository is not allowlisted: ${repository}`);
@@ -49,7 +51,7 @@ export function createGitHubAdapter(
     path: string,
     priority: RequestPriority,
     options: {
-      method?: "GET" | "POST" | "PUT" | "PATCH";
+      method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
       body?: unknown;
     } = {},
   ): Promise<ProviderResponse<unknown>> {
@@ -119,22 +121,35 @@ export function createGitHubAdapter(
       cursor?: string,
     ): Promise<DiscoveryPage> {
       const route = repositoryPath(repository);
+      const since = discoverySince(window);
       let path: string;
       if (cursor) {
-        const cursorPath = cursor.split("?", 1)[0]!;
-        if (cursorPath !== `repos/${route}/issues`
-          && !cursorPath.endsWith(`/repos/${route}/issues`)) {
+        const cursorUrl = new URL(cursor, apiBase);
+        const expectedUrl = new URL(`repos/${route}/issues`, apiBase);
+        if (cursorUrl.origin !== expectedUrl.origin || cursorUrl.pathname !== expectedUrl.pathname) {
           throw new Error("GitHub discovery cursor does not belong to the repository");
+        }
+        const expected = { state: "all", since, per_page: "100" };
+        for (const [name, value] of Object.entries(expected)) {
+          if (cursorUrl.searchParams.getAll(name).length !== 1
+            || cursorUrl.searchParams.get(name) !== value) {
+            throw new Error("GitHub cursor does not match the discovery window");
+          }
+        }
+        for (const name of cursorUrl.searchParams.keys()) {
+          if (!Object.hasOwn(expected, name) && name !== "page") {
+            throw new Error("GitHub cursor does not match the discovery window");
+          }
+        }
+        const pages = cursorUrl.searchParams.getAll("page");
+        if (pages.length > 1 || (pages[0] !== undefined && !/^[1-9]\d*$/.test(pages[0]))) {
+          throw new Error("GitHub cursor does not match the discovery window");
         }
         path = cursor;
       } else {
-        const timestamp = Date.parse(window.updatedAfter);
-        if (!Number.isFinite(timestamp) || window.overlapSeconds < 0) {
-          throw new Error("invalid GitHub discovery window");
-        }
         const query = new URLSearchParams({
           state: "all",
-          since: new Date(timestamp - window.overlapSeconds * 1_000).toISOString(),
+          since,
           per_page: "100",
         });
         path = `repos/${route}/issues?${query}`;
@@ -169,6 +184,7 @@ export function createGitHubAdapter(
       const repository = await readRepository(ref.repository);
       const issueResponse = await request(path, "active");
       const issue = object(issueResponse.data, "GitHub issue");
+      const open = normalizeIssueState(issue);
       const labels = normalizeLabels(issue.labels);
       const timeline = await listAll(`${path}/timeline?per_page=100`, "active");
       const comments = (await listAll(`${path}/comments?per_page=100`, "active"))
@@ -180,12 +196,15 @@ export function createGitHubAdapter(
       const activation = activationEvent
         ? object(activationEvent, "GitHub activation event")
         : null;
-      const changeNumber = findChangeRequestNumber(timeline);
+      const changeNumber = findChangeRequestNumber(
+        timeline,
+        new URL(`repos/${repositoryPath(ref.repository)}`, apiBase),
+      );
 
       return {
         ref,
         repository,
-        open: string(issue, "state") === "open",
+        open,
         labels,
         updatedAt: string(issue, "updated_at"),
         activation: {
@@ -244,17 +263,15 @@ export function createGitHubAdapter(
         if (!isControllerLabel(label)) throw new Error(`label is not controller-owned: ${label}`);
       }
       const path = ticketPath(ref);
-      const issue = object((await request(path, "active")).data, "GitHub issue");
-      const removed = new Set(remove);
-      const labels = normalizeLabels(issue.labels).filter((label) => !removed.has(label));
-      for (const label of add) {
-        if (!labels.includes(label)) labels.push(label);
+      for (const label of new Set(remove)) {
+        await request(`${path}/labels/${encodeURIComponent(label)}`, "active", { method: "DELETE" });
       }
-      const response = await request(`${path}/labels`, "active", {
-        method: "PUT",
-        body: { labels },
-      });
-      return normalizeLabels(response.data);
+      const labels = [...new Set(add)];
+      if (labels.length > 0) {
+        await request(`${path}/labels`, "active", { method: "POST", body: { labels } });
+      }
+      const issue = object((await request(path, "active")).data, "GitHub issue");
+      return normalizeLabels(issue.labels);
     },
 
     readChangeRequest,
@@ -306,15 +323,20 @@ function normalizePull(value: unknown, repository: string): NormalizedChangeRequ
 function normalizeReview(value: unknown): NormalizedReview {
   const review = object(value, "GitHub review");
   const state = string(review, "state").toUpperCase();
+  let verdict: NormalizedReview["verdict"];
+  switch (state) {
+    case "APPROVED": verdict = "approved"; break;
+    case "CHANGES_REQUESTED": verdict = "changes-requested"; break;
+    case "COMMENTED": verdict = "commented"; break;
+    default: throw new Error(`unsupported GitHub review state: ${state}`);
+  }
   return {
     id: identifier(review.id, "GitHub review id"),
     url: string(review, "html_url"),
     actor: normalizeActor(review.user, "GitHub review actor"),
     submittedAt: string(review, "submitted_at"),
     headSha: string(review, "commit_id"),
-    verdict: state === "APPROVED"
-      ? "approved"
-      : state === "CHANGES_REQUESTED" ? "changes-requested" : "commented",
+    verdict,
     body: optionalString(review.body, "GitHub review body"),
   };
 }
@@ -346,18 +368,50 @@ function normalizeLabels(value: unknown): string[] {
   });
 }
 
-function findChangeRequestNumber(timeline: unknown[]): number | null {
+function findChangeRequestNumber(timeline: unknown[], repositoryUrl: URL): number | null {
   for (let index = timeline.length - 1; index >= 0; index -= 1) {
     const event = object(timeline[index], "GitHub timeline event");
     if (event.event !== "cross-referenced") continue;
     const source = nullableObject(event.source);
     const issue = nullableObject(source?.issue);
     if (!issue || issue.pull_request === undefined) continue;
+    if (!sameRepositoryUrl(issue.repository_url, repositoryUrl)) continue;
     const number = integer(issue, "number");
     assertPositiveInteger(number, "pull request number");
     return number;
   }
   return null;
+}
+
+function sameRepositoryUrl(value: unknown, expected: URL): boolean {
+  if (typeof value !== "string") return false;
+  try {
+    const actual = new URL(value);
+    return actual.origin === expected.origin
+      && actual.pathname.replace(/\/$/, "").toLowerCase()
+        === expected.pathname.replace(/\/$/, "").toLowerCase()
+      && !actual.search
+      && !actual.hash;
+  } catch {
+    return false;
+  }
+}
+
+function discoverySince(window: DiscoveryWindow): string {
+  const timestamp = Date.parse(window.updatedAfter);
+  if (!Number.isFinite(timestamp)
+    || !Number.isSafeInteger(window.overlapSeconds)
+    || window.overlapSeconds < 0) {
+    throw new Error("invalid GitHub discovery window");
+  }
+  return new Date(timestamp - window.overlapSeconds * 1_000).toISOString();
+}
+
+function normalizeIssueState(issue: Record<string, unknown>): boolean {
+  const state = string(issue, "state");
+  if (state === "open") return true;
+  if (state === "closed") return false;
+  throw new Error(`unsupported GitHub issue state: ${state}`);
 }
 
 function isLabelEvent(value: unknown, eventName: string, labelName: string): boolean {

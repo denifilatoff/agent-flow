@@ -64,6 +64,7 @@
         "type": "issue",
         "issue": {
           "number": 31,
+          "repository_url": "https://api.github.example.test/repos/owner/repo",
           "pull_request": {
             "url": "https://api.github.example.test/repos/owner/repo/pulls/31"
           }

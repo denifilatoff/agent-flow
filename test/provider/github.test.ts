@@ -82,7 +82,8 @@ test("discovers changed issues and normalizes one snapshot", async () => {
   const client = new FixtureClient()
     .add("GET", discoveryPath, {
       data: fixture.discovery,
-      next: "repos/owner/repo/issues?page=2",
+      next:
+        "repos/owner/repo/issues?state=all&since=2026-08-25T09%3A59%3A59.000Z&per_page=100&page=2",
     })
     .add("GET", "repos/owner/repo", { data: fixture.repository })
     .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
@@ -106,7 +107,8 @@ test("discovers changed issues and normalizes one snapshot", async () => {
   const page = await github.discover(REPOSITORY, { updatedAfter: SINCE, overlapSeconds: 1 });
   assert.deepEqual(page, {
     tickets: [{ provider: "github", repository: REPOSITORY, number: 17 }],
-    nextCursor: "repos/owner/repo/issues?page=2",
+    nextCursor:
+      "repos/owner/repo/issues?state=all&since=2026-08-25T09%3A59%3A59.000Z&per_page=100&page=2",
   });
   const ticket = await github.readTicket(page.tickets[0]!);
   assert.equal(ticket.activation.present, true);
@@ -129,6 +131,40 @@ test("rejects a discovery cursor that targets another repository", async () => {
       "repos/other/repo/issues?hint=repos/owner/repo/issues",
     ),
     /does not belong/,
+  );
+});
+
+test("binds discovery cursors to the exact API resource and window", async () => {
+  const window = { updatedAfter: SINCE, overlapSeconds: 1 };
+  const query = "state=all&since=2026-08-25T09%3A59%3A59.000Z&per_page=100&page=2";
+  const validCursor = `repos/owner/repo/issues?${query}`;
+  const client = new FixtureClient().add("GET", validCursor, { data: [] });
+  const github = adapter(client);
+
+  assert.deepEqual(await github.discover(REPOSITORY, window, validCursor), {
+    tickets: [],
+    nextCursor: null,
+  });
+
+  await assert.rejects(
+    github.discover(REPOSITORY, window, `evil/repos/owner/repo/issues?${query}`),
+    /does not belong/,
+  );
+  await assert.rejects(
+    github.discover(REPOSITORY, window, "repos/owner/repo/issues?state=all&per_page=100&page=2"),
+    /discovery window/,
+  );
+  await assert.rejects(
+    github.discover(
+      REPOSITORY,
+      window,
+      "repos/owner/repo/issues?state=all&since=2026-08-25T09%3A59%3A58.000Z&per_page=100&page=2",
+    ),
+    /discovery window/,
+  );
+  await assert.rejects(
+    github.discover(REPOSITORY, window, `repos/owner/repo/issues?${query}&page=3`),
+    /discovery window/,
   );
 });
 
@@ -177,30 +213,74 @@ test("maps permissions and performs comment CRUD", async () => {
   assert.ok(client.calls.every(({ priority }) => priority === "active"));
 });
 
-test("updates controller labels without replacing repository labels", async () => {
+test("updates controller labels without replacing concurrently added repository labels", async () => {
   const client = new FixtureClient()
-    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
-    .add("PUT", "repos/owner/repo/issues/17/labels", {
+    .add("DELETE", "repos/owner/repo/issues/17/labels/agent-stage%3Areview", {
+      data: [{ name: "bug" }, { name: "agent-flow:development" }],
+    })
+    .add("POST", "repos/owner/repo/issues/17/labels", {
       data: [
         { name: "bug" },
         { name: "agent-flow:development" },
+        { name: "concurrent-user-label" },
         { name: "agent-stage:done" }
       ],
+    })
+    .add("GET", "repos/owner/repo/issues/17", {
+      data: {
+        ...(fixture.issue as Record<string, unknown>),
+        labels: [
+          { name: "bug" },
+          { name: "agent-flow:development" },
+          { name: "concurrent-user-label" },
+          { name: "agent-stage:done" }
+        ],
+      },
     });
   const github = adapter(client);
   const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
 
   assert.deepEqual(
     await github.setControllerLabels(ref, ["agent-stage:review"], ["agent-stage:done"]),
-    ["bug", "agent-flow:development", "agent-stage:done"],
+    ["bug", "agent-flow:development", "concurrent-user-label", "agent-stage:done"],
   );
-  assert.deepEqual(client.calls[1]!.body, {
-    labels: ["bug", "agent-flow:development", "agent-stage:done"],
-  });
+  assert.deepEqual(client.calls.map(({ method }) => method ?? "GET"), ["DELETE", "POST", "GET"]);
+  assert.deepEqual(client.calls[1]!.body, { labels: ["agent-stage:done"] });
   await assert.rejects(
     github.setControllerLabels(ref, ["bug"], []),
     /not controller-owned/,
   );
+});
+
+test("ignores cross-referenced pull requests from another repository", async () => {
+  const crossRepositoryTimeline = [{
+    id: 805,
+    event: "cross-referenced",
+    created_at: "2026-08-25T10:00:10Z",
+    actor: { id: 8, login: "developer" },
+    source: {
+      type: "issue",
+      issue: {
+        number: 31,
+        repository_url: "https://api.github.example.test/repos/other/repo",
+        pull_request: {
+          url: "https://api.github.example.test/repos/other/repo/pulls/31",
+        },
+      },
+    },
+  }];
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", {
+      data: crossRepositoryTimeline,
+    })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/pulls/31", { data: fixture.pull });
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  assert.equal((await adapter(client).readTicket(ref)).changeRequest, null);
+  assert.equal(client.calls.some(({ path }) => path.endsWith("/pulls/31")), false);
 });
 
 test("reads change request and review state at the provider head", async () => {
@@ -235,4 +315,24 @@ test("rejects an unknown pull request state", async () => {
   const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
 
   await assert.rejects(adapter(client).readChangeRequest(ref, 31), /pull request state/);
+});
+
+test("rejects unknown issue and review states", async () => {
+  const malformedIssue = {
+    ...(fixture.issue as Record<string, unknown>),
+    state: "locked",
+  };
+  const malformedReview = {
+    ...(fixture.review as Record<string, unknown>),
+    state: "PENDING",
+  };
+  const issueClient = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: malformedIssue });
+  const reviewClient = new FixtureClient()
+    .add("GET", "repos/owner/repo/pulls/31/reviews/701", { data: malformedReview });
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  await assert.rejects(adapter(issueClient).readTicket(ref), /issue state/);
+  await assert.rejects(adapter(reviewClient).readReview(ref, 31, "701"), /review state/);
 });
