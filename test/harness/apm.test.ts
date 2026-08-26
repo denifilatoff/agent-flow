@@ -253,6 +253,14 @@ test("compiles the architect and planner packages for Claude and Codex", async (
       );
       assert.match(result.instructions, expected);
       assert.match(result.instructions, /only entry agent/);
+      await execFile("apm", ["audit", "--ci", "--no-policy"], { cwd: result.runtimeDirectory });
+      const packageDirectory = join(process.cwd(), `agent-packages/${agentId}`);
+      await assert.rejects(access(join(packageDirectory, target === "claude" ? ".claude" : ".codex")), {
+        code: "ENOENT",
+      });
+      await assert.rejects(access(join(packageDirectory, target === "claude" ? "CLAUDE.md" : "AGENTS.md")), {
+        code: "ENOENT",
+      });
     }
   }
 });
