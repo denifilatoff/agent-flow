@@ -1,5 +1,6 @@
 export type SchemaKind = "Flow" | "AgentCatalog" | "ControllerConfig" | "ControlState" | "AgentReceipt";
 export type HarnessTarget = "codex" | "claude";
+export type ResultContract = "assessment" | "plan" | "development" | "review" | "human-gate" | "none";
 
 export interface FlowDefinition {
   apiVersion: "agent-flow/v1alpha1";
@@ -11,7 +12,7 @@ export interface FlowDefinition {
 export interface FlowState {
   kind: "agent" | "human-gate" | "provider-wait" | "paused" | "final";
   agent?: string;
-  resultContract?: "assessment" | "plan" | "development" | "review" | "human-gate" | "none";
+  resultContract?: ResultContract;
   context?: Array<"ticket" | "control-state" | "assessment" | "plan" | "change-request" | "review" | "human-comment">;
   on?: Record<string, FlowTransition>;
 }
