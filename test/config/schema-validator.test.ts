@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseYaml, validateDocument } from "../../src/config/schema-validator.ts";
-import type { FlowDefinition } from "../../src/config/types.ts";
+import type { AgentDecision, FlowDefinition } from "../../src/config/types.ts";
 
 test("rejects unknown fields and unsupported versions", async () => {
   const value = await parseYaml("config/flows/development.yaml") as Record<string, unknown>;
@@ -15,6 +15,14 @@ test("accepts every shipped YAML document", async () => {
   validateDocument("AgentCatalog", await parseYaml("config/agents.yaml"));
   validateDocument("AgentCatalog", await parseYaml("config/agents-codex.yaml"));
   validateDocument("ControllerConfig", await parseYaml("config/controller.example.yaml"));
+});
+
+test("accepts a minimal AgentDecision and rejects invalid decisions", () => {
+  const decision = validateDocument<AgentDecision>("AgentDecision", { event: "agent-succeeded" });
+  assert.deepEqual(decision, { event: "agent-succeeded" });
+  assert.throws(() => validateDocument<AgentDecision>("AgentDecision", { event: "unknown" }));
+  assert.throws(() => validateDocument<AgentDecision>("AgentDecision", {}));
+  assert.throws(() => validateDocument<AgentDecision>("AgentDecision", { event: "agent-succeeded", extra: true }));
 });
 
 test("accepts a target-specific catalog and rejects unsafe catalog paths", async () => {

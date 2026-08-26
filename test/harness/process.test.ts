@@ -184,12 +184,12 @@ async function runFixture(target: "codex" | "claude"): Promise<{
   const session: AttemptSession = {
     root: sessionRoot,
     contextPath: join(sessionRoot, "context.json"),
-    receiptPath: join(sessionRoot, "receipt.json"),
+    decisionPath: join(sessionRoot, "decision.json"),
     logPath: join(sessionRoot, "harness.log"),
     harnessSessionDirectory,
   };
   await writeFile(session.contextPath, "{}\n");
-  await writeFile(session.receiptPath, "");
+  await writeFile(session.decisionPath, "");
   await writeFile(session.logPath, "");
   const workspace: Workspace = {
     baseClone: join(root, "base"),
@@ -241,12 +241,12 @@ test("runs Codex with canonical, unambiguous private attempt paths", async (t) =
   Object.assign(fixture.input.session, {
     root: canonicalRoot,
     contextPath: `${canonicalRoot}/alias/../context.json`,
-    receiptPath: `${canonicalRoot}/alias/../receipt.json`,
+    decisionPath: `${canonicalRoot}/alias/../decision.json`,
     logPath: join(canonicalRoot, "harness.log"),
     harnessSessionDirectory: join(canonicalRoot, "harness-session"),
   });
   const canonicalContextPath = join(canonicalRoot, "context.json");
-  const canonicalReceiptPath = join(canonicalRoot, "receipt.json");
+  const canonicalDecisionPath = join(canonicalRoot, "decision.json");
   const processes = processFixture();
   const inheritedSecrets = [
     "GITHUB_TOKEN", "GITLAB_TOKEN", "OAUTH_TOKEN", "GH_TOKEN", "GLAB_TOKEN", "OPENAI_API_KEY", "UNRELATED_SECRET",
@@ -285,7 +285,8 @@ test("runs Codex with canonical, unambiguous private attempt paths", async (t) =
   ]);
   assert.equal(call.cwd, fixture.input.workspace.worktree);
   assert.equal(call.env.AGENT_FLOW_CONTEXT_PATH, canonicalContextPath);
-  assert.equal(call.env.AGENT_FLOW_RECEIPT_PATH, canonicalReceiptPath);
+  assert.equal(call.env.AGENT_FLOW_DECISION_PATH, canonicalDecisionPath);
+  assert.equal(call.env.AGENT_FLOW_RECEIPT_PATH, undefined);
   assert.equal(call.env.HOME, process.env.HOME);
   assert.equal(call.env.GH_CONFIG_DIR, join(call.env.CODEX_HOME!, "cli-config/gh"));
   assert.equal(call.env.GLAB_CONFIG_DIR, join(call.env.CODEX_HOME!, "cli-config/glab"));
@@ -305,9 +306,9 @@ Develop the change.
 Implement ticket 17.
 
 Parse this JSON object and pass both string values unchanged when invoking the configured APM entry agent:
-{"contextPath":${JSON.stringify(canonicalContextPath)},"receiptPath":${JSON.stringify(canonicalReceiptPath)}}
-The entry agent must read contextPath and write its final AgentReceipt to receiptPath.
-If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_RECEIPT_PATH, it may use these parsed paths directly.
+{"contextPath":${JSON.stringify(canonicalContextPath)},"decisionPath":${JSON.stringify(canonicalDecisionPath)}}
+The entry agent must read contextPath and write one AgentDecision to decisionPath.
+If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_DECISION_PATH, it may use these parsed paths directly.
 `,
   );
   call.child.stdout.write("stdout line\n");
@@ -379,6 +380,9 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
   assert.equal(call.env.GH_CONFIG_DIR, join(call.env.CLAUDE_CONFIG_DIR!, "cli-config/gh"));
   assert.equal(call.env.GLAB_CONFIG_DIR, join(call.env.CLAUDE_CONFIG_DIR!, "cli-config/glab"));
   assert.equal(call.env.OAUTH_TOKEN, undefined);
+  assert.equal(call.env.AGENT_FLOW_CONTEXT_PATH, fixture.input.session.contextPath);
+  assert.equal(call.env.AGENT_FLOW_DECISION_PATH, fixture.input.session.decisionPath);
+  assert.equal(call.env.AGENT_FLOW_RECEIPT_PATH, undefined);
   for (const name of inheritedSecrets) {
     assert.equal(call.env[name], undefined);
   }
@@ -401,7 +405,17 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
     } },
   });
   assert.doesNotMatch(glabConfigBody, /token|refresh|gitlab-ticket-token/i);
-  assert.equal(Buffer.concat(call.child.input).toString(), "Follow repository rules.\n\nDevelop the change.\n\nImplement ticket 17.\n");
+  assert.equal(Buffer.concat(call.child.input).toString(), `Follow repository rules.
+
+Develop the change.
+
+Implement ticket 17.
+
+Parse this JSON object and pass both string values unchanged when invoking the configured APM entry agent:
+{"contextPath":${JSON.stringify(fixture.input.session.contextPath)},"decisionPath":${JSON.stringify(fixture.input.session.decisionPath)}}
+The entry agent must read contextPath and write one AgentDecision to decisionPath.
+If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_DECISION_PATH, it may use these parsed paths directly.
+`);
   assert.match(
     await readFile(join(call.env.CLAUDE_CONFIG_DIR!, "agents/developer.md"), "utf8"),
     /name: developer/,
@@ -495,7 +509,7 @@ test("rejects Codex attempt paths outside the attempt session", async (t) => {
   const fixture = await runFixture("codex");
   t.after(() => rm(fixture.root, { recursive: true, force: true }));
   const processes = processFixture();
-  fixture.input.session.receiptPath = fixture.authFile;
+  fixture.input.session.decisionPath = fixture.authFile;
   const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
 
   await assert.rejects(adapter.run(fixture.input), HarnessPreflightError);

@@ -12,6 +12,7 @@ type JsonSchema = Record<string, unknown>;
 
 const schemaFiles = [
   "agent-catalog.schema.json",
+  "agent-decision.schema.json",
   "agent-receipt.schema.json",
   "control-state.schema.json",
   "controller-config.schema.json",
@@ -23,6 +24,7 @@ const schemaIds: Record<SchemaKind, string> = {
   AgentCatalog: "https://agent-flow.dev/schemas/v1/agent-catalog.schema.json",
   ControllerConfig: "https://agent-flow.dev/schemas/v1/controller-config.schema.json",
   ControlState: "https://agent-flow.dev/schemas/v1/control-state.schema.json",
+  AgentDecision: "https://agent-flow.dev/schemas/v1/agent-decision.schema.json",
   AgentReceipt: "https://agent-flow.dev/schemas/v1/agent-receipt.schema.json",
 };
 

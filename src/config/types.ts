@@ -1,6 +1,24 @@
-export type SchemaKind = "Flow" | "AgentCatalog" | "ControllerConfig" | "ControlState" | "AgentReceipt";
+export type SchemaKind = "Flow" | "AgentCatalog" | "ControllerConfig" | "ControlState" | "AgentReceipt" | "AgentDecision";
 export type HarnessTarget = "codex" | "claude";
 export type ResultContract = "assessment" | "plan" | "development" | "review" | "human-gate" | "none";
+
+export type AgentEventType =
+  | "agent-succeeded"
+  | "agent-needs-human"
+  | "review-approved"
+  | "review-changes-requested"
+  | "human-approved"
+  | "human-changes-requested"
+  | "human-question"
+  | "human-unclear"
+  | "human-cancelled"
+  | "human-answer-accepted"
+  | "human-answer-cancelled"
+  | "human-answer-unclear";
+
+export interface AgentDecision {
+  event: AgentEventType;
+}
 
 export interface FlowDefinition {
   apiVersion: "agent-flow/v1alpha1";

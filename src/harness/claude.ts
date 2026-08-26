@@ -33,7 +33,10 @@ export function createClaudeAdapter(
     preflight: () => preflightHarness("claude", (home) => seedClaudeAuth(auth, home), dependencies),
     async run(input: HarnessRunInput): Promise<HarnessResult> {
       assertTarget(input, "claude");
-      const prompt = buildPrompt(input.compiledAgent.instructions, input.stagePrompt);
+      const prompt = buildPrompt(
+        input.compiledAgent.instructions,
+        claudeStagePrompt(input.stagePrompt, input.session.contextPath, input.session.decisionPath),
+      );
       if (input.signal.aborted) return { exitCode: null, signal: "SIGTERM", timedOut: false };
       let home: string;
       let environment: NodeJS.ProcessEnv;
@@ -65,7 +68,7 @@ export function createClaudeAdapter(
           ...cliConfig,
           CLAUDE_CONFIG_DIR: home,
           AGENT_FLOW_CONTEXT_PATH: input.session.contextPath,
-          AGENT_FLOW_RECEIPT_PATH: input.session.receiptPath,
+          AGENT_FLOW_DECISION_PATH: input.session.decisionPath,
         });
       } catch {
         throw new HarnessPreflightError("claude");
@@ -82,6 +85,15 @@ export function createClaudeAdapter(
       }, dependencies);
     },
   };
+}
+
+function claudeStagePrompt(stagePrompt: string, contextPath: string, decisionPath: string): string {
+  return `${stagePrompt.trim()}
+
+Parse this JSON object and pass both string values unchanged when invoking the configured APM entry agent:
+${JSON.stringify({ contextPath, decisionPath })}
+The entry agent must read contextPath and write one AgentDecision to decisionPath.
+If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_DECISION_PATH, it may use these parsed paths directly.`;
 }
 
 async function seedClaudeAuth(auth: ClaudeAuthSources, home: string): Promise<void> {

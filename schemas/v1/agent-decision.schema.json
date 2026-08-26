@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-flow.dev/schemas/v1/agent-decision.schema.json",
+  "title": "Agent Flow model decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event"],
+  "properties": {
+    "event": {
+      "type": "string",
+      "enum": [
+        "agent-succeeded",
+        "agent-needs-human",
+        "review-approved",
+        "review-changes-requested",
+        "human-approved",
+        "human-changes-requested",
+        "human-question",
+        "human-unclear",
+        "human-cancelled",
+        "human-answer-accepted",
+        "human-answer-cancelled",
+        "human-answer-unclear"
+      ]
+    }
+  }
+}

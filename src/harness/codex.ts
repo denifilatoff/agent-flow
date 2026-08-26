@@ -35,11 +35,11 @@ export function createCodexAdapter(
       let home: string;
       let environment: NodeJS.ProcessEnv;
       let contextPath: string;
-      let receiptPath: string;
+      let decisionPath: string;
       try {
-        [contextPath, receiptPath] = await Promise.all([
+        [contextPath, decisionPath] = await Promise.all([
           assertSafeFile(input.session.root, input.session.contextPath, "attempt context path"),
-          assertSafeFile(input.session.root, input.session.receiptPath, "attempt receipt path"),
+          assertSafeFile(input.session.root, input.session.decisionPath, "attempt decision path"),
         ]);
         home = await createHarnessHome(input.session, "codex");
         await seedCodexHome(auth, home);
@@ -53,14 +53,14 @@ export function createCodexAdapter(
           ...cliConfig,
           CODEX_HOME: home,
           AGENT_FLOW_CONTEXT_PATH: contextPath,
-          AGENT_FLOW_RECEIPT_PATH: receiptPath,
+          AGENT_FLOW_DECISION_PATH: decisionPath,
         });
       } catch {
         throw new HarnessPreflightError("codex");
       }
       const prompt = buildPrompt(
         input.compiledAgent.instructions,
-        codexStagePrompt(input.stagePrompt, contextPath, receiptPath),
+        codexStagePrompt(input.stagePrompt, contextPath, decisionPath),
       );
       return runHarnessProcess("codex", {
         file: "codex",
@@ -84,13 +84,13 @@ export function createCodexAdapter(
   };
 }
 
-function codexStagePrompt(stagePrompt: string, contextPath: string, receiptPath: string): string {
+function codexStagePrompt(stagePrompt: string, contextPath: string, decisionPath: string): string {
   return `${stagePrompt.trim()}
 
 Parse this JSON object and pass both string values unchanged when invoking the configured APM entry agent:
-${JSON.stringify({ contextPath, receiptPath })}
-The entry agent must read contextPath and write its final AgentReceipt to receiptPath.
-If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_RECEIPT_PATH, it may use these parsed paths directly.`;
+${JSON.stringify({ contextPath, decisionPath })}
+The entry agent must read contextPath and write one AgentDecision to decisionPath.
+If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_DECISION_PATH, it may use these parsed paths directly.`;
 }
 
 async function seedCodexHome(auth: CodexAuthSources, home: string): Promise<void> {
