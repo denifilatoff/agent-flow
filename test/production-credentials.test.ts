@@ -112,6 +112,7 @@ class Provider implements ProviderAdapter {
     return [...this.labels];
   }
   async readChangeRequest(): Promise<never> { throw new Error("unused"); }
+  async findReview(): Promise<never> { throw new Error("unused"); }
   async readReview(): Promise<never> { throw new Error("unused"); }
 
   private comment(id: string, body: string): ProviderComment {

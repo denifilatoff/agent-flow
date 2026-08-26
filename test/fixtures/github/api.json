@@ -112,6 +112,24 @@
     "submitted_at": "2026-08-25T10:30:00Z",
     "user": { "id": 9, "login": "reviewer" }
   },
+  "unrelatedReview": {
+    "id": 700,
+    "html_url": "https://github.example.test/owner/repo/pull/31#pullrequestreview-700",
+    "body": "Unrelated review\n<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->",
+    "state": "PENDING",
+    "commit_id": "0123456789abcdef0123456789abcdef01234567",
+    "submitted_at": "2026-08-25T10:20:00Z",
+    "user": { "id": 10, "login": "other-reviewer" }
+  },
+  "commentReview": {
+    "id": 703,
+    "html_url": "https://github.example.test/owner/repo/pull/31#pullrequestreview-703",
+    "body": "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->\n<!-- agent-flow-review:v1 head=0123456789abcdef0123456789abcdef01234567 verdict=approved -->\nNo blocking findings.",
+    "state": "COMMENTED",
+    "commit_id": "0123456789abcdef0123456789abcdef01234567",
+    "submitted_at": "2026-08-25T10:35:00Z",
+    "user": { "id": 9, "login": "reviewer" }
+  },
   "permission": {
     "permission": "push",
     "user": { "id": 7, "login": "maintainer" }

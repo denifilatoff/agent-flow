@@ -13,6 +13,7 @@ import type {
 const SINCE = "2026-08-25T10:00:00.000Z";
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
 const REPOSITORY = "owner/repo";
+const REVIEW_MARKER = "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->";
 const fixture = JSON.parse(
   readFileSync(new URL("../fixtures/github/api.json", import.meta.url), "utf8"),
 ) as Record<string, unknown>;
@@ -349,6 +350,51 @@ test("reads change request and review state at the provider head", async () => {
       + `<!-- agent-flow-review:v1 head=${HEAD_SHA} verdict=changes-requested -->\n`
       + "Please fix the edge case.",
   });
+});
+
+test("discovers a paginated GitHub COMMENT review by its exact first-line marker", async () => {
+  const listPath = "repos/owner/repo/pulls/31/reviews?per_page=100";
+  const client = new FixtureClient()
+    .add("GET", listPath, {
+      data: [fixture.unrelatedReview],
+      next: `${listPath}&page=2`,
+    })
+    .add("GET", `${listPath}&page=2`, { data: [fixture.commentReview] })
+    .add("GET", "repos/owner/repo/pulls/31/reviews/703", { data: fixture.commentReview });
+  const github = adapter(client);
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  const found = await github.findReview(ref, 31, REVIEW_MARKER);
+
+  assert.equal(found?.id, "703");
+  assert.equal(found?.verdict, "approved");
+  assert.deepEqual(await github.readReview(ref, 31, found!.id), found);
+});
+
+test("returns null when no GitHub review starts with the exact marker", async () => {
+  const client = new FixtureClient().add(
+    "GET",
+    "repos/owner/repo/pulls/31/reviews?per_page=100",
+    { data: [fixture.unrelatedReview] },
+  );
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  assert.equal(await adapter(client).findReview(ref, 31, REVIEW_MARKER), null);
+});
+
+test("rejects duplicate GitHub reviews with the same attempt marker", async () => {
+  const duplicate = { ...(fixture.commentReview as Record<string, unknown>), id: 704 };
+  const client = new FixtureClient().add(
+    "GET",
+    "repos/owner/repo/pulls/31/reviews?per_page=100",
+    { data: [fixture.commentReview, duplicate] },
+  );
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  await assert.rejects(
+    adapter(client).findReview(ref, 31, REVIEW_MARKER),
+    /multiple GitHub reviews.*attempt marker/,
+  );
 });
 
 test("reads the logical verdict from a GitHub COMMENT review", async () => {

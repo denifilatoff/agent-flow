@@ -303,6 +303,27 @@ export function createGitLabAdapter(
 
     readChangeRequest,
 
+    async findReview(
+      ref: TicketRef,
+      changeNumber: number,
+      marker: string,
+    ): Promise<NormalizedReview | null> {
+      assertTicket(ref, allowlist);
+      assertPositiveInteger(changeNumber, "merge request number");
+      const notes = await listAll(
+        `${repositoryPath(ref.repository)}/merge_requests/${changeNumber}/notes?per_page=100`,
+        "active",
+      );
+      const matches = notes.filter((value) =>
+        optionalString(object(value, "GitLab review note").body, "GitLab review note body")
+          .split(/\r?\n/, 1)[0] === marker);
+      if (matches.length > 1) {
+        throw new Error("multiple GitLab review notes have the same attempt marker");
+      }
+      if (matches[0] === undefined) return null;
+      return normalizeReviewNote(matches[0], await readChangeRequest(ref, changeNumber));
+    },
+
     async readReview(ref: TicketRef, changeNumber: number, id: string): Promise<NormalizedReview> {
       assertTicket(ref, allowlist);
       assertPositiveInteger(changeNumber, "merge request number");

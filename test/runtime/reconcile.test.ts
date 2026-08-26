@@ -326,6 +326,7 @@ class FakeProvider implements ProviderAdapter {
     assert.ok(this.snapshot.changeRequest);
     return structuredClone(this.snapshot.changeRequest);
   }
+  async findReview(): Promise<never> { throw new Error("unused"); }
   async readReview(_ref: TicketRef, _changeNumber: number, _id: string): Promise<NormalizedReview> {
     throw new Error("unused");
   }

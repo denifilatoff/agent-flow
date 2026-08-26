@@ -14,6 +14,7 @@ const SINCE = "2026-08-25T10:00:00.000Z";
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
 const REPOSITORY = "group/project";
 const PROJECT = "projects/group%2Fproject";
+const REVIEW_MARKER = "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->";
 const fixture = JSON.parse(
   readFileSync(new URL("../fixtures/gitlab/api.json", import.meta.url), "utf8"),
 ) as Record<string, unknown>;
@@ -406,6 +407,54 @@ test("reads merge request and structured review-note state", async () => {
     verdict: "changes-requested",
     body: (fixture.reviewNote as Record<string, unknown>).body,
   });
+});
+
+test("discovers a paginated GitLab review note by its exact first-line marker", async () => {
+  const listPath = `${PROJECT}/merge_requests/41/notes?per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", listPath, {
+      data: [fixture.unrelatedReviewNote],
+      next: `${listPath}&page=2`,
+    })
+    .add("GET", `${listPath}&page=2`, { data: [fixture.reviewNote] })
+    .add(
+      "GET",
+      `${PROJECT}/merge_requests/41`,
+      { data: fixture.mergeRequest },
+      { data: fixture.mergeRequest },
+    )
+    .add("GET", `${PROJECT}/merge_requests/41/notes/702`, { data: fixture.reviewNote });
+  const gitlab = adapter(client);
+
+  const found = await gitlab.findReview(ref, 41, REVIEW_MARKER);
+
+  assert.equal(found?.id, "702");
+  assert.equal(found?.verdict, "changes-requested");
+  assert.deepEqual(await gitlab.readReview(ref, 41, found!.id), found);
+});
+
+test("returns null when no GitLab review note starts with the exact marker", async () => {
+  const client = new FixtureClient().add(
+    "GET",
+    `${PROJECT}/merge_requests/41/notes?per_page=100`,
+    { data: [fixture.unrelatedReviewNote] },
+  );
+
+  assert.equal(await adapter(client).findReview(ref, 41, REVIEW_MARKER), null);
+});
+
+test("rejects duplicate GitLab review notes with the same attempt marker", async () => {
+  const duplicate = { ...(fixture.reviewNote as Record<string, unknown>), id: 703 };
+  const client = new FixtureClient().add(
+    "GET",
+    `${PROJECT}/merge_requests/41/notes?per_page=100`,
+    { data: [fixture.reviewNote, duplicate] },
+  );
+
+  await assert.rejects(
+    adapter(client).findReview(ref, 41, REVIEW_MARKER),
+    /multiple GitLab review notes.*attempt marker/,
+  );
 });
 
 test("preserves a self-managed GitLab relative URL root for note artifacts", async () => {

@@ -218,6 +218,7 @@ class FakeProvider implements ProviderAdapter {
     if (this.ticketAfterArtifactRead) this.ticket = this.ticketAfterArtifactRead;
     return result;
   }
+  async findReview(): Promise<never> { throw new Error("unused"); }
   async readReview(ref: TicketRef, changeNumber: number, id: string): Promise<NormalizedReview> {
     assert.deepEqual(ref, TICKET);
     assert.equal(changeNumber, 31);

@@ -107,5 +107,12 @@
     "author": { "id": 9, "username": "reviewer" },
     "created_at": "2026-08-25T10:30:00.000Z",
     "updated_at": "2026-08-25T10:30:00.000Z"
+  },
+  "unrelatedReviewNote": {
+    "id": 701,
+    "body": "Unrelated note\n<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->",
+    "author": { "id": 10, "username": "other-reviewer" },
+    "created_at": "2026-08-25T10:20:00.000Z",
+    "updated_at": "2026-08-25T10:20:00.000Z"
   }
 }

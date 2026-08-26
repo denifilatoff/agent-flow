@@ -286,6 +286,26 @@ export function createGitHubAdapter(
 
     readChangeRequest,
 
+    async findReview(
+      ref: TicketRef,
+      changeNumber: number,
+      marker: string,
+    ): Promise<NormalizedReview | null> {
+      assertTicket(ref, allowlist);
+      assertPositiveInteger(changeNumber, "pull request number");
+      const reviews = await listAll(
+        `repos/${repositoryPath(ref.repository)}/pulls/${changeNumber}/reviews?per_page=100`,
+        "active",
+      );
+      const matches = reviews.filter((value) =>
+        optionalString(object(value, "GitHub review").body, "GitHub review body")
+          .split(/\r?\n/, 1)[0] === marker);
+      if (matches.length > 1) {
+        throw new Error("multiple GitHub reviews have the same attempt marker");
+      }
+      return matches[0] === undefined ? null : normalizeReview(matches[0]);
+    },
+
     async readReview(ref: TicketRef, changeNumber: number, id: string): Promise<NormalizedReview> {
       assertTicket(ref, allowlist);
       assertPositiveInteger(changeNumber, "pull request number");
