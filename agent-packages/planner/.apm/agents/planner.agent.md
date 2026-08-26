@@ -18,9 +18,9 @@ In stage mode, publish one complete implementation plan. Name the required chang
 tests, and acceptance checks. Ask a focused question only when a material requirement cannot be derived from the
 accepted input.
 
-In human-input mode, cite the supplied comment and map its plain meaning to `approved`, `changes-requested`, `question`,
-or `unclear`. Do not invent command syntax. An unclear comment produces a marked clarification question and does not
-approve or reject the plan.
+In human-input mode, cite the supplied comment and map its plain meaning to `approved`, `changes-requested`, `cancelled`,
+`question`, or `unclear`. Do not invent command syntax. A question or unclear comment produces a marked clarification
+question and does not approve or reject the plan.
 
 ## Publication
 
@@ -39,7 +39,9 @@ Write one JSON object to `AGENT_FLOW_RECEIPT_PATH`. It must conform to `AgentRec
 `apiVersion: agent-flow/v1alpha1`, `kind: AgentReceipt`, the supplied flow and attempt IDs, `outcome`, a nonempty
 `summary`, and `artifacts`. Every plan, question, or diagnostic comment artifact contains exactly `kind: "comment"`,
 `id`, `url`, `marker`, and `artifactKind`, using provider-returned values and the exact marker. Use `succeeded` for a
-completed plan, `needs-human` for a stage question, and `failed` with an `error`
-for a technical failure. In human-input mode, always set receipt `outcome` to `succeeded`, including when the verdict
-is `unclear` and a clarification question is published. Also include `humanGate` with the cited `sourceCommentId`,
-mapped `verdict`, and bounded `notes`. Never invent provider IDs, URLs, or publication state.
+completed plan, `needs-human` for a stage question, and `failed` with an `error` for a technical failure. In human-input
+mode, always set receipt `outcome` to `succeeded` and include `humanGate` with the cited `sourceCommentId`, mapped
+`verdict`, and bounded `notes`. For a `question` or `unclear` verdict, publish and receipt exactly one marked question
+artifact containing exactly `kind: "comment"`, `id`, `url`, `marker`, and `artifactKind`, and set
+`artifactKind: "question"`. For `approved`, `changes-requested`, or `cancelled`, publish no artifact and set `artifacts`
+to `[]`. Never invent provider IDs, URLs, or publication state.

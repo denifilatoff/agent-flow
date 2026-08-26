@@ -265,6 +265,16 @@ test("compiles every package with explicit receipt artifact discriminators", asy
           /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/,
         );
       }
+      assert.match(
+        result.instructions,
+        /For a `question` or `unclear`\s+verdict,[\s\S]*exactly\s+one marked question\s+artifact[\s\S]*`kind: "comment"`[\s\S]*`artifactKind: "question"`[\s\S]*For `approved`, `changes-requested`, or `cancelled`,[\s\S]*`artifacts`\s+to `\[\]`/,
+      );
+      if (agentId === "developer") {
+        assert.match(
+          result.instructions,
+          /A successful stage-mode development result has one artifact containing exactly/,
+        );
+      }
       await execFile("apm", ["audit", "--ci", "--no-policy"], { cwd: result.runtimeDirectory });
       const packageDirectory = join(process.cwd(), `agent-packages/${agentId}`);
       await assert.rejects(access(join(packageDirectory, target === "claude" ? ".claude" : ".codex")), {

@@ -17,6 +17,9 @@ const ARTIFACT_CONTRACTS = {
   reviewer: /exactly\s+`kind: "review"`,\s+`id`,\s+`url`,\s+`headSha`, and `verdict`/,
 } as const;
 
+const HUMAN_INPUT_ARTIFACT_MATRIX =
+  /For a `question` or `unclear`\s+verdict,[\s\S]*exactly\s+one marked question\s+artifact[\s\S]*`kind: "comment"`[\s\S]*`artifactKind: "question"`[\s\S]*For `approved`, `changes-requested`, or `cancelled`,[\s\S]*`artifacts`\s+to `\[\]`/;
+
 function parsePrimitive(source: string): { frontmatter: Record<string, unknown>; body: string } {
   const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(source);
   assert.ok(match, "primitive must have YAML frontmatter");
@@ -82,9 +85,20 @@ test("human-input receipts always use the schema-compatible outcome", async () =
     );
     assert.match(
       agent.body,
-      /In human-input mode, always set receipt `outcome` to `succeeded`, including when the\s+verdict\s+is\s+`unclear`/,
+      /In human-input\s+mode, always set receipt `outcome` to `succeeded`/,
     );
+    assert.match(agent.body, HUMAN_INPUT_ARTIFACT_MATRIX);
   }
+});
+
+test("developer requires a change request only for successful stage-mode development", async () => {
+  const developer = parsePrimitive(
+    await readFile(
+      new URL("../../agent-packages/developer/.apm/agents/developer.agent.md", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(developer.body, /A successful stage-mode development result has one artifact containing exactly/);
 });
 
 test("reviewer distinguishes open, closed-unmerged, and merged stage inputs", async () => {
@@ -134,7 +148,7 @@ test("reviewer interprets a later authorized answer without reviewing", async ()
   assert.match(reviewer.body, /Map a request to cancel to `cancelled`/);
   assert.match(
     reviewer.body,
-    /In human-input mode, always set receipt `outcome` to `succeeded`[\s\S]*Also include `humanGate`/,
+    /In human-input mode, always set receipt `outcome` to `succeeded`[\s\S]*include `humanGate`/,
   );
   assert.match(reviewer.body, /`unclear` or question result publishes a marked clarification question/);
   assert.match(reviewer.body, /Do not publish a review verdict in human-input\s+mode\./);

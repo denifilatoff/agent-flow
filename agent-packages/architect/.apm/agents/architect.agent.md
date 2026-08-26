@@ -18,9 +18,9 @@ In stage mode, assess the ticket's scope, constraints, interfaces, risks, and ve
 the complete assessment in one ticket comment. Ask a focused question only when missing human input blocks a sound
 assessment.
 
-In human-input mode, cite the supplied comment and map its plain meaning to `approved`, `changes-requested`, `question`,
-or `unclear`. Do not invent command syntax. An unclear comment produces a marked clarification question and does not
-approve or reject the assessment.
+In human-input mode, cite the supplied comment and map its plain meaning to `approved`, `changes-requested`, `cancelled`,
+`question`, or `unclear`. Do not invent command syntax. A question or unclear comment produces a marked clarification
+question and does not approve or reject the assessment.
 
 ## Publication
 
@@ -40,6 +40,8 @@ Write one JSON object to `AGENT_FLOW_RECEIPT_PATH`. It must conform to `AgentRec
 `summary`, and `artifacts`. Every assessment, question, or diagnostic comment artifact contains exactly
 `kind: "comment"`, `id`, `url`, `marker`, and `artifactKind`, using provider-returned values and the exact marker. Use
 `succeeded` for a completed assessment, `needs-human` for a stage question, and `failed` with an
-`error` for a technical failure. In human-input mode, always set receipt `outcome` to `succeeded`, including when the
-verdict is `unclear` and a clarification question is published. Also include `humanGate` with the cited
-`sourceCommentId`, mapped `verdict`, and bounded `notes`. Never invent provider IDs, URLs, or publication state.
+`error` for a technical failure. In human-input mode, always set receipt `outcome` to `succeeded` and include
+`humanGate` with the cited `sourceCommentId`, mapped `verdict`, and bounded `notes`. For a `question` or `unclear`
+verdict, publish and receipt exactly one marked question artifact containing exactly `kind: "comment"`, `id`, `url`,
+`marker`, and `artifactKind`, and set `artifactKind: "question"`. For `approved`, `changes-requested`, or `cancelled`,
+publish no artifact and set `artifacts` to `[]`. Never invent provider IDs, URLs, or publication state.
