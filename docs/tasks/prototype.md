@@ -228,8 +228,9 @@ The entry agent must read `AGENT_FLOW_CONTEXT_PATH`, assess only the ticket and 
 assessment or a marked question, never edit `agent-flow:*` or `agent-stage:*` labels, and write a receipt to
 `AGENT_FLOW_RECEIPT_PATH`. Every published comment starts with the exact agent marker from the prototype contract.
 The short `**/*` instruction selects `architect` as the package's only logical entry agent and repeats the environment
-and receipt boundary so target compilation produces a usable root instruction file. Run `apm install` in the package
-directory to produce the lockfile.
+and receipt boundary so target compilation produces a usable root instruction file. Run `apm lock --target claude
+--no-policy` in the package directory to produce the lockfile without adding generated target files to the source
+package.
 
 - [ ] **Step 4: Run the focused test and confirm green**
 
@@ -239,9 +240,18 @@ Expected: PASS for the architect package.
 
 - [ ] **Step 5: Verify the APM source**
 
-Run: `cd agent-packages/architect && apm compile --validate --target claude && apm audit --ci --no-policy`
+Copy the package to a temporary directory, then run a frozen install, compile, and `apm audit --ci --no-policy` there.
+Do not commit generated `.claude/` or root `CLAUDE.md` output.
 
-Expected: both APM commands exit 0.
+```bash
+scratch=$(mktemp -d)
+cp -R agent-packages/architect/. "$scratch"
+(cd "$scratch" && apm install --frozen --target claude && \
+  apm compile --validate --target claude && apm audit --ci --no-policy)
+rm -rf "$scratch"
+```
+
+Expected: all three APM commands exit 0.
 
 - [ ] **Step 6: Commit**
 
@@ -295,7 +305,8 @@ The entry agent must consume the accepted assessment, ticket, control state, and
 the complete plan or a marked question, leaves reserved labels unchanged, and writes a schema-valid receipt. In
 human-input mode it maps the cited comment to `approved`, `changes-requested`, `question`, or `unclear` without
 inventing command syntax. The `**/*` entry instruction selects `planner` and repeats the environment and receipt
-boundary for target compilation. Run `apm install` to produce the lockfile.
+boundary for target compilation. Run `apm lock --target claude --no-policy` to produce the lockfile without adding
+generated target files to the source package.
 
 - [ ] **Step 4: Run the focused test and confirm green**
 
@@ -305,9 +316,18 @@ Expected: PASS for architect and planner.
 
 - [ ] **Step 5: Verify the APM source**
 
-Run: `cd agent-packages/planner && apm compile --validate --target claude && apm audit --ci --no-policy`
+Copy the package to a temporary directory, then run a frozen install, compile, and `apm audit --ci --no-policy` there.
+Do not commit generated `.claude/` or root `CLAUDE.md` output.
 
-Expected: both commands exit 0.
+```bash
+scratch=$(mktemp -d)
+cp -R agent-packages/planner/. "$scratch"
+(cd "$scratch" && apm install --frozen --target claude && \
+  apm compile --validate --target claude && apm audit --ci --no-policy)
+rm -rf "$scratch"
+```
+
+Expected: all three commands exit 0.
 
 - [ ] **Step 6: Commit**
 
@@ -361,7 +381,8 @@ The entry agent must work only in the supplied repository worktree, create or up
 request, and never replace a closed change request. It must run repository tests, publish marked diagnostics or
 questions when blocked, leave controller labels untouched, and bind the receipt's change request and head SHA to the
 provider result. The `**/*` entry instruction selects `developer` and repeats the environment and receipt boundary for
-target compilation. Run `apm install` to produce the lockfile.
+target compilation. Run `apm lock --target codex --no-policy` to produce the lockfile without adding generated target
+files to the source package.
 
 - [ ] **Step 4: Run the focused test and confirm green**
 
@@ -371,9 +392,18 @@ Expected: PASS for architect, planner, and developer.
 
 - [ ] **Step 5: Verify the APM source**
 
-Run: `cd agent-packages/developer && apm compile --validate --target codex && apm audit --ci --no-policy`
+Copy the package to a temporary directory, then run a frozen install, compile, and `apm audit --ci --no-policy` there.
+Do not commit generated `.codex/` or root `AGENTS.md` output.
 
-Expected: both commands exit 0.
+```bash
+scratch=$(mktemp -d)
+cp -R agent-packages/developer/. "$scratch"
+(cd "$scratch" && apm install --frozen --target codex && \
+  apm compile --validate --target codex && apm audit --ci --no-policy)
+rm -rf "$scratch"
+```
+
+Expected: all three commands exit 0.
 
 - [ ] **Step 6: Commit**
 
@@ -425,9 +455,9 @@ targets: [codex]
 
 The entry agent must stop if the provider head differs from the supplied SHA. It publishes an approved,
 changes-requested, or commented verdict tied to that SHA. When GitHub prevents self-approval, it publishes a marked
-comment plus the same machine-readable verdict. It never merges or edits controller labels. Run `apm install` to
-produce the lockfile. The `**/*` entry instruction selects `reviewer` and repeats the environment and receipt boundary
-for target compilation.
+comment plus the same machine-readable verdict. It never merges or edits controller labels. Run `apm lock --target
+codex --no-policy` to produce the lockfile without adding generated target files to the source package. The `**/*`
+entry instruction selects `reviewer` and repeats the environment and receipt boundary for target compilation.
 
 - [ ] **Step 4: Run the focused test and confirm green**
 
@@ -437,18 +467,23 @@ Expected: PASS for all four packages.
 
 - [ ] **Step 5: Verify the complete APM catalog**
 
-Run:
+For each package, use a temporary copy for frozen install, compile, and `apm audit --ci --no-policy`. Do not commit
+target-native or root generated output. Use the exact package target:
 
 ```bash
-for package in architect planner; do
-  (cd "agent-packages/$package" && apm compile --validate --target claude && apm audit --ci --no-policy)
-done
-for package in developer reviewer; do
-  (cd "agent-packages/$package" && apm compile --validate --target codex && apm audit --ci --no-policy)
+set -e
+for package in architect planner developer reviewer; do
+  target=codex
+  case "$package" in architect|planner) target=claude ;; esac
+  scratch=$(mktemp -d)
+  cp -R "agent-packages/$package/." "$scratch"
+  (cd "$scratch" && apm install --frozen --target "$target" && \
+    apm compile --validate --target "$target" && apm audit --ci --no-policy)
+  rm -rf "$scratch"
 done
 ```
 
-Expected: all eight APM commands exit 0 and each package compiles one logical agent.
+Expected: all 12 APM commands exit 0 and each package compiles one logical agent.
 
 - [ ] **Step 6: Commit**
 
