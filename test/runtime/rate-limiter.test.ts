@@ -86,3 +86,41 @@ test("extends an already waiting acquisition when the provider pauses the accoun
 
   assert.deepEqual(delays, [3_000, 5_000]);
 });
+
+test("does not let a reserve-blocked background call hold active work", async () => {
+  let now = 0;
+  let releaseReserve!: () => void;
+  const limiter = new RateLimiter(
+    { maxCallsPerMinute: 20, quotaReservePercent: 25 },
+    {
+      now: () => now,
+      sleep: (milliseconds) => {
+        if (milliseconds < 60_000) {
+          now += milliseconds;
+          return Promise.resolve();
+        }
+        return new Promise<void>((resolve) => {
+          releaseReserve = () => {
+            now += milliseconds;
+            resolve();
+          };
+        });
+      },
+    },
+  );
+  limiter.observe({ remaining: 25, limit: 100, resetAt: 60_000 });
+  const order: string[] = [];
+
+  const background = limiter.acquire("background").then(() => order.push("background"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const active = limiter.acquire("active").then(() => order.push("active"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  try {
+    assert.deepEqual(order, ["active"]);
+  } finally {
+    releaseReserve();
+    await Promise.all([background, active]);
+  }
+  assert.deepEqual(order, ["active", "background"]);
+});

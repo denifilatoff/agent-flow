@@ -7,7 +7,10 @@ import {
 } from "../../src/provider/http.ts";
 import { RateLimiter } from "../../src/runtime/rate-limiter.ts";
 
-function harness(responses: Response[]) {
+function harness(
+  responses: Response[],
+  baseUrl = new URL("https://api.example.test/v1/"),
+) {
   let now = 0;
   const delays: number[] = [];
   const requests: Request[] = [];
@@ -28,13 +31,26 @@ function harness(responses: Response[]) {
     return response;
   };
   const client = createRateLimitedHttpClient(
-    new URL("https://api.example.test/v1/"),
+    baseUrl,
     () => ({ authorization: "Bearer secret" }),
     limiter,
     fetchImpl,
   );
   return { client, delays, requests };
 }
+
+test("treats a GitLab-style base URL without a slash as an API directory", async () => {
+  const { client, requests } = harness(
+    [Response.json({}), Response.json({})],
+    new URL("https://gitlab.example.test/api/v4"),
+  );
+
+  await client.request({ path: "user", priority: "active" });
+  await client.request({ path: "/api/v4/projects?page=2", priority: "active" });
+
+  assert.equal(requests[0]!.url, "https://gitlab.example.test/api/v4/user");
+  assert.equal(requests[1]!.url, "https://gitlab.example.test/api/v4/projects?page=2");
+});
 
 test("returns JSON, response headers, and normalized Link pagination", async () => {
   const { client, requests } = harness([
@@ -150,5 +166,17 @@ test("rejects absolute cross-origin request paths before sending credentials", a
     client.request({ path: "https://attacker.test/issues", priority: "active" }),
     /same provider origin/,
   );
+  assert.equal(requests.length, 0);
+});
+
+test("rejects same-origin paths outside the configured API prefix", async () => {
+  const { client, requests } = harness([], new URL("https://gitlab.example.test/api/v4"));
+
+  for (const path of ["/user", "../user", "https://gitlab.example.test/user"]) {
+    await assert.rejects(
+      client.request({ path, priority: "active" }),
+      /configured provider API prefix/,
+    );
+  }
   assert.equal(requests.length, 0);
 });

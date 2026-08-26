@@ -35,12 +35,13 @@ export function createRateLimitedHttpClient(
   limiter: RateLimiter,
   fetchImpl: typeof fetch = globalThis.fetch,
 ): RateLimitedHttpClient {
+  const apiBase = new URL(baseUrl);
+  if (!apiBase.pathname.endsWith("/")) apiBase.pathname += "/";
   const etags = new Map<string, string>();
 
   return {
     async request<T>(request: ProviderRequest): Promise<ProviderResponse<T>> {
-      const url = new URL(request.path, baseUrl);
-      if (url.origin !== baseUrl.origin) throw new Error("request path must use the same provider origin");
+      const url = resolveProviderUrl(request.path, apiBase);
 
       await limiter.acquire(request.priority);
       const headers = new Headers(defaultHeaders());
@@ -89,11 +90,21 @@ export function createRateLimitedHttpClient(
         status: response.status,
         data: response.status === 304 ? null : data as T | null,
         headers: responseHeaders,
-        pagination: pagination(response.headers, url, baseUrl.origin),
+        pagination: pagination(response.headers, url, apiBase),
         notModified: response.status === 304,
       };
     },
   };
+}
+
+function resolveProviderUrl(path: string, apiBase: URL): URL {
+  const url = new URL(path, apiBase);
+  if (url.origin !== apiBase.origin) throw new Error("request path must use the same provider origin");
+  const apiRoot = apiBase.pathname.slice(0, -1);
+  if (url.pathname !== apiRoot && !url.pathname.startsWith(apiBase.pathname)) {
+    throw new Error("request path must remain under the configured provider API prefix");
+  }
+  return url;
 }
 
 async function parseBody(response: Response, headers: Record<string, string>): Promise<unknown> {
@@ -143,14 +154,13 @@ function integerHeader(headers: Headers, ...names: string[]): number | null {
   return null;
 }
 
-function pagination(headers: Headers, requestUrl: URL, allowedOrigin: string): ProviderPagination {
+function pagination(headers: Headers, requestUrl: URL, apiBase: URL): ProviderPagination {
   const link = headers.get("link");
   if (link) {
     for (const part of link.split(",")) {
       const match = /^\s*<([^>]+)>\s*;\s*rel="([^"]+)"/.exec(part);
       if (!match || !match[2]!.split(/\s+/).includes("next")) continue;
-      const next = new URL(match[1]!, requestUrl);
-      if (next.origin !== allowedOrigin) throw new Error("pagination URL must use the same provider origin");
+      const next = resolveProviderUrl(new URL(match[1]!, requestUrl).href, apiBase);
       return { next: `${next.pathname}${next.search}` };
     }
   }

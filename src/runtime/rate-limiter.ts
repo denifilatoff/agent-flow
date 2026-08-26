@@ -43,14 +43,18 @@ export class RateLimiter {
   }
 
   acquire(priority: RequestPriority = "background"): Promise<void> {
+    if (priority === "background" && this.atReserve(this.clock.now())) {
+      return this.waitForReserve().then(() => this.enqueue());
+    }
+    return this.enqueue();
+  }
+
+  private enqueue(): Promise<void> {
     const acquisition = this.queue.then(async () => {
       for (;;) {
         const now = this.clock.now();
         let startAt = Math.max(now, this.blockedUntil);
         if (this.lastStart !== null) startAt = Math.max(startAt, this.lastStart + this.spacing);
-        if (priority === "background" && this.atReserve(now)) {
-          startAt = Math.max(startAt, this.quota!.resetAt);
-        }
         if (startAt <= now) break;
         await this.clock.sleep(startAt - now);
       }
@@ -58,6 +62,12 @@ export class RateLimiter {
     });
     this.queue = acquisition.catch(() => undefined);
     return acquisition;
+  }
+
+  private async waitForReserve(): Promise<void> {
+    while (this.atReserve(this.clock.now())) {
+      await this.clock.sleep(this.quota!.resetAt - this.clock.now());
+    }
   }
 
   observe(observation: RateLimitObservation): void {
