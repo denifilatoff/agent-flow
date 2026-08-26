@@ -3,12 +3,11 @@ import type { Server } from "node:http";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { loadConfigBundle, type ConfigBundle } from "./config/load.ts";
+import type { ConfigBundle } from "./config/load.ts";
 import {
-  materializeRevision,
+  loadPinnedConfig,
   normalizeConfigurationSource,
   prepareConfigurationRepository,
-  resolveRevision,
 } from "./config/repository.ts";
 import { validateSemantics } from "./config/semantic.ts";
 import { createClaudeAdapter } from "./harness/claude.ts";
@@ -119,17 +118,21 @@ export function createProductionDependencies(
   const requestedRevision = environment.AGENT_FLOW_CONFIG_REVISION;
   let current: ConfigBundle;
   let prepared: ReturnType<typeof prepareConfigurationRepository> | undefined;
+  const pinned = new Map<string, ConfigBundle>();
 
   const load = async (revision?: string): Promise<ConfigBundle> => {
+    const cached = revision ? pinned.get(revision.toLowerCase()) : undefined;
+    if (cached) return cached;
     prepared ??= prepareConfigurationRepository(configSource, dataDirectory);
     const { repository } = await prepared;
-    const sha = await resolveRevision(repository, revision);
-    const root = await materializeRevision(repository, sha, dataDirectory);
-    return loadConfigBundle(root, controllerPath, sha);
+    const bundle = await loadPinnedConfig(repository, dataDirectory, revision, controllerPath);
+    pinned.set(bundle.revision, bundle);
+    return bundle;
   };
 
   return {
     async loadConfig() {
+      if (current) return current;
       current = await load(requestedRevision);
       if (normalizeConfigurationSource(current.controller.configuration.repository) !== configSource
         || resolve(current.controller.runtime.dataDirectory) !== dataDirectory

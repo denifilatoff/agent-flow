@@ -195,9 +195,11 @@ flow reaches a terminal state and no harness process is running.
 
 The image contains Node.js, Git, `gh`, `glab`, APM, Codex, and Claude. Set `AGENT_FLOW_CONFIG_REPOSITORY` to an absolute
 local path or a credential-free `https://` or `file://` Git URL. A URL is mirrored under `/data` once during startup;
-the next service restart fetches remote changes. Private HTTPS sources use Git's configured credential helper; secrets
-must not appear in the URL. Set `AGENT_FLOW_CONFIG_REVISION` to an existing 40-character commit SHA to start from that
-revision instead of the prepared repository's HEAD. The container runs as one controller process and mounts:
+the next service restart fetches remote changes. Git uses the mounted `gh` credentials for `github.com` and the mounted
+`glab` credentials for `gitlab.com`. A custom HTTPS host requires a preconfigured Git credential helper. Secrets must
+not appear in the URL. Set `AGENT_FLOW_CONFIG_REVISION` to an existing 40-character commit SHA to start from that
+revision instead of the prepared repository's HEAD. A materialized revision retains the Git objects needed to verify
+and load its files after the source history is rewritten. The container runs as one controller process and mounts:
 
 - the configuration repository at `/config` for the default local-path mode;
 - persistent repositories, worktrees, and sessions at `/data`;

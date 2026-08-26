@@ -1,12 +1,12 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { loadConfigBundle } from "./load.ts";
 import type { ConfigBundle } from "./load.ts";
-import { ensureSafeDirectory, prepareDataRoot } from "../runtime/filesystem.ts";
+import { assertSafeDirectory, ensureSafeDirectory, prepareDataRoot } from "../runtime/filesystem.ts";
 
 const exec = promisify(execFile);
 const SHA = /^[0-9a-f]{40}$/i;
@@ -26,6 +26,26 @@ function isSafePath(path: string): boolean {
 async function git(repository: string, arguments_: string[]): Promise<Buffer> {
   const { stdout } = await exec("git", ["-C", repository, ...arguments_], { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
   return stdout as Buffer;
+}
+
+export interface GitAuthentication {
+  arguments: string[];
+  environment: NodeJS.ProcessEnv;
+}
+
+export function configurationGitAuthentication(source: string): GitAuthentication {
+  const normalized = normalizeConfigurationSource(source);
+  const url = isAbsolute(normalized) ? undefined : new URL(normalized);
+  const helper = url?.hostname === "github.com" && !url.port
+    ? "gh auth git-credential"
+    : url?.hostname === "gitlab.com" && !url.port
+      ? "glab auth git-credential"
+      : undefined;
+  const key = url && helper ? `credential.https://${url.hostname}.helper` : undefined;
+  return {
+    arguments: key ? ["-c", `${key}=`, "-c", `${key}=!${helper}`] : [],
+    environment: { GIT_TERMINAL_PROMPT: "0" },
+  };
 }
 
 interface ConfigurationSource {
@@ -75,6 +95,7 @@ export async function prepareConfigurationRepository(
 
   const dataRoot = await prepareDataRoot(dataDirectory);
   const target = resolve(dataRoot, "config-repository");
+  const authentication = configurationGitAuthentication(configured.normalized);
   try {
     const entry = await lstat(target);
     if (entry.isSymbolicLink()) throw new Error("configuration repository must not be a symbolic link");
@@ -92,7 +113,11 @@ export async function prepareConfigurationRepository(
       throw new Error("configuration repository origin does not match the configured source");
     }
     try {
-      await git(target, ["fetch", "--prune", "origin"]);
+      await exec("git", [...authentication.arguments, "-C", target, "fetch", "--prune", "origin"], {
+        encoding: "buffer",
+        maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env, ...authentication.environment },
+      });
     } catch {
       throw new Error("configuration repository fetch failed");
     }
@@ -105,9 +130,10 @@ export async function prepareConfigurationRepository(
   const temporary = resolve(temporaryRoot, "mirror");
   try {
     try {
-      await exec("git", ["clone", "--mirror", configured.normalized, temporary], {
+      await exec("git", [...authentication.arguments, "clone", "--mirror", configured.normalized, temporary], {
         encoding: "buffer",
         maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env, ...authentication.environment },
       });
     } catch {
       throw new Error("configuration repository clone failed");
@@ -134,10 +160,45 @@ async function completeDirectory(path: string, sha: string): Promise<boolean> {
       if (!entry.isDirectory() || entry.isSymbolicLink()) return false;
     }
     const marker = await lstat(resolve(path, ".complete"));
-    return marker.isFile() && !marker.isSymbolicLink() && (await readFile(resolve(path, ".complete"), "utf8")) === `${sha}\n`;
+    if (!marker.isFile() || marker.isSymbolicLink() || (await readFile(resolve(path, ".complete"), "utf8")) !== `${sha}\n`) {
+      return false;
+    }
+    const repository = resolve(path, ".source.git");
+    const repositoryEntry = await lstat(repository);
+    if (!repositoryEntry.isDirectory() || repositoryEntry.isSymbolicLink()) return false;
+    if (await resolveRevision(repository, sha) !== sha) return false;
+    const entries = treeEntries(await git(repository, ["ls-tree", "-r", "-z", "--full-tree", sha, "--", ...ROOTS]));
+    const expectedPaths = entries.map((entry) => entry.path).sort();
+    const actualPaths = (await Promise.all(ROOTS.map((root) => listMaterializedFiles(path, root.slice(0, -1)))))
+      .flat()
+      .sort();
+    if (expectedPaths.length !== actualPaths.length || expectedPaths.some((entry, index) => entry !== actualPaths[index])) {
+      return false;
+    }
+    for (const entry of entries) {
+      const materialized = await readFile(resolve(path, entry.path));
+      const pinned = await git(repository, ["show", `${sha}:${entry.path}`]);
+      if (!materialized.equals(pinned)) return false;
+    }
+    return true;
   } catch {
     return false;
   }
+}
+
+async function listMaterializedFiles(root: string, path: string): Promise<string[]> {
+  const directory = resolve(root, path);
+  const names = await readdir(directory);
+  const files: string[] = [];
+  for (const name of names) {
+    const child = `${path}/${name}`;
+    const entry = await lstat(resolve(root, child));
+    if (entry.isSymbolicLink()) throw new Error("materialized configuration must not contain symbolic links");
+    if (entry.isDirectory()) files.push(...await listMaterializedFiles(root, child));
+    else if (entry.isFile()) files.push(child);
+    else throw new Error("materialized configuration contains an unsupported entry");
+  }
+  return files;
 }
 
 interface TreeEntry {
@@ -200,7 +261,12 @@ export async function materializeRevision(repository: string, revision: string, 
       await mkdir(dirname(destination), { recursive: true });
       await writeFile(destination, await git(repository, ["show", `${sha}:${entry.path}`]));
     }
+    const pinnedRepository = resolve(temporary, ".source.git");
+    await exec("git", ["init", "--bare", pinnedRepository], { encoding: "buffer" });
+    await git(pinnedRepository, ["fetch", "--depth=1", repository, sha]);
+    await git(pinnedRepository, ["update-ref", "refs/heads/pinned", sha]);
     await writeFile(resolve(temporary, ".complete"), `${sha}\n`);
+    if (!await completeDirectory(temporary, sha)) throw new Error("materialized configuration verification failed");
     await rename(temporary, target);
   } catch (error) {
     await rm(temporary, { recursive: true, force: true });
@@ -215,8 +281,26 @@ export async function loadPinnedConfig(
   repository: string,
   dataDirectory: string,
   requested?: string,
+  controllerPath = "config/controller.example.yaml",
 ): Promise<ConfigBundle> {
+  if (requested !== undefined) {
+    if (!SHA.test(requested)) throw new Error("requested revision must be a 40-character SHA");
+    const dataRoot = await prepareDataRoot(dataDirectory);
+    let configRoot: string | undefined;
+    try {
+      configRoot = await assertSafeDirectory(dataRoot, resolve(dataRoot, "config"), "configuration directory");
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) throw error;
+    }
+    if (configRoot) {
+      const normalized = requested.toLowerCase();
+      const materialized = resolve(configRoot, normalized);
+      if (await completeDirectory(materialized, normalized)) {
+        return loadConfigBundle(materialized, controllerPath, normalized);
+      }
+    }
+  }
   const revision = await resolveRevision(repository, requested);
   const root = await materializeRevision(repository, revision, dataDirectory);
-  return loadConfigBundle(root, "config/controller.example.yaml", revision);
+  return loadConfigBundle(root, controllerPath, revision);
 }

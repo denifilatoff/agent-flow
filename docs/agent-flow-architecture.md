@@ -47,6 +47,9 @@ without weakening these invariants.
   a URL, it clones or fetches one bare mirror under the data directory during startup.
 - A controller process prepares that mirror once. Reconciliation reads only the prepared repository, so remote changes
   become available after a service restart and never move an active flow implicitly.
+- Each materialized revision retains a minimal Git object store. The controller verifies its files against the pinned
+  commit before loading them, even when a later history rewrite and garbage collection remove the commit from the
+  startup mirror.
 - The controller records that SHA in the control comment it creates for the instance.
 - The pinned configuration revision includes every `apm.lock.yaml` produced for the agent catalog. External APM
   artifacts must resolve through a committed lockfile.

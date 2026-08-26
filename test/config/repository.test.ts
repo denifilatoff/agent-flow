@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile, spawnSync } from "node:child_process";
+import { access, chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,6 +11,8 @@ import {
   loadPinnedConfig,
   normalizeConfigurationSource,
   prepareConfigurationRepository,
+  configurationGitAuthentication,
+  resolveRevision,
 } from "../../src/config/repository.ts";
 import { createProductionDependencies } from "../../src/main.ts";
 
@@ -62,6 +64,16 @@ class TestRepository {
     await exec("git", ["-C", this.path, "add", "config/controller.example.yaml"]);
     await exec("git", ["-C", this.path, "commit", "-m", "configure remote source"]);
   }
+
+  async replaceHistory(): Promise<void> {
+    const branch = (await exec("git", ["-C", this.path, "branch", "--show-current"])).stdout.trim();
+    await exec("git", ["-C", this.path, "checkout", "--orphan", "replacement"]);
+    await exec("git", ["-C", this.path, "add", "."]);
+    await exec("git", ["-C", this.path, "commit", "-m", "replace configuration history"]);
+    await exec("git", ["-C", this.path, "branch", "-M", branch]);
+    await exec("git", ["-C", this.path, "reflog", "expire", "--expire=now", "--all"]);
+    await exec("git", ["-C", this.path, "gc", "--prune=now"]);
+  }
 }
 
 test("clones a remote configuration source and fetches its new HEAD only on a later startup", async (t) => {
@@ -105,6 +117,99 @@ test("a production dependency prepares its Git source once per service startup",
     AGENT_FLOW_DATA_DIRECTORY: data,
   }, 8080).loadConfig();
   assert.equal(nextStartup.revision, await repo.head());
+});
+
+test("a production dependency retains its verified bundle for the service lifetime", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  const source = pathToFileURL(repo.path).href;
+  await repo.configure(source, data);
+  const dependencies = createProductionDependencies({
+    AGENT_FLOW_CONFIG_REPOSITORY: source,
+    AGENT_FLOW_DATA_DIRECTORY: data,
+  }, 8080);
+  const first = await dependencies.loadConfig();
+  await rm(join(data, "config", first.revision, ".source.git"), { recursive: true });
+
+  assert.equal((await dependencies.loadConfig()).revision, first.revision);
+  await assert.rejects(createProductionDependencies({
+    AGENT_FLOW_CONFIG_REPOSITORY: source,
+    AGENT_FLOW_DATA_DIRECTORY: data,
+  }, 8080).loadConfig());
+});
+
+test("loads a verified materialization after its pinned commit is pruned from the mirror", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  const source = pathToFileURL(repo.path).href;
+  await repo.configure(source, data);
+  const prepared = await prepareConfigurationRepository(source, data);
+  const pinned = await loadPinnedConfig(prepared.repository, data);
+
+  await repo.replaceHistory();
+  await prepareConfigurationRepository(source, data);
+  await exec("git", ["-C", prepared.repository, "reflog", "expire", "--expire=now", "--all"]);
+  await exec("git", ["-C", prepared.repository, "gc", "--prune=now"]);
+  await assert.rejects(resolveRevision(prepared.repository, pinned.revision));
+
+  const recovered = await loadPinnedConfig(prepared.repository, data, pinned.revision);
+  assert.equal(recovered.revision, pinned.revision);
+  assert.equal(recovered.flow.metadata.id, pinned.flow.metadata.id);
+  const productionRecovered = await createProductionDependencies({
+    AGENT_FLOW_CONFIG_REPOSITORY: source,
+    AGENT_FLOW_CONFIG_REVISION: pinned.revision,
+    AGENT_FLOW_DATA_DIRECTORY: data,
+  }, 8080).loadConfig();
+  assert.equal(productionRecovered.revision, pinned.revision);
+  await writeFile(join(data, "config", pinned.revision, "config/agents.yaml"), "spoofed: true\n");
+  await assert.rejects(loadPinnedConfig(prepared.repository, data, pinned.revision));
+});
+
+test("rejects a marker-only materialization for a pruned revision", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  const sha = "a".repeat(40);
+  const target = join(data, "config", sha);
+  await Promise.all(["config", "schemas/v1", "agent-packages"].map((path) => mkdir(join(target, path), { recursive: true })));
+  await writeFile(join(target, ".complete"), `${sha}\n`);
+
+  await assert.rejects(loadPinnedConfig(repo.path, data, sha), /revision|materialization/i);
+});
+
+test("uses noninteractive GitHub and GitLab credential helpers", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-git-helper-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const helper = join(root, "helper");
+  await writeFile(helper, `#!/bin/sh
+[ "$1 $2" = "auth git-credential" ] || exit 9
+cat >/dev/null
+printf 'username=fixture\\npassword=fixture-token\\n'
+`);
+  await chmod(helper, 0o700);
+
+  for (const [source, command] of [
+    ["https://github.com/example/config.git", "gh"],
+    ["https://gitlab.com/example/config.git", "glab"],
+  ] as const) {
+    const auth = configurationGitAuthentication(source);
+    assert.equal(auth.environment.GIT_TERMINAL_PROMPT, "0");
+    const executable = join(root, command);
+    await symlink(helper, executable);
+    const result = spawnSync("git", [...auth.arguments, "credential", "fill"], {
+      input: `protocol=https\nhost=${new URL(source).hostname}\n\n`,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${root}:${process.env.PATH}`, ...auth.environment },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /username=fixture/);
+    assert.match(result.stdout, /password=fixture-token/);
+  }
+
+  assert.deepEqual(configurationGitAuthentication("file:///tmp/config.git").arguments, []);
+  assert.deepEqual(configurationGitAuthentication("https://git.example.test/config.git").arguments, []);
 });
 
 test("rejects a configuration mirror with the wrong origin", async (t) => {
