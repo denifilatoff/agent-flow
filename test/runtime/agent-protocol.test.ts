@@ -142,17 +142,22 @@ test("renders event-specific evidence and the pinned change identity", async () 
   assert.match(plan, /plan comment/);
   assert.match(plan, /artifact=plan/);
 
-  const development = renderRuntimePrompt(promptInput(flow, {
+  const initialDevelopment = renderRuntimePrompt(promptInput(flow, {
+    stateId: "development",
+    resultContract: "development",
+  }));
+  assert.ok(initialDevelopment.includes(
+    '{"event":"agent-succeeded"} requires creation of one linked open change request during this attempt.',
+  ));
+
+  const retryDevelopment = renderRuntimePrompt(promptInput(flow, {
     stateId: "development",
     resultContract: "development",
     changeRequest,
   }));
-  assert.ok(development.includes(
-    '{"event":"agent-succeeded"} requires a linked open change request created or updated during this attempt.',
-  ));
-  assert.ok(development.includes(
-    "If the same linked open change request already exists from an earlier retry, update that same change request "
-      + "during this attempt and do not create a duplicate.",
+  assert.ok(retryDevelopment.includes(
+    '{"event":"agent-succeeded"} requires the exact pinned change request github owner/repo#8 to remain open and be '
+      + "updated during this attempt. Do not create another change request.",
   ));
 
   const review = renderRuntimePrompt(promptInput(flow, {
