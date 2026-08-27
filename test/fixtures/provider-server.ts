@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 
 import { parseControlComment } from "../../src/provider/control-comment.ts";
 import type {
+  AgentDecision,
   AgentReceipt,
   ControlState,
 } from "../../src/config/types.ts";
@@ -80,6 +81,7 @@ export interface FixtureRun {
   controlStates(): Promise<ControlState[]>;
   controllerLabels(): Promise<string[]>;
   compilations(): Promise<Array<Omit<RoutingEvent, "kind">>>;
+  decisions(): Promise<AgentDecision[]>;
   finish(): Promise<void>;
   latestAgentComment(): Promise<ProviderComment | null>;
   maximumConcurrentAttempts(): Promise<number>;
@@ -252,6 +254,14 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     },
     controllerLabels: async () => state.labels.filter((label) => label.startsWith("agent-")).sort(),
     compilations: async () => events("compile"),
+    async decisions() {
+      const decisions: AgentDecision[] = [];
+      for (const session of await run.sessions()) {
+        const body = await readFile(join(dataDirectory, "sessions", session, "decision.json"), "utf8");
+        if (body.trim()) decisions.push(JSON.parse(body) as AgentDecision);
+      }
+      return decisions;
+    },
     async finish() {
       await untilState("assessment-review");
       await run.answer("approved");
@@ -268,14 +278,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     async maximumConcurrentAttempts() { return state.maximumActiveAttempts; },
     async mergeChangeRequest() { state.setChangeState("merged"); },
     reconcile,
-    async receipts() {
-      const receipts: AgentReceipt[] = [];
-      for (const session of await run.sessions()) {
-        const body = await readFile(join(dataDirectory, "sessions", session, "receipt.json"), "utf8");
-        if (body.trim()) receipts.push(JSON.parse(body) as AgentReceipt);
-      }
-      return receipts;
-    },
+    async receipts() { return state.acceptedReceipts; },
     async removeActivation() { state.removeActivation(); },
     restart,
     routing: async () => state.routing,
@@ -318,6 +321,7 @@ class FixtureState {
   readonly ref: { provider: ProviderKind; repository: string; number: number };
   readonly comments: StoredComment[] = [];
   readonly reviews = new Map<string, StoredReview>();
+  readonly acceptedReceipts: AgentReceipt[] = [];
   readonly nextModes = new Map<string, AttemptMode[]>();
   readonly activeAttempts = new Set<string>();
   readonly readyAttempts = new Set<string>();
@@ -373,6 +377,7 @@ class FixtureState {
     const timestamp = this.touch();
     const comment = { id: String(++this.#commentId), body, actor, createdAt: timestamp, updatedAt: timestamp };
     this.comments.push(comment);
+    this.recordReceipt(body);
     return comment;
   }
 
@@ -436,7 +441,7 @@ class FixtureState {
       const context = body as AttemptContext;
       const attemptId = context.controlState.attemptSeries?.current?.attemptId;
       if (!attemptId) return json(response, 400, { message: "attempt is missing" });
-      return json(response, 200, { receipt: this.publish(context, attemptId) });
+      return json(response, 200, { decision: this.publish(context, attemptId) });
     }
     if (this.provider === "github" && url.pathname.startsWith("/api/github/")) {
       if (!this.validProviderHeaders(request)) return json(response, 400, { message: "invalid provider headers" });
@@ -477,21 +482,13 @@ class FixtureState {
     const mode = queue.shift() ?? "success";
     if (mode !== "success") return json(response, 200, { mode });
 
-    const receipt = this.publish(context, attemptId);
-    json(response, 200, { mode, receipt });
+    const decision = this.publish(context, attemptId);
+    json(response, 200, { mode, decision });
   }
 
-  private publish(context: AttemptContext, attemptId: string): AgentReceipt {
+  private publish(context: AttemptContext, attemptId: string): AgentDecision {
     const flowInstanceId = context.controlState.flowInstanceId;
     const state = context.controlState.stateId;
-    const base = {
-      apiVersion: "agent-flow/v1alpha1" as const,
-      kind: "AgentReceipt" as const,
-      flowInstanceId,
-      attemptId,
-      outcome: "succeeded" as const,
-      summary: `fixture ${state} result`,
-    };
     if (context.mode === "human-input") {
       const source = context.artifacts
         .filter((artifact): artifact is ProviderComment =>
@@ -505,42 +502,38 @@ class FixtureState {
           : lower.includes("question") ? "question" as const
             : lower.includes("unclear") ? "unclear" as const
               : "approved" as const;
-      return { ...base, artifacts: [], humanGate: { sourceCommentId: source.id, verdict, notes: ["fixture"] } };
+      if ((verdict === "question" || verdict === "unclear")) {
+        const marker_ = marker(flowInstanceId, attemptId, "question");
+        this.addComment(`${marker_}\nPlease clarify the requested action.`);
+      }
+      if (state === "needs-human") {
+        return { event: verdict === "cancelled" ? "human-answer-cancelled"
+          : verdict === "approved" ? "human-answer-accepted" : "human-answer-unclear" };
+      }
+      return { event: verdict === "cancelled" ? "human-cancelled"
+        : verdict === "changes-requested" ? "human-changes-requested"
+          : verdict === "question" ? "human-question"
+            : verdict === "unclear" ? "human-unclear" : "human-approved" };
     }
     if (state === "assessment" || state === "planning") {
       const artifactKind = state === "assessment" ? "assessment" as const : "plan" as const;
       const markerText = marker(flowInstanceId, attemptId, artifactKind);
-      const comment = this.addComment(`${markerText}\nFixture ${artifactKind}.`);
-      return {
-        ...base,
-        artifacts: [{ kind: "comment", id: comment.id, url: this.commentUrl(comment.id), marker: markerText, artifactKind }],
-      };
+      this.addComment(`${markerText}\nFixture ${artifactKind}.`);
+      return { event: "agent-succeeded" };
     }
     if (state === "development") {
       this.change ??= { number: this.provider === "github" ? 31 : 41, headSha: HEAD, state: "open", updatedAt: this.touch() };
-      return {
-        ...base,
-        artifacts: [{
-          kind: "change-request",
-          number: this.change.number,
-          url: this.changeUrl(),
-          headSha: this.change.headSha,
-          state: this.change.state,
-        }],
-      };
+      return { event: "agent-succeeded" };
     }
     if (state === "review") {
       if (!this.change) throw new Error("review change request is missing");
-      return { ...base, artifacts: [this.addReview(flowInstanceId, attemptId, "approved")] };
+      this.addReview(flowInstanceId, attemptId, "approved");
+      return { event: "review-approved" };
     }
     if (state === "needs-human" && this.change?.state === "closed") {
       const marker_ = marker(flowInstanceId, attemptId, "question");
-      const comment = this.addComment(`${marker_}\nReopen the existing change request or cancel the flow?`);
-      return {
-        ...base,
-        outcome: "needs-human",
-        artifacts: [{ kind: "comment", id: comment.id, url: this.commentUrl(comment.id), marker: marker_, artifactKind: "question" }],
-      };
+      this.addComment(`${marker_}\nReopen the existing change request or cancel the flow?`);
+      return { event: "agent-needs-human" };
     }
     throw new Error(`unsupported fixture attempt state: ${state}`);
   }
@@ -569,6 +562,7 @@ class FixtureState {
       const stored = this.requireComment(comment[1]!);
       stored.body = String((body as { body: string }).body);
       stored.updatedAt = this.touch();
+      this.recordReceipt(stored.body);
       return json(response, 200, this.githubComment(stored));
     }
     if (method === "POST" && path === `repos/${this.repository}/issues/${this.number}/comments`) {
@@ -588,6 +582,10 @@ class FixtureState {
     }
     const pull = new RegExp(`^repos/${this.repository}/pulls/(\\d+)$`).exec(path);
     if (method === "GET" && pull) return json(response, 200, this.githubPull());
+    const reviews = new RegExp(`^repos/${this.repository}/pulls/(\\d+)/reviews$`).exec(path);
+    if (method === "GET" && reviews) {
+      return json(response, 200, [...this.reviews.values()].map((review) => this.githubReview(review)));
+    }
     const review = new RegExp(`^repos/${this.repository}/pulls/(\\d+)/reviews/(\\d+)$`).exec(path);
     if (method === "GET" && review) return json(response, 200, this.githubReview(this.reviews.get(review[2]!)!));
     json(response, 404, { message: `unhandled GitHub route ${method} ${path}` });
@@ -611,6 +609,7 @@ class FixtureState {
       const stored = this.requireComment(note[1]!);
       stored.body = String((body as { body: string }).body);
       stored.updatedAt = this.touch();
+      this.recordReceipt(stored.body);
       return json(response, 200, this.gitlabNote(stored));
     }
     if (method === "POST" && path === `${project}/issues/${this.number}/notes`) {
@@ -629,6 +628,10 @@ class FixtureState {
     }
     const merge = new RegExp(`^${project}/merge_requests/(\\d+)$`).exec(path);
     if (method === "GET" && merge) return json(response, 200, this.gitlabMerge());
+    const reviews = new RegExp(`^${project}/merge_requests/(\\d+)/notes$`).exec(path);
+    if (method === "GET" && reviews) {
+      return json(response, 200, [...this.reviews.values()].map((review) => this.gitlabReview(review)));
+    }
     const review = new RegExp(`^${project}/merge_requests/(\\d+)/notes/(\\d+)$`).exec(path);
     if (method === "GET" && review) return json(response, 200, this.gitlabReview(this.reviews.get(review[2]!)!));
     json(response, 404, { message: `unhandled GitLab route ${method} ${path}` });
@@ -725,6 +728,13 @@ class FixtureState {
     const comment = this.comments.find((candidate) => candidate.id === id);
     if (!comment) throw new Error(`comment ${id} is missing`);
     return comment;
+  }
+
+  private recordReceipt(body: string): void {
+    const receipt = parseControlComment(body)?.latestReceipt;
+    if (receipt && !this.acceptedReceipts.some(({ attemptId }) => attemptId === receipt.attemptId)) {
+      this.acceptedReceipts.push(receipt);
+    }
   }
 
   private commentUrl(id: string): string {

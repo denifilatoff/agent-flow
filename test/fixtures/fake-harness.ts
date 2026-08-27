@@ -26,8 +26,8 @@ process.exit(2);
 
 async function runAgent(target: "codex" | "claude"): Promise<number> {
   const contextPath = process.env.AGENT_FLOW_CONTEXT_PATH;
-  const receiptPath = process.env.AGENT_FLOW_RECEIPT_PATH;
-  if (!contextPath || !receiptPath) return 0;
+  const decisionPath = process.env.AGENT_FLOW_DECISION_PATH;
+  if (!contextPath || !decisionPath) return 0;
   const context = JSON.parse(await readFile(contextPath, "utf8")) as {
     ticket: { repository: { cloneRoot: string } };
     controlState: { attemptSeries: { agentId: string; current: { attemptId: string } } };
@@ -52,7 +52,7 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
       console.error(await response.text());
       return 2;
     }
-    const result = await response.json() as { mode: string; receipt?: unknown };
+    const result = await response.json() as { mode: string; decision?: unknown };
     const ready = await fetch(new URL("/__fixture/ready", endpoint), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -68,11 +68,11 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
         body: JSON.stringify(context),
       });
       if (!late.ok) throw new Error(await late.text());
-      const published = await late.json() as { receipt: unknown };
-      await writeFile(receiptPath, `${JSON.stringify(published.receipt)}\n`, { mode: 0o600 });
+      const published = await late.json() as { decision: unknown };
+      await writeFile(decisionPath, `${JSON.stringify(published.decision)}\n`, { mode: 0o600 });
       return 0;
     }
-    if (result.receipt) await writeFile(receiptPath, `${JSON.stringify(result.receipt)}\n`, { mode: 0o600 });
+    if (result.decision) await writeFile(decisionPath, `${JSON.stringify(result.decision)}\n`, { mode: 0o600 });
     if (result.mode === "block") await cancellation.signal;
     return 0;
   } finally {

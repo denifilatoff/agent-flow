@@ -32,7 +32,7 @@ test("a transient exit consumes budget and retries in a new session", async (t) 
   assert.equal(await run.maximumConcurrentAttempts(), 1);
 });
 
-test("activation removal repeatedly cancels a ready process and ignores its late receipt", async () => {
+test("activation removal repeatedly cancels a ready process and ignores its late decision", async () => {
   for (let iteration = 0; iteration < 3; iteration += 1) {
     const run = await startFixture("github", { firstAttempt: "late" });
     try {
@@ -42,9 +42,8 @@ test("activation removal repeatedly cancels a ready process and ignores its late
       await run.removeActivation();
       await run.reconcile();
       const control = await run.control();
-      const [receipt] = await run.receipts();
-      assert.equal(receipt?.outcome, "succeeded");
-      assert.equal(receipt?.artifacts[0]?.kind, "comment");
+      assert.deepEqual(await run.decisions(), [{ event: "agent-succeeded" }]);
+      assert.deepEqual(await run.receipts(), []);
       assert.match((await run.latestAgentComment())!.body, /artifact=assessment/);
       assert.equal(control.stateId, "cancelled");
       assert.equal(control.latestReceipt, null);
