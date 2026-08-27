@@ -7,8 +7,6 @@ import {
   DecisionReadbackError,
   DecisionTrustError,
   InvalidDecisionError,
-  InvalidReceiptError,
-  ReceiptReadbackError,
 } from "./receipts.ts";
 
 export class AttemptError extends Error {
@@ -44,12 +42,6 @@ export function classifyAttemptError(error: unknown): AttemptError {
   }
   if (error instanceof ApmPreflightError) {
     return new AttemptError(error.code, "APM preflight failed", false);
-  }
-  if (error instanceof InvalidReceiptError) {
-    return new AttemptError(error.code, "agent receipt could not be verified", false);
-  }
-  if (error instanceof ReceiptReadbackError) {
-    return new AttemptError(error.code, "provider receipt readback failed transiently", true);
   }
   if (error instanceof InvalidDecisionError) {
     return new AttemptError(error.code, "agent decision is invalid", true);

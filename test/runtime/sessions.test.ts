@@ -78,11 +78,9 @@ test("creates the immutable attempt file layout", async (t) => {
     "decision.json",
     "harness-session/",
     "harness.log",
-    "receipt.json",
   ]);
   assert.deepEqual(JSON.parse(await readFile(session.contextPath, "utf8")), CONTEXT);
   assert.equal(await readFile(session.decisionPath, "utf8"), "");
-  assert.equal(await readFile(session.receiptPath, "utf8"), "");
   assert.equal(await readFile(session.logPath, "utf8"), "");
   assert.equal((await stat(session.root)).mode & 0o777, 0o700);
 });

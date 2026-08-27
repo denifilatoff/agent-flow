@@ -30,7 +30,7 @@ import { WorkspaceManager } from "./runtime/workspaces.ts";
 type Providers = Partial<Record<ProviderKind, ProviderAdapter>>;
 type Harnesses = Partial<Record<"claude" | "codex", HarnessAdapter>>;
 type AttemptRunnerOverrides = Partial<Pick<AttemptRunnerDependencies,
-  "workspaceManager" | "createSession" | "compileAgent" | "verifyReceipt" | "delay" | "now" | "newId"
+  "workspaceManager" | "createSession" | "compileAgent" | "verifyDecision" | "delay" | "now" | "newId"
 >>;
 
 export interface ProductionOverrides {

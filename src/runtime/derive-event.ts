@@ -56,7 +56,6 @@ export function deriveEvent(
     return event(type, snapshot, control, { authorizedActor: true, receiptValid: true });
   }
   if (receipt.outcome === "needs-human") {
-    if (control.stateId === "needs-human") return null;
     return event("agent-needs-human", snapshot, control, { receiptValid: true });
   }
   if (receipt.outcome === "failed") {

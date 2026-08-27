@@ -182,7 +182,7 @@ test("production retries keep the pinned provider credential scoped to the child
         events.push("session");
         return createAttemptSession(...args);
       },
-      async verifyReceipt(_path, expected): Promise<AgentReceipt> {
+      async verifyDecision(_path, expected): Promise<AgentReceipt> {
         return { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt",
           flowInstanceId: expected.flowInstanceId, attemptId: expected.attemptId, outcome: "succeeded",
           summary: "assessment published", artifacts: [{ kind: "comment", id: "99",
@@ -281,7 +281,7 @@ test("production passes a custom GHES credential without exposing public GitHub 
         return { agentId, target, instructions: "Test GHES credentials.", runtimeDirectory: root };
       },
       async createSession(...args) { return createAttemptSession(...args); },
-      async verifyReceipt(_path, expected): Promise<AgentReceipt> {
+      async verifyDecision(_path, expected): Promise<AgentReceipt> {
         return { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt",
           flowInstanceId: expected.flowInstanceId, attemptId: expected.attemptId, outcome: "succeeded",
           summary: "assessment published", artifacts: [{ kind: "comment", id: "99",

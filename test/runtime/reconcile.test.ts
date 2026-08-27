@@ -407,7 +407,7 @@ async function assertRunnerAccepts(request: AttemptRequest, provider: ProviderAd
     },
     async createSession(_data, _flow, attemptId) { return {
       root: `/data/${attemptId}`, contextPath: `/data/${attemptId}/context.json`,
-      receiptPath: `/data/${attemptId}/receipt.json`, logPath: `/data/${attemptId}/harness.log`,
+      decisionPath: `/data/${attemptId}/decision.json`, logPath: `/data/${attemptId}/harness.log`,
       harnessSessionDirectory: `/data/${attemptId}/harness-session`,
     }; },
     async compileAgent(agentId, _package, target) {
@@ -621,7 +621,7 @@ test("reconciler owns terminal cancellation for an actual running attempt", asyn
     },
     async createSession(_data, _flow, attemptId) { return {
       root: `/data/${attemptId}`, contextPath: `/data/${attemptId}/context.json`,
-      receiptPath: `/data/${attemptId}/receipt.json`, logPath: `/data/${attemptId}/harness.log`,
+      decisionPath: `/data/${attemptId}/decision.json`, logPath: `/data/${attemptId}/harness.log`,
       harnessSessionDirectory: `/data/${attemptId}/harness-session`,
     }; },
     async compileAgent(agentId, _package, target) {
@@ -674,13 +674,13 @@ test("terminal cancellation overrides an in-flight success from the same attempt
     },
     async createSession(_data, _flow, attemptId) { return {
       root: `/data/${attemptId}`, contextPath: `/data/${attemptId}/context.json`,
-      receiptPath: `/data/${attemptId}/receipt.json`, logPath: `/data/${attemptId}/harness.log`,
+      decisionPath: `/data/${attemptId}/decision.json`, logPath: `/data/${attemptId}/harness.log`,
       harnessSessionDirectory: `/data/${attemptId}/harness-session`,
     }; },
     async compileAgent(agentId, _package, target) {
       return { agentId, target, instructions: "test", runtimeDirectory: "/runtime" };
     },
-    async verifyReceipt(_path, expected) { return {
+    async verifyDecision(_path, expected) { return {
       apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt", flowInstanceId: FLOW_1,
       attemptId: expected.attemptId, outcome: "succeeded", summary: "late success",
       artifacts: [{ kind: "change-request", number: 31,
@@ -860,7 +860,11 @@ test("enters needs-human for a closed change and reviews a new head", async (t) 
       }),
       latestReceipt: questionReceipt(),
     }, provider.snapshot.comments[index]!.id);
-    await reconcileTicket(dependencies(provider, launcher), TICKET);
+    const paused = await reconcileTicket(dependencies(provider, launcher), TICKET);
+    const updated = parseControlComment(provider.snapshot.comments[index]!.body)!;
+    assert.equal(paused.changed, true);
+    assert.equal(updated.stateId, "needs-human");
+    assert.equal(updated.resumeStateId, "review");
     assert.equal(launcher.requests.length, 1);
   });
 
@@ -915,6 +919,62 @@ test("derives the needs-human question verdict as the unclear self-loop", () => 
   });
 
   assert.equal(deriveEvent(snapshot(), control, BUNDLE.flow)?.type, "human-answer-unclear");
+});
+
+test("derives the event selected by each controller-built receipt", () => {
+  const sourceId = "human-source";
+  const cases: Array<{ state: ControlState; snapshot?: ProviderTicketSnapshot; event: string }> = [
+    {
+      state: controlState({ attemptSeries: attemptSeries(), latestReceipt: assessmentReceipt() }),
+      event: "agent-succeeded",
+    },
+    {
+      state: controlState({
+        stateId: "assessment-review",
+        attemptSeries: attemptSeries({ stateId: "assessment-review" }),
+        latestReceipt: humanReceipt("changes-requested", sourceId),
+      }),
+      event: "human-changes-requested",
+    },
+    ...([
+      ["approved", "human-answer-accepted"],
+      ["cancelled", "human-answer-cancelled"],
+      ["unclear", "human-answer-unclear"],
+    ] as const).map(([verdict, event]) => ({
+      state: controlState({
+        stateId: "needs-human",
+        resumeStateId: "review",
+        attemptSeries: attemptSeries({ agentId: "reviewer", stateId: "needs-human" }),
+        latestReceipt: humanReceipt(verdict, sourceId),
+      }),
+      event,
+    })),
+    ...([
+      ["approved", "review-approved"],
+      ["changes-requested", "review-changes-requested"],
+    ] as const).map(([verdict, event]) => ({
+      state: controlState({
+        stateId: "review",
+        attemptSeries: attemptSeries({ agentId: "reviewer", stateId: "review" }),
+        latestReceipt: reviewReceipt(verdict),
+      }),
+      snapshot: snapshot({ changeRequest: changeRequest() }),
+      event,
+    })),
+    {
+      state: controlState({
+        stateId: "needs-human",
+        resumeStateId: "review",
+        attemptSeries: attemptSeries({ agentId: "reviewer", stateId: "needs-human" }),
+        latestReceipt: questionReceipt(),
+      }),
+      event: "agent-needs-human",
+    },
+  ];
+
+  for (const item of cases) {
+    assert.equal(deriveEvent(item.snapshot ?? snapshot(), item.state, BUNDLE.flow)?.type, item.event);
+  }
 });
 
 test("needs-human question stays paused until a later authorized comment", async () => {

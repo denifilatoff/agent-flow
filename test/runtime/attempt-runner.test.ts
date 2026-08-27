@@ -10,7 +10,13 @@ import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../../sr
 import { ProviderHttpError } from "../../src/provider/http.ts";
 import type { ProviderAdapter, ProviderTicketSnapshot } from "../../src/provider/types.ts";
 import { createAttemptRunner, type AttemptRunnerDependencies } from "../../src/runtime/attempt-runner.ts";
-import { InvalidReceiptError, ReceiptReadbackError } from "../../src/runtime/receipts.ts";
+import {
+  DecisionEvidenceUnavailableError,
+  DecisionReadbackError,
+  DecisionTrustError,
+  InvalidDecisionError,
+  type DecisionExpectation,
+} from "../../src/runtime/receipts.ts";
 import type { AttemptRequest } from "../../src/runtime/reconcile.ts";
 
 const FLOW = "11111111-1111-4111-8111-111111111111";
@@ -37,7 +43,10 @@ function bundle(maxAttempts = 3): ConfigBundle {
       apiVersion: "agent-flow/v1alpha1", kind: "Flow",
       metadata: { id: "development", activationLabel: "agent-flow:development", managedLabel: "agent-flow:managed" },
       spec: { initial: "development", states: {
-        development: { kind: "agent", agent: "developer", resultContract: "development" },
+        development: { kind: "agent", agent: "developer", resultContract: "development", "on": {
+          "agent-succeeded": { target: "done" },
+          "agent-needs-human": { target: "blocked" },
+        } },
         blocked: { kind: "paused" }, done: { kind: "final" },
       } },
     },
@@ -80,9 +89,7 @@ function request(options: { bundle?: ConfigBundle; control?: ControlState; input
     sourceComment: null, resultContract: "development", inputRevision: options.inputRevision ?? "input:one" };
 }
 
-function receipt(attemptId: string, outcome: AgentReceipt["outcome"] = "succeeded"): AgentReceipt {
-  if (outcome === "failed") return { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt", flowInstanceId: FLOW,
-    attemptId, outcome, summary: "failed", artifacts: [], error: { code: "SECRET", message: "token=secret" } };
+function receipt(attemptId: string, outcome: "succeeded" | "needs-human" = "succeeded"): AgentReceipt {
   return { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt", flowInstanceId: FLOW, attemptId, outcome,
     summary: "done", artifacts: outcome === "needs-human" ? [{ kind: "comment", id: "9",
       url: "https://github.test/owner/repo/issues/7#issuecomment-9",
@@ -97,18 +104,22 @@ function deferred<T>() {
 }
 
 interface Fixture {
-  events: string[]; controls: ControlState[]; attempts: string[]; delays: number[];
+  events: string[]; controls: ControlState[]; attempts: string[]; delays: number[]; prompts: string[];
+  verifications: Array<{ path: string; expected: DecisionExpectation; cancelled: boolean }>;
   process: ReturnType<typeof deferred<HarnessResult>>;
   runner: ReturnType<typeof createAttemptRunner>; request: AttemptRequest;
 }
 
 function fixture(options: {
   request?: AttemptRequest; results?: Array<HarnessResult | Error | Promise<HarnessResult>>;
-  verify?: (attemptId: string) => Promise<AgentReceipt>; write?: AttemptRunnerDependencies["writeControl"];
+  verify?: (path: string, expected: DecisionExpectation, cancelled: boolean) => Promise<AgentReceipt>;
+  write?: AttemptRunnerDependencies["writeControl"];
   ids?: string[]; compileError?: Error; delay?: (milliseconds: number) => Promise<void>;
   providerCredential?: ProviderCredential; onSettled?: (ref: AttemptRequest["ref"]) => void;
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
+  const prompts: string[] = [];
+  const verifications: Fixture["verifications"] = [];
   const process = deferred<HarnessResult>();
   const configuredRequest = options.request ?? request();
   const results = [...(options.results ?? [process.promise])];
@@ -116,6 +127,7 @@ function fixture(options: {
   const ids = [...(options.ids ?? [SERIES, ATTEMPT_1, ATTEMPT_2])];
   const harness: HarnessAdapter = { target: "codex", async preflight() {}, async run(input) {
     events.push("harness:spawn");
+    prompts.push(input.stagePrompt);
     assert.deepEqual(input.providerCredential, {
       provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
     });
@@ -144,20 +156,21 @@ function fixture(options: {
       assert.equal(context.controlState.attemptSeries?.current?.attemptId, attemptId);
       assert.equal(inspect(context).includes("github-ticket-token"), false); return {
         root: `/data/sessions/${attemptId}`, contextPath: `/data/sessions/${attemptId}/context.json`,
-        receiptPath: `/data/sessions/${attemptId}/receipt.json`, logPath: `/data/sessions/${attemptId}/harness.log`,
+        decisionPath: `/data/sessions/${attemptId}/decision.json`, logPath: `/data/sessions/${attemptId}/harness.log`,
         harnessSessionDirectory: `/data/sessions/${attemptId}/harness-session`,
       }; },
     async compileAgent(agentId, packageDirectory, target) { events.push("apm:compile");
       assert.equal(packageDirectory, "/config/agent-packages/developer");
       if (options.compileError) throw options.compileError;
       return { agentId, target, instructions: "instructions", runtimeDirectory: "/runtime" }; },
-    async verifyReceipt(_path, expected) { events.push("receipt:verify");
-      return options.verify?.(expected.attemptId) ?? receipt(expected.attemptId); },
+    async verifyDecision(path, expected, _provider, cancelled) { events.push("decision:verify");
+      verifications.push({ path, expected, cancelled });
+      return options.verify?.(path, expected, cancelled) ?? receipt(expected.attemptId); },
     async delay(milliseconds) { delays.push(milliseconds); events.push("delay"); await options.delay?.(milliseconds); },
     now: () => NOW, newId: () => ids.shift()!,
   });
   if (options.onSettled) runner.onSettled?.(options.onSettled);
-  return { events, controls, attempts, delays, process, runner, request: configuredRequest };
+  return { events, controls, attempts, delays, prompts, verifications, process, runner, request: configuredRequest };
 }
 
 async function waitIdle(subject: Fixture): Promise<void> {
@@ -174,6 +187,34 @@ test("persists and reads back started before a background launch", async () => {
     "session:create", "apm:compile", "harness:spawn"]);
   assert.equal(subject.controls[0]!.attemptSeries?.consumed, 1);
   subject.process.resolve(OK); await waitIdle(subject);
+  assert.match(subject.prompts[0]!, new RegExp(`/data/sessions/${ATTEMPT_1}/context\\.json`));
+  assert.match(subject.prompts[0]!, new RegExp(`/data/sessions/${ATTEMPT_1}/decision\\.json`));
+  assert.match(subject.prompts[0]!, new RegExp(`flow=${FLOW} attempt=${ATTEMPT_1} artifact=question`));
+  assert.equal(subject.verifications[0]?.path, `/data/sessions/${ATTEMPT_1}/decision.json`);
+  assert.deepEqual({
+    flow: subject.verifications[0]?.expected.flow,
+    stateId: subject.verifications[0]?.expected.stateId,
+    mode: subject.verifications[0]?.expected.mode,
+    resultContract: subject.verifications[0]?.expected.resultContract,
+    flowInstanceId: subject.verifications[0]?.expected.flowInstanceId,
+    attemptId: subject.verifications[0]?.expected.attemptId,
+    ticket: subject.verifications[0]?.expected.ticket,
+    startedAt: subject.verifications[0]?.expected.startedAt,
+    sourceComment: subject.verifications[0]?.expected.sourceComment,
+    pinnedChangeRequest: subject.verifications[0]?.expected.pinnedChangeRequest,
+  }, {
+    flow: subject.request.bundle.flow,
+    stateId: "development",
+    mode: "stage",
+    resultContract: "development",
+    flowInstanceId: FLOW,
+    attemptId: ATTEMPT_1,
+    ticket: subject.request.ref,
+    startedAt: NOW,
+    sourceComment: null,
+    pinnedChangeRequest: subject.request.snapshot.changeRequest,
+  });
+  assert.deepEqual(subject.controls.at(-1)?.latestReceipt, receipt(ATTEMPT_1));
 });
 
 test("wakes the ticket after a background attempt settles", async () => {
@@ -196,33 +237,40 @@ test("retries with injected delay and a fresh session", async () => {
   const subject = fixture({ results: [{ exitCode: 17, signal: null, timedOut: false }, OK] });
   await subject.runner.start(subject.request); await waitIdle(subject);
   assert.deepEqual(subject.delays, [7_000]); assert.deepEqual(subject.attempts, [ATTEMPT_1, ATTEMPT_2]);
+  assert.ok(subject.prompts[0]?.includes(ATTEMPT_1)); assert.ok(subject.prompts[1]?.includes(ATTEMPT_2));
   assert.equal(subject.controls.at(-1)!.attemptSeries?.current?.status, "succeeded");
   assert.equal(subject.controls.at(-1)!.attemptSeries?.consumed, 2);
 });
 
-test("retries timeout, retryable harness, and transient receipt readback failures", async () => {
+test("retries process and decision failures with a fresh session", async () => {
   const cases: Array<HarnessResult | Error> = [
     { exitCode: null, signal: "SIGTERM", timedOut: true }, new HarnessProcessError("codex", true),
-    new ReceiptReadbackError(),
+    new InvalidDecisionError("decision file could not be read"),
+    new InvalidDecisionError("decision contains invalid JSON"),
+    new DecisionEvidenceUnavailableError("provider decision evidence is unavailable"),
+    new DecisionReadbackError(),
   ];
   for (const first of cases) {
     let verifyCalls = 0;
-    const providerCase = first instanceof ReceiptReadbackError;
-    const subject = fixture({ results: providerCase ? [OK, OK] : [first, OK], verify: async (attemptId) => {
-      verifyCalls += 1; if (providerCase && verifyCalls === 1) throw first; return receipt(attemptId);
+    const decisionCase = first instanceof InvalidDecisionError
+      || first instanceof DecisionEvidenceUnavailableError
+      || first instanceof DecisionReadbackError;
+    const subject = fixture({ results: decisionCase ? [OK, OK] : [first, OK], verify: async (_path, expected) => {
+      verifyCalls += 1; if (decisionCase && verifyCalls === 1) throw first; return receipt(expected.attemptId);
     } });
     await subject.runner.start(subject.request); await waitIdle(subject);
     assert.deepEqual(subject.delays, [7_000]);
+    assert.deepEqual(subject.attempts, [ATTEMPT_1, ATTEMPT_2]);
     assert.equal(subject.controls.at(-1)!.attemptSeries?.current?.status, "succeeded");
     assert.equal(JSON.stringify(subject.controls).includes("secret"), false);
   }
 });
 
-test("blocks non-retryable harness and receipt failures without leaking messages", async () => {
+test("blocks non-retryable harness and decision trust failures without delay", async () => {
   const cases: Array<{ result?: Error; verify?: () => Promise<AgentReceipt>; code: string }> = [
     { result: new HarnessPreflightError("codex"), code: "HARNESS_PREFLIGHT_FAILED" },
     { result: new HarnessProcessError("codex", false), code: "HARNESS_PROCESS_FAILED" },
-    { verify: async () => { throw new InvalidReceiptError("token=secret"); }, code: "INVALID_RECEIPT" },
+    { verify: async () => { throw new DecisionTrustError("token=secret"); }, code: "DECISION_TRUST_FAILED" },
   ];
   for (const item of cases) {
     const subject = fixture({ results: [item.result ?? OK], verify: item.verify ? async () => item.verify!() : undefined });
@@ -310,7 +358,8 @@ test("blocks when retry budget is exhausted", async () => {
 });
 
 test("accepts needs-human as succeeded without another attempt", async () => {
-  const subject = fixture({ results: [OK], verify: async (attemptId) => receipt(attemptId, "needs-human") });
+  const subject = fixture({ results: [OK], verify: async (_path, expected) =>
+    receipt(expected.attemptId, "needs-human") });
   await subject.runner.start(subject.request); await waitIdle(subject);
   const final = subject.controls.at(-1)!;
   assert.equal(final.stateId, "development"); assert.equal(final.attemptSeries?.current?.status, "succeeded");
@@ -343,6 +392,25 @@ test("cancel aborts the live job without owning provider state", async () => {
   assert.equal(subject.controls.at(-1)!.attemptSeries?.current?.status, "started");
   assert.equal(settled, 0);
   await subject.runner.cancel(FLOW);
+});
+
+test("cancellation ignores a decision that finishes after the attempt", async () => {
+  const verification = deferred<AgentReceipt>();
+  const verifying = deferred<void>();
+  const subject = fixture({ results: [OK], verify: async () => {
+    verifying.resolve();
+    return verification.promise;
+  } });
+  await subject.runner.start(subject.request);
+  await verifying.promise;
+
+  const cancelling = subject.runner.cancel(FLOW);
+  verification.resolve(receipt(ATTEMPT_1));
+  await cancelling;
+
+  assert.equal(subject.controls.at(-1)?.attemptSeries?.current?.status, "started");
+  assert.equal(subject.controls.at(-1)?.latestReceipt, null);
+  assert.equal(subject.events.filter((event) => event === "decision:verify").length, 1);
 });
 
 test("rejects started-control CAS conflict before workspace and spawn", async () => {

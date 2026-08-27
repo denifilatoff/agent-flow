@@ -18,7 +18,8 @@ import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../harne
 import { advanceControlState, type ControlStatePatch } from "../provider/control-comment.ts";
 import type { ProviderAdapter, ProviderArtifact } from "../provider/types.js";
 import type { AttemptLauncher, AttemptRequest } from "./reconcile.ts";
-import { readAndVerifyReceipt } from "./receipts.ts";
+import { renderRuntimePrompt } from "./agent-protocol.ts";
+import { readDecisionAndBuildReceipt } from "./receipts.ts";
 import { createAttemptSession, type AttemptContext } from "./sessions.ts";
 import { WorkspaceManager } from "./workspaces.ts";
 import { AttemptError, classifyAttemptError, controlError } from "./errors.ts";
@@ -33,7 +34,7 @@ export interface AttemptRunnerDependencies {
   writeControl: ControlWriter;
   createSession?: typeof createAttemptSession;
   compileAgent?: typeof compileAgentContext;
-  verifyReceipt?: typeof readAndVerifyReceipt;
+  verifyDecision?: typeof readDecisionAndBuildReceipt;
   delay?: (milliseconds: number) => Promise<void>;
   now?: () => string;
   newId?: () => string;
@@ -55,7 +56,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
   const active = new Map<string, ActiveAttempt>();
   const createSession = dependencies.createSession ?? createAttemptSession;
   const compileAgent = dependencies.compileAgent ?? compileAgentContext;
-  const verifyReceipt = dependencies.verifyReceipt ?? readAndVerifyReceipt;
+  const verifyDecision = dependencies.verifyDecision ?? readDecisionAndBuildReceipt;
   const delay = dependencies.delay ?? ((milliseconds) =>
     new Promise<void>((resolveDelay) => setTimeout(resolveDelay, milliseconds)));
   const now = dependencies.now ?? (() => new Date().toISOString());
@@ -224,11 +225,23 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         if (!harness || harness.target !== config.target) {
           throw new AttemptError("HARNESS_NOT_CONFIGURED", "configured harness is unavailable", false);
         }
+        const prompt = renderRuntimePrompt({
+          flow: request.bundle.flow,
+          stateId: request.stateId,
+          mode: request.mode,
+          resultContract: request.resultContract,
+          flowInstanceId: control.flowInstanceId,
+          attemptId: attempt.attemptId,
+          contextPath: session.contextPath,
+          decisionPath: session.decisionPath,
+          changeRequest: request.snapshot.changeRequest,
+          sourceComment: request.sourceComment,
+        });
         const resultPromise = harness.run({
           workspace,
           session,
           compiledAgent: compiled,
-          stagePrompt: stagePrompt(request),
+          stagePrompt: prompt,
           timeoutSeconds: config.retry.timeoutSeconds,
           signal: running.abort.signal,
           providerCredential: config.providerCredential,
@@ -240,22 +253,24 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         const result = await resultPromise;
         if (running.cancelled || running.abort.signal.aborted) return;
         assertProcessResult(result);
-        const receipt = await verifyReceipt(
-          session.receiptPath,
+        const receipt = await verifyDecision(
+          session.decisionPath,
           {
+            flow: request.bundle.flow,
+            stateId: request.stateId,
+            mode: request.mode,
+            resultContract: request.resultContract,
             flowInstanceId: control.flowInstanceId,
             attemptId: attempt.attemptId,
-            resultContract: request.resultContract,
             ticket: request.ref,
-            pinnedHeadSha: request.snapshot.changeRequest?.headSha ?? null,
+            startedAt: attempt.startedAt,
+            sourceComment: request.sourceComment,
+            pinnedChangeRequest: request.snapshot.changeRequest,
           },
           dependencies.provider,
           running.cancelled,
         );
         if (running.cancelled || running.abort.signal.aborted) return;
-        if (receipt.outcome === "failed") {
-          throw new AttemptError("AGENT_REPORTED_FAILURE", "agent reported a technical failure", true);
-        }
         series = {
           ...series,
           current: { ...attempt, status: "succeeded", finishedAt: now() },
@@ -463,10 +478,6 @@ function assertCurrent(running: ActiveAttempt, series: AttemptSeries, attempt: A
     || series.current?.attemptId !== attempt.attemptId) {
     throw new AttemptError("ATTEMPT_CANCELLED", "attempt was cancelled", false);
   }
-}
-
-function stagePrompt(request: AttemptRequest): string {
-  return `Run the ${request.agentId} agent for flow state ${request.stateId}. Read the supplied context and write the required receipt.`;
 }
 
 function successPatch(

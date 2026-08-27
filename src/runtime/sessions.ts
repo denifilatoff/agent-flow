@@ -27,7 +27,6 @@ export interface AttemptSession {
   root: string;
   contextPath: string;
   decisionPath: string;
-  receiptPath: string;
   logPath: string;
   harnessSessionDirectory: string;
 }
@@ -56,7 +55,6 @@ export async function createAttemptSession(
     root,
     contextPath: join(root, "context.json"),
     decisionPath: join(root, "decision.json"),
-    receiptPath: join(root, "receipt.json"),
     logPath: join(root, "harness.log"),
     harnessSessionDirectory: join(root, "harness-session"),
   };
@@ -64,8 +62,6 @@ export async function createAttemptSession(
   await publishContext(root, session.contextPath, context);
   await assertSafeWritableFile(root, session.decisionPath, "decision path");
   await writeFile(session.decisionPath, "", { flag: "wx", mode: 0o600 });
-  await assertSafeWritableFile(root, session.receiptPath, "receipt path");
-  await writeFile(session.receiptPath, "", { flag: "wx", mode: 0o600 });
   await assertSafeWritableFile(root, session.logPath, "harness log path");
   await writeFile(session.logPath, "", { flag: "wx", mode: 0o600 });
   session.harnessSessionDirectory = await createSafeDirectory(
