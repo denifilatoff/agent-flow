@@ -34,20 +34,22 @@ test("GitHub activation reaches done through both human gates", async (t) => {
   assert.deepEqual(receipts.map((receipt) => ({
     outcome: receipt.outcome,
     summary: receipt.summary,
-    artifact: normalizeArtifact(receipt.artifacts[0]),
+    artifacts: receipt.artifacts.map(normalizeArtifact),
     humanGate: receipt.humanGate && { verdict: receipt.humanGate.verdict, notes: receipt.humanGate.notes },
   })), [
-    { outcome: "succeeded", summary: "Agent completed the stage.", artifact: { kind: "comment", artifactKind: "assessment" }, humanGate: undefined },
-    { outcome: "succeeded", summary: "Human approved the result.", artifact: null, humanGate: { verdict: "approved", notes: [] } },
-    { outcome: "succeeded", summary: "Agent completed the stage.", artifact: { kind: "comment", artifactKind: "plan" }, humanGate: undefined },
-    { outcome: "succeeded", summary: "Human approved the result.", artifact: null, humanGate: { verdict: "approved", notes: [] } },
-    { outcome: "succeeded", summary: "Agent completed the stage.", artifact: { kind: "change-request", number: 31, headSha: "0123456789abcdef0123456789abcdef01234567", state: "open" }, humanGate: undefined },
-    { outcome: "succeeded", summary: "Review approved the change.", artifact: { kind: "review", headSha: "0123456789abcdef0123456789abcdef01234567", verdict: "approved" }, humanGate: undefined },
+    { outcome: "succeeded", summary: "Agent completed the stage.", artifacts: [{ kind: "comment", artifactKind: "assessment" }], humanGate: undefined },
+    { outcome: "succeeded", summary: "Human approved the result.", artifacts: [], humanGate: { verdict: "approved", notes: [] } },
+    { outcome: "succeeded", summary: "Agent completed the stage.", artifacts: [{ kind: "comment", artifactKind: "plan" }], humanGate: undefined },
+    { outcome: "succeeded", summary: "Human approved the result.", artifacts: [], humanGate: { verdict: "approved", notes: [] } },
+    { outcome: "succeeded", summary: "Agent completed the stage.", artifacts: [{ kind: "change-request", number: 31, headSha: "0123456789abcdef0123456789abcdef01234567", state: "open" }], humanGate: undefined },
+    { outcome: "succeeded", summary: "Review approved the change.", artifacts: [{ kind: "review", headSha: "0123456789abcdef0123456789abcdef01234567", verdict: "approved" }], humanGate: undefined },
   ]);
   assert.equal(new Set(receipts.map(({ flowInstanceId }) => flowInstanceId)).size, 1);
   assert.equal(new Set(receipts.map(({ attemptId }) => attemptId)).size, 6);
-  const sessionAttemptIds = (await run.sessions()).map((session) => session.split("/").at(-1)).toSorted();
-  assert.deepEqual(receipts.map(({ attemptId }) => attemptId).toSorted(), sessionAttemptIds);
+  assert.deepEqual(
+    receipts.map(({ flowInstanceId, attemptId }) => `${flowInstanceId}/${attemptId}`).toSorted(),
+    (await run.sessions()).toSorted(),
+  );
 
   const [assessment, assessmentGate, plan, planGate, development, review] = receipts;
   assertCommentReceipt(assessment!, "assessment", "#issuecomment-");
