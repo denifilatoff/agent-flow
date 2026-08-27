@@ -2,9 +2,8 @@
 
 ## Implementation status
 
-The runtime agent protocol in this document is the approved target for the next implementation change. The prototype
-code still accepts a model-generated `AgentReceipt` until that change is implemented. The implementation plan must
-replace that temporary contract without changing the provider-backed state-machine semantics defined here.
+The runtime agent protocol is implemented. Agent attempts write a minimal local `AgentDecision`; the controller reads
+provider evidence and builds the verified `AgentReceipt` stored in the control comment.
 
 ## Scope
 
@@ -35,8 +34,8 @@ compose.yaml                   macOS-oriented local deployment
 
 ## Versioned inputs
 
-Every YAML or JSON contract has `apiVersion: agent-flow/v1alpha1` and a fixed `kind`. The controller rejects unknown
-fields and unsupported versions before reconciliation starts.
+Every YAML or JSON contract except the local one-field `AgentDecision` has `apiVersion: agent-flow/v1alpha1` and a
+fixed `kind`. The controller rejects unknown fields and unsupported versions before reconciliation starts.
 
 - `schemas/v1/flow.schema.json` defines states, agent references, context inputs, transitions, guards, and actions.
 - `schemas/v1/agent-catalog.schema.json` maps agent IDs to APM packages, harness targets, timeouts, and retry policy.

@@ -80,6 +80,22 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
         + `head ${change.headSha}, state ${change.state}.`,
     );
   }
+  if (input.mode === "human-input") {
+    lines.push(
+      "Human-input mode: interpret only the supplied authorized human comment. Do not perform stage work or publish "
+        + "stage artifacts or a review verdict. Accepted, rejected, or cancelled decisions publish nothing. A question "
+        + "or unclear decision may publish only the required clarification question.",
+    );
+  }
+  if (input.stateId === "needs-human"
+    && input.mode === "stage"
+    && input.resultContract === "review"
+    && input.changeRequest?.state === "closed") {
+    lines.push(
+      "Because the linked change request is closed, do not review its head. Publish exactly one question asking whether "
+        + "to reopen the same change request or cancel the flow, then write {\"event\":\"agent-needs-human\"}.",
+    );
+  }
   lines.push(
     "Allowed decisions and required provider evidence:",
     ...events.map((event) => `${JSON.stringify({ event })} requires ${evidence(input, event)}.`),

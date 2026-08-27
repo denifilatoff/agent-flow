@@ -83,6 +83,7 @@ test("creates the immutable attempt file layout", async (t) => {
   assert.equal(await readFile(session.decisionPath, "utf8"), "");
   assert.equal(await readFile(session.logPath, "utf8"), "");
   assert.equal((await stat(session.root)).mode & 0o777, 0o700);
+  assert.equal((await stat(session.decisionPath)).mode & 0o777, 0o600);
 });
 
 test("refuses to reuse an attempt directory", async (t) => {

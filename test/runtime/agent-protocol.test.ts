@@ -155,6 +155,9 @@ test("renders event-specific evidence and the pinned change identity", async () 
     changeRequest,
   }));
   assert.match(review, /provider-native review/);
+  assert.ok(review.includes(
+    `{"event":"review-approved"} requires a provider-native review on ${HEAD_SHA}`,
+  ));
   assert.match(review, new RegExp(HEAD_SHA));
   assert.match(review, /github owner\/repo#8/);
   assert.match(review, /https:\/\/github\.test\/owner\/repo\/pull\/8/);
@@ -167,6 +170,10 @@ test("renders event-specific evidence and the pinned change identity", async () 
   }));
   assert.match(paused, /question comment/);
   assert.match(paused, /artifact=question/);
+  assert.ok(paused.includes(
+    "Because the linked change request is closed, do not review its head. Publish exactly one question asking whether "
+      + "to reopen the same change request or cancel the flow, then write {\"event\":\"agent-needs-human\"}.",
+  ));
 });
 
 test("rejects a review prompt without a pinned change request", async () => {
@@ -196,6 +203,11 @@ test("human input publishes only clarification questions", async () => {
   }));
 
   assert.match(prompt, /authorized human comment comment-17/);
+  assert.ok(prompt.includes(
+    "Human-input mode: interpret only the supplied authorized human comment. Do not perform stage work or publish "
+      + "stage artifacts or a review verdict. Accepted, rejected, or cancelled decisions publish nothing. A question "
+      + "or unclear decision may publish only the required clarification question.",
+  ));
   assert.match(prompt, /\{"event":"human-answer-accepted"\} requires no new provider publication/);
   assert.match(prompt, /\{"event":"human-answer-cancelled"\} requires no new provider publication/);
   assert.match(prompt, /\{"event":"human-answer-unclear"\} requires a marked question comment/);
