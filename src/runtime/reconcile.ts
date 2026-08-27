@@ -146,7 +146,11 @@ export async function reconcileTicket(
     next = advanceControlState(control, {
       stateId: result.stateId,
       resumeStateId: result.resumeStateId,
-      attemptSeries: applyAttemptActions(control.attemptSeries, result.actions),
+      attemptSeries: applyAttemptActions(
+        control.attemptSeries,
+        result.actions,
+        result.stateId === control.stateId,
+      ),
       changeRequest: normalizedChange(snapshot.changeRequest) ?? control.changeRequest,
     }, now(dependencies));
     await writeExistingControl(dependencies, ref, control, next);
@@ -498,9 +502,9 @@ function hasAcceptedQuestion(control: ControlState): boolean {
     || receipt?.humanGate?.verdict === "question"
     || receipt?.humanGate?.verdict === "unclear";
   return control.attemptSeries?.stateId === control.stateId
-    && current?.status === "succeeded"
+    && (current === null || current?.status === "succeeded" && receipt?.attemptId === current.attemptId)
     && awaitingAnswer
-    && receipt.attemptId === current.attemptId;
+    && receipt !== null;
 }
 
 async function firstAuthorizedComment(
@@ -540,9 +544,15 @@ function isMarked(body: string): boolean {
   return body.split(/\r?\n/, 1)[0]?.startsWith(AGENT_MARKER) ?? false;
 }
 
-function applyAttemptActions(series: AttemptSeries | null, actions: FlowActionName[]): AttemptSeries | null {
-  if (!series || !actions.includes("reset-retry-budget")) return series;
-  return { ...series, consumed: 0, current: null };
+function applyAttemptActions(
+  series: AttemptSeries | null,
+  actions: FlowActionName[],
+  selfTransition: boolean,
+): AttemptSeries | null {
+  if (!series) return null;
+  if (actions.includes("reset-retry-budget")) return { ...series, consumed: 0, current: null };
+  if (selfTransition && actions.includes("record-receipt")) return { ...series, current: null };
+  return series;
 }
 
 function normalizedChange(change: ProviderTicketSnapshot["changeRequest"]): ControlChangeRequest | null {

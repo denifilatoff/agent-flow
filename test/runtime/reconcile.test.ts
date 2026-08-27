@@ -866,6 +866,15 @@ test("enters needs-human for a closed change and reviews a new head", async (t) 
     assert.equal(updated.stateId, "needs-human");
     assert.equal(updated.resumeStateId, "review");
     assert.equal(launcher.requests.length, 1);
+
+    const updates = provider.updated;
+    const repeated = await reconcileTicket(dependencies(provider, launcher), TICKET);
+    const settled = parseControlComment(provider.snapshot.comments[index]!.body)!;
+    assert.equal(repeated.changed, false);
+    assert.equal(provider.updated, updates);
+    assert.equal(settled.resumeStateId, "review");
+    assert.deepEqual(settled.latestReceipt, questionReceipt());
+    assert.equal(launcher.requests.length, 1);
   });
 
   await t.test("head change", async () => {
@@ -1010,6 +1019,14 @@ test("needs-human question stays paused until a later authorized comment", async
   assert.deepEqual(launcher.requests, []);
   const controlCommentBody = provider.snapshot.comments.find((candidate) => candidate.id.startsWith("control-"))!.body;
   assert.equal(parseControlComment(controlCommentBody)?.humanGate?.verdict, "question");
+
+  const updates = provider.updated;
+  const repeated = await reconcileTicket(dependencies(provider, launcher), TICKET);
+  const settledBody = provider.snapshot.comments.find((candidate) => candidate.id.startsWith("control-"))!.body;
+  assert.equal(repeated.changed, false);
+  assert.equal(provider.updated, updates);
+  assert.equal(parseControlComment(settledBody)?.resumeStateId, "review");
+  assert.deepEqual(launcher.requests, []);
 
   const later = comment("later-answer", "Reopen it.", MAINTAINER, "2026-08-26T12:04:00.000Z");
   provider.snapshot.comments.push(later);
@@ -1159,31 +1176,41 @@ test("selects the first later unmarked authorized human comment", async () => {
   await assertRunnerAccepts(launcher.requests[0]!, provider);
 });
 
-test("keeps an unclear human verdict at the gate without relaunching the same input", async () => {
-  const provider = new FakeProvider();
-  const source = comment("answer", "Maybe.", MAINTAINER, "2026-08-26T10:43:00.000Z");
-  const gate: ControlHumanGate = {
-    sourceCommentId: source.id,
-    actor: source.actor,
-    verdict: "unclear",
-    interpretedByAttemptId: ATTEMPT,
-    notes: ["Clarification needed."],
-  };
-  const control = controlState({
-    stateId: "assessment-review",
-    attemptSeries: attemptSeries({ stateId: "assessment-review", inputRevision: source.id }),
-    latestReceipt: humanReceipt("unclear", source.id),
-    humanGate: gate,
-  });
-  installControl(provider, control);
-  provider.snapshot.comments.push(source);
-  const launcher = new FakeLauncher();
+test("consumes question and unclear receipts at a review gate", async (t) => {
+  for (const stateId of ["assessment-review", "plan-review"] as const) {
+    for (const verdict of ["question", "unclear"] as const) {
+      await t.test(`${stateId}: ${verdict}`, async () => {
+        const provider = new FakeProvider();
+        const source = comment("answer", "Maybe.", MAINTAINER, "2026-08-26T10:43:00.000Z");
+        const gate: ControlHumanGate = {
+          sourceCommentId: source.id,
+          actor: source.actor,
+          verdict,
+          interpretedByAttemptId: ATTEMPT,
+          notes: ["Clarification needed."],
+        };
+        const control = controlState({
+          stateId,
+          attemptSeries: attemptSeries({ stateId, inputRevision: source.id }),
+          latestReceipt: humanReceipt(verdict, source.id),
+          humanGate: gate,
+        });
+        installControl(provider, control);
+        provider.snapshot.comments.push(source);
+        const launcher = new FakeLauncher();
 
-  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+        const first = await reconcileTicket(dependencies(provider, launcher), TICKET);
+        const second = await reconcileTicket(dependencies(provider, launcher), TICKET);
 
-  assert.equal(outcome.stateId, "assessment-review");
-  assert.equal(provider.updated, 1);
-  assert.deepEqual(launcher.requests, []);
+        assert.equal(first.stateId, stateId);
+        assert.equal(second.changed, false);
+        assert.equal(provider.updated, 1);
+        const stored = provider.snapshot.comments.find((candidate) => candidate.id.startsWith("control-"))!.body;
+        assert.equal(parseControlComment(stored)?.latestReceipt?.humanGate?.verdict, verdict);
+        assert.deepEqual(launcher.requests, []);
+      });
+    }
+  }
 });
 
 test("an authorized blocked comment resets the series and resumes the stage", async () => {
