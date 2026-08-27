@@ -1,0 +1,57 @@
+import type { FlowEventType } from "../../src/flow/types.ts";
+
+const FLOW_EVENTS = {
+  "agent-succeeded": true,
+  "agent-needs-human": true,
+  "attempts-exhausted": true,
+  "review-approved": true,
+  "review-changes-requested": true,
+  "human-approved": true,
+  "human-changes-requested": true,
+  "human-question": true,
+  "human-unclear": true,
+  "human-cancelled": true,
+  "human-answer-accepted": true,
+  "human-answer-cancelled": true,
+  "human-answer-unclear": true,
+  "authorized-comment": true,
+  "change-request-updated": true,
+  "change-request-merged": true,
+  "change-request-closed": true,
+} satisfies Record<FlowEventType, true>;
+
+const PROTOCOL_TERMS = [
+  "AgentReceipt",
+  "AgentDecision",
+  "AGENT_FLOW_",
+  "agent-flow:",
+  "agent-stage:",
+  "artifactKind",
+  "ReceiptComment",
+  "ReceiptReview",
+  "flowInstanceId",
+  "attemptId",
+  "headSha",
+  "sourceCommentId",
+  "humanGate",
+  "apiVersion",
+  "stage mode",
+  "human-input mode",
+  "assessment-review",
+  "plan-review",
+  "needs-human",
+  "awaiting-merge",
+  "`succeeded`",
+  "`failed`",
+  "`approved`",
+  "`changes-requested`",
+  "`commented`",
+  "`cancelled`",
+  "`question`",
+  "`unclear`",
+  ...Object.keys(FLOW_EVENTS),
+];
+
+export const AGENT_PACKAGE_PROTOCOL_CONTRACT = new RegExp(
+  PROTOCOL_TERMS.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
+);

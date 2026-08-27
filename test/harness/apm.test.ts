@@ -11,6 +11,7 @@ import {
   compileAgentContext,
   type ApmCommandRunner,
 } from "../../src/harness/apm.ts";
+import { AGENT_PACKAGE_PROTOCOL_CONTRACT } from "../helpers/agent-package-contracts.ts";
 
 const execFile = promisify(execFileCallback);
 
@@ -247,26 +248,6 @@ test("compiles every package with domain-only role instructions", async (t) => {
     ["developer", ["codex"], /smallest change/],
     ["reviewer", ["codex"], /pinned head/],
   ] as const;
-  const protocolContract = new RegExp([
-    "AgentReceipt",
-    "AgentDecision",
-    "AGENT_FLOW_",
-    "agent-flow:",
-    "agent-stage:",
-    "agent-(?:succeeded|needs-human)",
-    "review-(?:approved|changes-requested)",
-    "human-(?:approved|changes-requested|question|unclear|cancelled|answer-accepted|answer-cancelled|answer-unclear)",
-    "artifactKind",
-    "Receipt(?:Comment|Review)",
-    "flowInstanceId|attemptId|sourceCommentId|humanGate",
-    "stage mode|human-input mode",
-    "assessment-review|plan-review|needs-human|awaiting-merge",
-    "`(?:succeeded|needs-human|failed|approved|changes-requested|commented|cancelled|question|unclear)`",
-    "apiVersion[\\s\\S]{0,160}flowInstanceId[\\s\\S]{0,160}attemptId[\\s\\S]{0,160}outcome[\\s\\S]{0,160}artifacts",
-    "kind[\\s\\S]{0,80}id[\\s\\S]{0,80}url[\\s\\S]{0,80}marker[\\s\\S]{0,80}artifactKind",
-    "kind[\\s\\S]{0,80}number[\\s\\S]{0,80}url[\\s\\S]{0,80}headSha[\\s\\S]{0,80}state",
-    "kind[\\s\\S]{0,80}id[\\s\\S]{0,80}url[\\s\\S]{0,80}headSha[\\s\\S]{0,80}verdict",
-  ].join("|"));
   for (const [agentId, targets, expected] of packages) {
     for (const target of targets) {
       const outputDirectory = join(root, `${agentId}-${target}`);
@@ -279,7 +260,7 @@ test("compiles every package with domain-only role instructions", async (t) => {
       );
       assert.match(result.instructions, expected);
       assert.match(result.instructions, /only entry agent/);
-      assert.doesNotMatch(result.instructions, protocolContract);
+      assert.doesNotMatch(result.instructions, AGENT_PACKAGE_PROTOCOL_CONTRACT);
       await execFile("apm", ["audit", "--ci", "--no-policy"], { cwd: result.runtimeDirectory });
       const packageDirectory = join(process.cwd(), `agent-packages/${agentId}`);
       await assert.rejects(access(join(packageDirectory, target === "claude" ? ".claude" : ".codex")), {

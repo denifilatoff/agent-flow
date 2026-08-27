@@ -3,6 +3,8 @@ import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import { parse } from "yaml";
 
+import { AGENT_PACKAGE_PROTOCOL_CONTRACT } from "../helpers/agent-package-contracts.ts";
+
 const PACKAGE_TARGETS = {
   architect: ["claude", "codex"],
   planner: ["claude", "codex"],
@@ -12,31 +14,45 @@ const PACKAGE_TARGETS = {
 
 const DOMAIN_CONTRACTS = {
   architect: [/\bscope\b/, /\bconstraints\b/, /\binterfaces\b/, /\brisks\b/, /acceptance conditions/],
-  planner: [/complete implementation plan/, /required changes/, /\border\b/, /affected interfaces/, /\btests\b/],
-  developer: [/smallest change/, /repository's instructions/, /review the diff/, /relevant test suite/],
+  planner: [
+    /complete implementation plan/,
+    /required changes/,
+    /\border\b/,
+    /affected interfaces/,
+    /\btests\b/,
+    /acceptance checks/,
+  ],
+  developer: [
+    /smallest change/,
+    /repository's instructions/,
+    /trace (?:the )?(?:relevant )?(?:callers|call sites?)/,
+    /review the diff/,
+    /relevant test suite/,
+  ],
   reviewer: [/pinned head/, /blocking/, /nonblocking/, /Do not edit code/, /Do not merge/, /native `COMMENT` review/],
 } as const;
 
-const PROTOCOL_CONTRACT = new RegExp([
-  "AgentReceipt",
-  "AgentDecision",
-  "AGENT_FLOW_",
-  "agent-flow:",
-  "agent-stage:",
-  "agent-(?:succeeded|needs-human)",
-  "review-(?:approved|changes-requested)",
-  "human-(?:approved|changes-requested|question|unclear|cancelled|answer-accepted|answer-cancelled|answer-unclear)",
-  "artifactKind",
-  "Receipt(?:Comment|Review)",
-  "flowInstanceId|attemptId|sourceCommentId|humanGate",
-  "stage mode|human-input mode",
-  "assessment-review|plan-review|needs-human|awaiting-merge",
-  "`(?:succeeded|needs-human|failed|approved|changes-requested|commented|cancelled|question|unclear)`",
-  "apiVersion[\\s\\S]{0,160}flowInstanceId[\\s\\S]{0,160}attemptId[\\s\\S]{0,160}outcome[\\s\\S]{0,160}artifacts",
-  "kind[\\s\\S]{0,80}id[\\s\\S]{0,80}url[\\s\\S]{0,80}marker[\\s\\S]{0,80}artifactKind",
-  "kind[\\s\\S]{0,80}number[\\s\\S]{0,80}url[\\s\\S]{0,80}headSha[\\s\\S]{0,80}state",
-  "kind[\\s\\S]{0,80}id[\\s\\S]{0,80}url[\\s\\S]{0,80}headSha[\\s\\S]{0,80}verdict",
-].join("|"));
+for (const event of [
+  "attempts-exhausted",
+  "authorized-comment",
+  "change-request-updated",
+  "change-request-merged",
+  "change-request-closed",
+]) {
+  test(`separation contract rejects the ${event} flow event`, () => {
+    assert.match(event, AGENT_PACKAGE_PROTOCOL_CONTRACT);
+  });
+}
+
+for (const [receipt, fields] of [
+  ["comment", "artifactKind marker url id kind"],
+  ["change request", "state headSha url number kind"],
+  ["review", "verdict headSha url id kind"],
+]) {
+  test(`separation contract rejects a reordered ${receipt} receipt field list`, () => {
+    assert.match(fields, AGENT_PACKAGE_PROTOCOL_CONTRACT);
+  });
+}
 
 function parsePrimitive(source: string): { frontmatter: Record<string, unknown>; body: string } {
   const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(source);
@@ -70,7 +86,7 @@ async function assertAgentPackage(packageName: keyof typeof PACKAGE_TARGETS, art
   assert.equal(instruction.frontmatter.applyTo, "**/*");
   assert.match(instruction.body, new RegExp(`\\b${packageName}\\b`));
   assert.match(instruction.body, new RegExp(`\\b${artifact}\\b`));
-  assert.doesNotMatch(`${instruction.body}\n${agent.body}`, PROTOCOL_CONTRACT);
+  assert.doesNotMatch(`${instruction.body}\n${agent.body}`, AGENT_PACKAGE_PROTOCOL_CONTRACT);
 }
 
 test("architect package has one entry agent and a lockfile", async () => {
