@@ -48,6 +48,41 @@ test("locks the runtime image, tools, and controller service", async () => {
   assertMountContract(controller.volumes ?? []);
 });
 
+test("keeps pull requests unprivileged and publishes verified multi-arch images", async () => {
+  const workflow = parse(await readFile(".github/workflows/build.yml", "utf8")) as BuildWorkflow;
+
+  assert.deepEqual(Object.keys(workflow.on).sort(), ["pull_request", "push", "workflow_dispatch"]);
+  assert.deepEqual(workflow.on.push, { branches: ["main"], tags: ["v*"] });
+  assert.deepEqual(workflow.permissions, { contents: "read" });
+
+  const imageCheck = workflow.jobs["image-check"];
+  assert.equal(imageCheck?.if, "github.event_name == 'pull_request'");
+  assert.equal(imageCheck?.needs, "verify");
+  assert.equal(stepUsing(imageCheck, "docker/build-push-action").with?.push, false);
+  for (const job of [workflow.jobs.verify, imageCheck]) assertUnprivilegedImageJob(job, workflow.permissions);
+
+  const publish = workflow.jobs.publish;
+  assert.equal(publish?.if, "github.event_name != 'pull_request'");
+  assert.equal(publish?.needs, "verify");
+  assert.deepEqual(publish?.permissions, { contents: "read", packages: "write" });
+  const publishBuild = stepUsing(publish, "docker/build-push-action");
+  assert.equal(publishBuild.with?.push, true);
+  assert.equal(publishBuild.with?.platforms, "linux/amd64,linux/arm64");
+
+  const metadata = stepUsing(publish, "docker/metadata-action");
+  const tags = String(metadata.with?.tags);
+  for (const tag of ["value=edge", "type=sha,prefix=sha-", "type=semver,pattern={{version}}",
+    "type=semver,pattern={{major}}.{{minor}}", "value=latest"]) {
+    assert.match(tags, new RegExp(escapeRegex(tag)));
+  }
+
+  for (const job of Object.values(workflow.jobs)) {
+    for (const step of job.steps ?? []) {
+      if (step.uses) assert.match(step.uses, /^[^@]+@[a-f0-9]{40}$/);
+    }
+  }
+});
+
 test("rejects runtime instructions placed only in a build stage", () => {
   const digest = "a".repeat(64);
   const dockerfile = `FROM node@sha256:${digest} AS build
@@ -79,6 +114,42 @@ interface ControllerService {
   ports?: string[];
   volumes?: string[];
   healthcheck?: unknown;
+}
+
+interface BuildWorkflow {
+  on: Record<string, unknown> & { push?: unknown };
+  permissions: Record<string, string>;
+  jobs: Record<string, WorkflowJob>;
+}
+
+interface WorkflowJob {
+  if?: string;
+  needs?: string;
+  permissions?: Record<string, string>;
+  steps?: WorkflowStep[];
+}
+
+interface WorkflowStep {
+  uses?: string;
+  with?: Record<string, unknown>;
+}
+
+function stepUsing(job: WorkflowJob | undefined, action: string): WorkflowStep {
+  const step = job?.steps?.find((candidate) => candidate.uses?.startsWith(`${action}@`));
+  assert.ok(step, `missing ${action} step`);
+  return step;
+}
+
+function assertUnprivilegedImageJob(job: WorkflowJob | undefined, inheritedPermissions: Record<string, string>): void {
+  assert.deepEqual(job?.permissions ?? inheritedPermissions, { contents: "read" });
+  assert.equal(job?.steps?.some((step) => step.uses?.startsWith("docker/login-action@")), false);
+  for (const step of job?.steps?.filter((candidate) => candidate.uses?.startsWith("docker/build-push-action@")) ?? []) {
+    assert.notEqual(step.with?.push, true);
+  }
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function uncomment(source: string): string {
