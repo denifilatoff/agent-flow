@@ -83,11 +83,13 @@ export interface FixtureRun {
   compilations(): Promise<Array<Omit<RoutingEvent, "kind">>>;
   decisions(): Promise<AgentDecision[]>;
   finish(): Promise<void>;
+  humanAnswers(): Promise<ProviderComment[]>;
   latestAgentComment(): Promise<ProviderComment | null>;
   maximumConcurrentAttempts(): Promise<number>;
   mergeChangeRequest(): Promise<void>;
   reconcile(): Promise<void>;
   receipts(): Promise<AgentReceipt[]>;
+  reviewRequests(): Promise<string[]>;
   removeActivation(): Promise<void>;
   restart(): Promise<void>;
   routing(): Promise<Array<Omit<RoutingEvent, "kind">>>;
@@ -271,6 +273,11 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
       await run.mergeChangeRequest();
       await untilState("done");
     },
+    async humanAnswers() {
+      return state.comments
+        .filter((comment) => comment.actor.providerId === MAINTAINER.providerId)
+        .map((comment) => state.normalizedComment(comment));
+    },
     async latestAgentComment() {
       const comment = state.comments.toReversed().find((candidate) => candidate.body.startsWith("<!-- agent-flow:v1"));
       return comment ? state.normalizedComment(comment) : null;
@@ -279,6 +286,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     async mergeChangeRequest() { state.setChangeState("merged"); },
     reconcile,
     async receipts() { return state.acceptedReceipts; },
+    async reviewRequests() { return [...state.reviewRequests]; },
     async removeActivation() { state.removeActivation(); },
     restart,
     routing: async () => state.routing,
@@ -321,6 +329,7 @@ class FixtureState {
   readonly ref: { provider: ProviderKind; repository: string; number: number };
   readonly comments: StoredComment[] = [];
   readonly reviews = new Map<string, StoredReview>();
+  readonly reviewRequests: string[] = [];
   readonly acceptedReceipts: AgentReceipt[] = [];
   readonly nextModes = new Map<string, AttemptMode[]>();
   readonly activeAttempts = new Set<string>();
@@ -584,10 +593,26 @@ class FixtureState {
     if (method === "GET" && pull) return json(response, 200, this.githubPull());
     const reviews = new RegExp(`^repos/${this.repository}/pulls/(\\d+)/reviews$`).exec(path);
     if (method === "GET" && reviews) {
+      if (!this.validChangeNumber(reviews[1]!)) return json(response, 400, { message: "unexpected change number" });
+      const page = this.reviewPage(url);
+      if (page === null) return json(response, 400, { message: "invalid review pagination" });
+      this.reviewRequests.push(`${path}${url.search}`);
+      if (page === 1) {
+        const next = `${this.apiUrl}/${path}?per_page=100&page=2`;
+        return json(response, 200, [this.githubReview(this.unrelatedReview())], {
+          link: `<${next}>; rel="next"`,
+        });
+      }
       return json(response, 200, [...this.reviews.values()].map((review) => this.githubReview(review)));
     }
     const review = new RegExp(`^repos/${this.repository}/pulls/(\\d+)/reviews/(\\d+)$`).exec(path);
-    if (method === "GET" && review) return json(response, 200, this.githubReview(this.reviews.get(review[2]!)!));
+    if (method === "GET" && review) {
+      if (!this.validChangeNumber(review[1]!)) return json(response, 400, { message: "unexpected change number" });
+      const stored = this.reviews.get(review[2]!);
+      if (!stored) return json(response, 404, { message: "review is missing" });
+      this.reviewRequests.push(path);
+      return json(response, 200, this.githubReview(stored));
+    }
     json(response, 404, { message: `unhandled GitHub route ${method} ${path}` });
   }
 
@@ -630,10 +655,23 @@ class FixtureState {
     if (method === "GET" && merge) return json(response, 200, this.gitlabMerge());
     const reviews = new RegExp(`^${project}/merge_requests/(\\d+)/notes$`).exec(path);
     if (method === "GET" && reviews) {
+      if (!this.validChangeNumber(reviews[1]!)) return json(response, 400, { message: "unexpected change number" });
+      const page = this.reviewPage(url);
+      if (page === null) return json(response, 400, { message: "invalid review pagination" });
+      this.reviewRequests.push(`${path}${url.search}`);
+      if (page === 1) {
+        return json(response, 200, [this.gitlabReview(this.unrelatedReview())], { "x-next-page": "2" });
+      }
       return json(response, 200, [...this.reviews.values()].map((review) => this.gitlabReview(review)));
     }
     const review = new RegExp(`^${project}/merge_requests/(\\d+)/notes/(\\d+)$`).exec(path);
-    if (method === "GET" && review) return json(response, 200, this.gitlabReview(this.reviews.get(review[2]!)!));
+    if (method === "GET" && review) {
+      if (!this.validChangeNumber(review[1]!)) return json(response, 400, { message: "unexpected change number" });
+      const stored = this.reviews.get(review[2]!);
+      if (!stored) return json(response, 404, { message: "review is missing" });
+      this.reviewRequests.push(path);
+      return json(response, 200, this.gitlabReview(stored));
+    }
     json(response, 404, { message: `unhandled GitLab route ${method} ${path}` });
   }
 
@@ -642,6 +680,30 @@ class FixtureState {
     return !label || this.labels.includes(label)
       ? [this.provider === "github" ? { number: this.number } : { iid: this.number }]
       : [];
+  }
+
+  private validChangeNumber(value: string): boolean {
+    return this.change !== null && value === String(this.change.number);
+  }
+
+  private reviewPage(url: URL): 1 | 2 | null {
+    if ([...url.searchParams.keys()].some((name) => name !== "per_page" && name !== "page")) return null;
+    const perPage = url.searchParams.getAll("per_page");
+    const pages = url.searchParams.getAll("page");
+    if (perPage.length !== 1 || perPage[0] !== "100" || pages.length > 1) return null;
+    if (pages.length === 0) return 1;
+    return pages[0] === "2" ? 2 : null;
+  }
+
+  private unrelatedReview(): StoredReview {
+    if (!this.change) throw new Error("review change request is missing");
+    return {
+      id: "700",
+      body: "Unrelated fixture review.",
+      headSha: this.change.headSha,
+      verdict: "commented",
+      createdAt: this.timestamp(),
+    };
   }
 
   private githubRepository() {
@@ -923,12 +985,18 @@ async function requestBody(request: import("node:http").IncomingMessage): Promis
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-function json(response: import("node:http").ServerResponse, status: number, value: unknown): void {
+function json(
+  response: import("node:http").ServerResponse,
+  status: number,
+  value: unknown,
+  headers: Record<string, string> = {},
+): void {
   response.writeHead(status, {
     "content-type": "application/json",
     "x-ratelimit-limit": "5000",
     "x-ratelimit-remaining": "4999",
     "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 3600),
+    ...headers,
   });
   response.end(`${JSON.stringify(value)}\n`);
 }
