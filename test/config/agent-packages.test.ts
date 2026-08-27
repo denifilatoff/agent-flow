@@ -10,15 +10,33 @@ const PACKAGE_TARGETS = {
   reviewer: ["codex"],
 } as const;
 
-const ARTIFACT_CONTRACTS = {
-  architect: /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/,
-  planner: /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/,
-  developer: /exactly\s+`kind: "change-request"`,\s+`number`,\s+`url`,\s+`headSha`, and `state`/,
-  reviewer: /exactly\s+`kind: "review"`,\s+`id`,\s+`url`,\s+`headSha`, and `verdict`/,
+const DOMAIN_CONTRACTS = {
+  architect: [/\bscope\b/, /\bconstraints\b/, /\binterfaces\b/, /\brisks\b/, /acceptance conditions/],
+  planner: [/complete implementation plan/, /required changes/, /\border\b/, /affected interfaces/, /\btests\b/],
+  developer: [/smallest change/, /repository's instructions/, /review the diff/, /relevant test suite/],
+  reviewer: [/pinned head/, /blocking/, /nonblocking/, /Do not edit code/, /Do not merge/, /native `COMMENT` review/],
 } as const;
 
-const HUMAN_INPUT_ARTIFACT_MATRIX =
-  /For a `question` or `unclear`\s+verdict,[\s\S]*exactly\s+one marked question\s+artifact[\s\S]*`kind: "comment"`[\s\S]*`artifactKind: "question"`[\s\S]*For `approved`, `changes-requested`, or `cancelled`,[\s\S]*`artifacts`\s+to `\[\]`/;
+const PROTOCOL_CONTRACT = new RegExp([
+  "AgentReceipt",
+  "AgentDecision",
+  "AGENT_FLOW_",
+  "agent-flow:",
+  "agent-stage:",
+  "agent-(?:succeeded|needs-human)",
+  "review-(?:approved|changes-requested)",
+  "human-(?:approved|changes-requested|question|unclear|cancelled|answer-accepted|answer-cancelled|answer-unclear)",
+  "artifactKind",
+  "Receipt(?:Comment|Review)",
+  "flowInstanceId|attemptId|sourceCommentId|humanGate",
+  "stage mode|human-input mode",
+  "assessment-review|plan-review|needs-human|awaiting-merge",
+  "`(?:succeeded|needs-human|failed|approved|changes-requested|commented|cancelled|question|unclear)`",
+  "apiVersion[\\s\\S]{0,160}flowInstanceId[\\s\\S]{0,160}attemptId[\\s\\S]{0,160}outcome[\\s\\S]{0,160}artifacts",
+  "kind[\\s\\S]{0,80}id[\\s\\S]{0,80}url[\\s\\S]{0,80}marker[\\s\\S]{0,80}artifactKind",
+  "kind[\\s\\S]{0,80}number[\\s\\S]{0,80}url[\\s\\S]{0,80}headSha[\\s\\S]{0,80}state",
+  "kind[\\s\\S]{0,80}id[\\s\\S]{0,80}url[\\s\\S]{0,80}headSha[\\s\\S]{0,80}verdict",
+].join("|"));
 
 function parsePrimitive(source: string): { frontmatter: Record<string, unknown>; body: string } {
   const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(source);
@@ -31,7 +49,7 @@ async function assertAgentPackage(packageName: keyof typeof PACKAGE_TARGETS, art
   const manifest = parse(await readFile(new URL("apm.yml", packageRoot), "utf8")) as Record<string, unknown>;
 
   assert.equal(manifest.name, packageName);
-  assert.equal(manifest.version, "1.0.1");
+  assert.equal(manifest.version, "1.0.2");
   assert.deepEqual(manifest.targets, PACKAGE_TARGETS[packageName]);
   await readFile(new URL("apm.lock.yaml", packageRoot), "utf8");
 
@@ -40,10 +58,7 @@ async function assertAgentPackage(packageName: keyof typeof PACKAGE_TARGETS, art
   const agent = parsePrimitive(await readFile(new URL(`.apm/agents/${agentFiles[0]}`, packageRoot), "utf8"));
   assert.equal(agent.frontmatter.name, packageName);
   assert.match(agent.body, new RegExp(`\\b${artifact}\\b`));
-  assert.match(agent.body, ARTIFACT_CONTRACTS[packageName]);
-  if (packageName === "developer" || packageName === "reviewer") {
-    assert.match(agent.body, /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/);
-  }
+  for (const contract of DOMAIN_CONTRACTS[packageName]) assert.match(agent.body, contract);
 
   const instructionFiles = (await readdir(new URL(".apm/instructions/", packageRoot))).filter((file) =>
     file.endsWith(".instructions.md"),
@@ -54,9 +69,8 @@ async function assertAgentPackage(packageName: keyof typeof PACKAGE_TARGETS, art
   );
   assert.equal(instruction.frontmatter.applyTo, "**/*");
   assert.match(instruction.body, new RegExp(`\\b${packageName}\\b`));
-  assert.match(instruction.body, /AGENT_FLOW_CONTEXT_PATH/);
-  assert.match(instruction.body, /AGENT_FLOW_RECEIPT_PATH/);
   assert.match(instruction.body, new RegExp(`\\b${artifact}\\b`));
+  assert.doesNotMatch(`${instruction.body}\n${agent.body}`, PROTOCOL_CONTRACT);
 }
 
 test("architect package has one entry agent and a lockfile", async () => {
@@ -68,14 +82,14 @@ test("planner package has one entry agent and a lockfile", async () => {
 });
 
 test("developer package has one entry agent and a lockfile", async () => {
-  await assertAgentPackage("developer", "change-request");
+  await assertAgentPackage("developer", "change request");
 });
 
 test("reviewer package has one entry agent and a lockfile", async () => {
   await assertAgentPackage("reviewer", "review");
 });
 
-test("human-input receipts always use the schema-compatible outcome", async () => {
+test("role packages interpret human feedback without defining flow decisions", async () => {
   for (const packageName of Object.keys(PACKAGE_TARGETS)) {
     const agent = parsePrimitive(
       await readFile(
@@ -83,130 +97,65 @@ test("human-input receipts always use the schema-compatible outcome", async () =
         "utf8",
       ),
     );
-    assert.match(
-      agent.body,
-      /In human-input\s+mode, always set receipt `outcome` to `succeeded`/,
-    );
-    assert.match(
-      agent.body,
-      /set `humanGate\.notes` to an array of one or more nonempty strings, never to a string/,
-    );
-    assert.match(agent.body, /Do not add a top-level `notes` field/);
-    assert.match(agent.body, HUMAN_INPUT_ARTIFACT_MATRIX);
+    assert.match(agent.body, /plain (?:meaning|language)/);
+    assert.match(agent.body, /clarif/);
   }
 });
 
-test("developer requires a change request only for successful stage-mode development", async () => {
+test("developer keeps change-request publication in its domain scope", async () => {
   const developer = parsePrimitive(
     await readFile(
       new URL("../../agent-packages/developer/.apm/agents/developer.agent.md", import.meta.url),
       "utf8",
     ),
   );
-  assert.match(developer.body, /A successful stage-mode development result has one artifact containing exactly/);
+  assert.match(developer.body, /change request/);
 });
 
-test("reviewer distinguishes open, closed-unmerged, and merged stage inputs", async () => {
+test("reviewer reviews only the pinned head and does not change the repository", async () => {
   const reviewer = parsePrimitive(
     await readFile(
       new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
       "utf8",
     ),
   );
-  assert.match(reviewer.body, /An open linked change request in stage mode uses the normal pinned-head review path\./);
-  assert.match(
-    reviewer.body,
-    /A closed, unmerged linked change request in stage mode is allowed only for the one-shot reopen-or-cancel question/,
-  );
-  assert.match(reviewer.body, /Do not review the closed head or publish review metadata\s+or a verdict\./);
-  assert.match(reviewer.body, /A merged linked change request must never use the reopen-or-cancel path\./);
+  assert.match(reviewer.body, /pinned head/);
+  assert.match(reviewer.body, /before publication/);
+  assert.match(reviewer.body, /publish no review/);
+  assert.match(reviewer.body, /Do not edit code/);
+  assert.match(reviewer.body, /Do not merge/);
 });
 
-test("reviewer returns the exact closed-change question receipt", async () => {
+test("reviewer separates blocking from nonblocking findings", async () => {
   const reviewer = parsePrimitive(
     await readFile(
       new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
       "utf8",
     ),
   );
-  assert.match(
-    reviewer.body,
-    /<!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=question -->/,
-  );
-  assert.match(reviewer.body, /Read the\s+published question back through the provider/);
-  assert.match(reviewer.body, /set `outcome` to `needs-human`/);
-  assert.match(reviewer.body, /include exactly that one\s+`ReceiptComment`/);
-  assert.match(reviewer.body, /Do not include `ReceiptReview` or `humanGate`/);
+  assert.match(reviewer.body, /blocking finding/);
+  assert.match(reviewer.body, /nonblocking finding/);
+  assert.match(reviewer.body, /Request changes only/);
 });
 
-test("reviewer interprets a later authorized answer without reviewing", async () => {
+test("reviewer interprets human feedback without inventing command syntax", async () => {
   const reviewer = parsePrimitive(
     await readFile(
       new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
       "utf8",
     ),
   );
-  assert.match(
-    reviewer.body,
-    /Human-input mode interprets the authorized unmarked comment as `reopen`, `cancel`, or `unclear`/,
-  );
-  assert.match(reviewer.body, /Map a request to cancel to `cancelled`/);
-  assert.match(
-    reviewer.body,
-    /In human-input mode, always set receipt `outcome` to `succeeded`[\s\S]*include `humanGate`/,
-  );
-  assert.match(reviewer.body, /`unclear` or question result publishes a marked clarification question/);
-  assert.match(reviewer.body, /Do not publish a review verdict in human-input\s+mode\./);
+  assert.match(reviewer.body, /plain meaning/);
+  assert.match(reviewer.body, /Do not invent command syntax/);
+  assert.match(reviewer.body, /ask a clarification question/);
 });
 
-test("reviewer limits pinned-head and review receipts to open stage mode", async () => {
+test("reviewer keeps the GitHub native self-review fallback", async () => {
   const reviewer = parsePrimitive(
     await readFile(
       new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
       "utf8",
     ),
   );
-  assert.match(reviewer.body, /Only open stage mode reviews the pinned head/);
-  assert.match(reviewer.body, /Only a successful open stage-mode review writes a `ReceiptReview`/);
-  assert.match(reviewer.body, /Closed stage mode and human-input mode never review code or emit a review verdict/);
-});
-
-test("reviewer package instruction preserves the mode-specific receipt contract", async () => {
-  const instruction = parsePrimitive(
-    await readFile(
-      new URL(
-        "../../agent-packages/reviewer/.apm/instructions/reviewer.instructions.md",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  assert.match(instruction.body, /Open\s+stage mode reviews only the pinned head and writes a review receipt/);
-  assert.match(instruction.body, /Closed stage mode publishes the reopen-or-cancel\s+question/);
-  assert.match(instruction.body, /Human-input mode interprets the authorized answer without reviewing code/);
-  assert.match(instruction.body, /Every mode\s+writes its appropriate `AgentReceipt` to `AGENT_FLOW_RECEIPT_PATH`/);
-});
-
-test("reviewer publishes review metadata immediately after the common marker", async () => {
-  const reviewer = parsePrimitive(
-    await readFile(
-      new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
-      "utf8",
-    ),
-  );
-  assert.match(
-    reviewer.body,
-    /```text\r?\n<!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=review -->\r?\n<!-- agent-flow-review:v1 head=<sha> verdict=<verdict> -->\r?\n```/,
-  );
-  assert.match(reviewer.body, /40-character lowercase hexadecimal SHA/);
-  assert.match(reviewer.body, /exactly `approved`,\s*`changes-requested`, or `commented`/);
-  assert.match(reviewer.body, /Preserve both marker lines during provider readback/);
-  assert.match(reviewer.body, /publish no verdict.*head.*differs/is);
-  assert.match(reviewer.body, /GitHub self-approval fallback[\s\S]*native `COMMENT` review/);
-  assert.match(reviewer.body, /successful open stage-mode review writes a `ReceiptReview`/);
-  assert.doesNotMatch(reviewer.body, /also record the marked provider comment/);
-  assert.match(
-    reviewer.body,
-    /Human-input clarification questions[\s\S]*common marker[\s\S]*omit review metadata/,
-  );
+  assert.match(reviewer.body, /GitHub self-review fallback[\s\S]*native `COMMENT` review/);
 });

@@ -229,7 +229,7 @@ test("rejects package symlinks and overlapping output", async (t) => {
   );
 });
 
-test("compiles every package with explicit receipt artifact discriminators", async (t) => {
+test("compiles every package with domain-only role instructions", async (t) => {
   try {
     await execFile("apm", ["--version"]);
   } catch (error) {
@@ -242,11 +242,31 @@ test("compiles every package with explicit receipt artifact discriminators", asy
   const root = await mkdtemp(join(tmpdir(), "agent-flow-apm-real-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const packages = [
-    ["architect", ["claude", "codex"], /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/],
-    ["planner", ["claude", "codex"], /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/],
-    ["developer", ["codex"], /exactly\s+`kind: "change-request"`,\s+`number`,\s+`url`,\s+`headSha`, and `state`/],
-    ["reviewer", ["codex"], /exactly\s+`kind: "review"`,\s+`id`,\s+`url`,\s+`headSha`, and `verdict`/],
+    ["architect", ["claude", "codex"], /complete assessment/],
+    ["planner", ["claude", "codex"], /complete implementation plan/],
+    ["developer", ["codex"], /smallest change/],
+    ["reviewer", ["codex"], /pinned head/],
   ] as const;
+  const protocolContract = new RegExp([
+    "AgentReceipt",
+    "AgentDecision",
+    "AGENT_FLOW_",
+    "agent-flow:",
+    "agent-stage:",
+    "agent-(?:succeeded|needs-human)",
+    "review-(?:approved|changes-requested)",
+    "human-(?:approved|changes-requested|question|unclear|cancelled|answer-accepted|answer-cancelled|answer-unclear)",
+    "artifactKind",
+    "Receipt(?:Comment|Review)",
+    "flowInstanceId|attemptId|sourceCommentId|humanGate",
+    "stage mode|human-input mode",
+    "assessment-review|plan-review|needs-human|awaiting-merge",
+    "`(?:succeeded|needs-human|failed|approved|changes-requested|commented|cancelled|question|unclear)`",
+    "apiVersion[\\s\\S]{0,160}flowInstanceId[\\s\\S]{0,160}attemptId[\\s\\S]{0,160}outcome[\\s\\S]{0,160}artifacts",
+    "kind[\\s\\S]{0,80}id[\\s\\S]{0,80}url[\\s\\S]{0,80}marker[\\s\\S]{0,80}artifactKind",
+    "kind[\\s\\S]{0,80}number[\\s\\S]{0,80}url[\\s\\S]{0,80}headSha[\\s\\S]{0,80}state",
+    "kind[\\s\\S]{0,80}id[\\s\\S]{0,80}url[\\s\\S]{0,80}headSha[\\s\\S]{0,80}verdict",
+  ].join("|"));
   for (const [agentId, targets, expected] of packages) {
     for (const target of targets) {
       const outputDirectory = join(root, `${agentId}-${target}`);
@@ -259,27 +279,7 @@ test("compiles every package with explicit receipt artifact discriminators", asy
       );
       assert.match(result.instructions, expected);
       assert.match(result.instructions, /only entry agent/);
-      if (agentId === "developer" || agentId === "reviewer") {
-        assert.match(
-          result.instructions,
-          /exactly\s+`kind: "comment"`,\s+`id`,\s+`url`,\s+`marker`, and `artifactKind`/,
-        );
-      }
-      assert.match(
-        result.instructions,
-        /For a `question` or `unclear`\s+verdict,[\s\S]*exactly\s+one marked question\s+artifact[\s\S]*`kind: "comment"`[\s\S]*`artifactKind: "question"`[\s\S]*For `approved`, `changes-requested`, or `cancelled`,[\s\S]*`artifacts`\s+to `\[\]`/,
-      );
-      assert.match(
-        result.instructions,
-        /set `humanGate\.notes` to an array of one or more nonempty strings, never to a string/,
-      );
-      assert.match(result.instructions, /Do not add a top-level `notes` field/);
-      if (agentId === "developer") {
-        assert.match(
-          result.instructions,
-          /A successful stage-mode development result has one artifact containing exactly/,
-        );
-      }
+      assert.doesNotMatch(result.instructions, protocolContract);
       await execFile("apm", ["audit", "--ci", "--no-policy"], { cwd: result.runtimeDirectory });
       const packageDirectory = join(process.cwd(), `agent-packages/${agentId}`);
       await assert.rejects(access(join(packageDirectory, target === "claude" ? ".claude" : ".codex")), {

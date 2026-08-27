@@ -1,5 +1,5 @@
 name: planner
-version: 1.0.1
+version: 1.0.2
 description: Turn an accepted assessment into a complete implementation plan.
 author: agent-flow
 targets: [claude, codex]
