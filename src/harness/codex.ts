@@ -60,7 +60,12 @@ export function createCodexAdapter(
       }
       const prompt = buildPrompt(
         input.compiledAgent.instructions,
-        codexStagePrompt(input.stagePrompt, contextPath, decisionPath),
+        codexStagePrompt(
+          input.stagePrompt,
+          contextPath,
+          decisionPath,
+          input.providerCredential.provider === "gitlab" && input.providerCredential.name === "OAUTH_TOKEN",
+        ),
       );
       return runHarnessProcess("codex", {
         file: "codex",
@@ -84,13 +89,20 @@ export function createCodexAdapter(
   };
 }
 
-function codexStagePrompt(stagePrompt: string, contextPath: string, decisionPath: string): string {
+function codexStagePrompt(
+  stagePrompt: string,
+  contextPath: string,
+  decisionPath: string,
+  usesGitLabKeyring: boolean,
+): string {
   return `${stagePrompt.trim()}
 
 Parse this JSON object and pass both string values unchanged when invoking the configured APM entry agent:
 ${JSON.stringify({ contextPath, decisionPath })}
 The entry agent must read contextPath and write one AgentDecision to decisionPath.
-If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_DECISION_PATH, it may use these parsed paths directly.`;
+If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_DECISION_PATH, it may use these parsed paths directly.${usesGitLabKeyring ? `
+When invoking the configured APM entry agent, include this instruction:
+For this GitLab OAuth attempt, retry a \`glab\` authentication or API command with elevated permissions if it fails because the sandbox cannot access the keyring. Do not declare GitLab authentication unavailable unless that elevated retry also fails.` : ""}`;
 }
 
 async function seedCodexHome(auth: CodexAuthSources, home: string): Promise<void> {

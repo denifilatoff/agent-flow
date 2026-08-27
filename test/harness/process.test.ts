@@ -483,6 +483,34 @@ test("passes a GitLab personal token without seeding OAuth metadata", async (t) 
   assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
 });
 
+test("instructs the Codex entry agent to elevate a sandbox-blocked GitLab keyring retry", async (t) => {
+  const fixture = await runFixture("codex");
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  fixture.input.providerCredential = {
+    provider: "gitlab",
+    name: "OAUTH_TOKEN",
+    value: "gitlab-ticket-token",
+    apiUrl: "https://gitlab.test/api/v4",
+  };
+  const processes = processFixture();
+  processes.dependencies.runCommand = async (_file, args) => ({
+    stdout: `${GITLAB_OAUTH_METADATA[args[2]!] ?? ""}\n`,
+    stderr: "",
+  });
+  const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+
+  const pending = adapter.run(fixture.input);
+  await waitForSpawn(processes.calls);
+  const call = processes.calls[0]!;
+  t.after(() => call.child.finish(0, null));
+  assert.match(
+    Buffer.concat(call.child.input).toString(),
+    /When invoking the configured APM entry agent, include this instruction:\nFor this GitLab OAuth attempt, retry a `glab` authentication or API command with elevated permissions if it fails because the sandbox cannot access the keyring\. Do not declare GitLab authentication unavailable unless that elevated retry also fails\./,
+  );
+  call.child.finish(0, null);
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
+});
+
 test("rejects unsafe harness environment names and values", () => {
   assert.throws(() => harnessEnvironment({ "BAD=NAME": "token" }), /invalid harness environment name/);
   assert.throws(() => harnessEnvironment({ GITHUB_TOKEN: "bad\0token" }), /invalid harness environment value/);
