@@ -144,7 +144,9 @@ not both model-owned and configured on the current state.
 
 After a successful harness exit, the controller reads the decision and discovers its evidence through the provider:
 
-- `agent-succeeded` requires the stage's marked assessment or plan comment, or the linked open change request;
+- `agent-succeeded` requires the stage's marked assessment or plan comment. Development requires the linked open change
+  request to be created or updated during the current attempt. A retry reuses and updates the same linked open change
+  request during that attempt instead of creating a duplicate;
 - `agent-needs-human` requires one marked question comment;
 - `review-approved` and `review-changes-requested` require one native review on the pinned head whose logical verdict
   agrees with the decision;

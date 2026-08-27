@@ -147,7 +147,13 @@ test("renders event-specific evidence and the pinned change identity", async () 
     resultContract: "development",
     changeRequest,
   }));
-  assert.match(development, /linked open change request/);
+  assert.ok(development.includes(
+    '{"event":"agent-succeeded"} requires a linked open change request created or updated during this attempt.',
+  ));
+  assert.ok(development.includes(
+    "If the same linked open change request already exists from an earlier retry, update that same change request "
+      + "during this attempt and do not create a duplicate.",
+  ));
 
   const review = renderRuntimePrompt(promptInput(flow, {
     stateId: "review",

@@ -126,7 +126,11 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
     if (input.resultContract === "plan") {
       return `a marked plan comment beginning exactly with ${marker(input, "plan")}`;
     }
-    if (input.resultContract === "development") return "a linked open change request";
+    if (input.resultContract === "development") {
+      return "a linked open change request created or updated during this attempt. If the same linked open change "
+        + "request already exists from an earlier retry, update that same change request during this attempt and do not "
+        + "create a duplicate";
+    }
   }
   throw new Error(`result contract ${input.resultContract} does not support ${event}`);
 }
