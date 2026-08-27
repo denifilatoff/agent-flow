@@ -1,10 +1,12 @@
 # Agent flow controller architecture
 
-Status: Draft
+Status: Approved for prototype
 
 This document records the agreed target architecture for a controller that partially automates development work from
-GitHub or GitLab tickets. It is not a description of the current `reviewctl` implementation and does not replace the
-accepted MVP design in [`architecture.md`](architecture.md).
+GitHub or GitLab tickets.
+
+The prototype's executable YAML and JSON contracts are defined in
+[`prototype-contracts.md`](prototype-contracts.md) and `schemas/v1/`.
 
 ## Purpose
 
@@ -15,9 +17,8 @@ on the configured flow policy.
 The controller coordinates the work. Agents remain responsible for their domain work and publish their own final
 results. GitHub or GitLab is the source of truth for every operational decision.
 
-The current repository is only a temporary home for this design. The target implementation may replace the existing
-`reviewctl` code, use another language, move to another repository, or take another name. Existing code is reused only
-when it shortens the implementation without weakening these invariants.
+The implementation is greenfield. It uses existing libraries and provider capabilities when they shorten the work
+without weakening these invariants.
 
 ## Agreed invariants
 
@@ -31,7 +32,7 @@ when it shortens the implementation without weakening these invariants.
   the ticket state ambiguous or change the next valid transition.
 - Agents publish final artifacts and outcomes to the provider. They do not publish complete session transcripts.
 - Each flow instance has one machine-marked control comment. The controller updates it in place with the current state,
-  retry consumption, attempt metadata, and latest receipts.
+  retry consumption, attempt metadata, and the latest controller-verified attempt result.
 - The control comment contains the flow instance identity and pinned configuration revision. Its SHA field changes only
   during an explicit migration.
 - The current XState state is exposed as exactly one controller-owned `agent-stage:<state-id>` label for provider
@@ -42,9 +43,16 @@ when it shortens the implementation without weakening these invariants.
 
 - Flow and agent configuration lives in one Git repository.
 - A new flow instance pins the configuration repository commit SHA that was current when the instance started.
+- The controller accepts an absolute local repository path or a credential-free `https://` or `file://` Git URL. For
+  a URL, it clones or fetches one bare mirror under the data directory during startup.
+- A controller process prepares that mirror once. Reconciliation reads only the prepared repository, so remote changes
+  become available after a service restart and never move an active flow implicitly.
+- Each materialized revision retains a minimal Git object store. The controller verifies its files against the pinned
+  commit before loading them, even when a later history rewrite and garbage collection remove the commit from the
+  startup mirror.
 - The controller records that SHA in the control comment it creates for the instance.
-- The pinned configuration revision includes every `apm.lock` produced for the agent catalog. External APM artifacts
-  must resolve through a committed lockfile.
+- The pinned configuration revision includes every `apm.lock.yaml` produced for the agent catalog. External APM
+  artifacts must resolve through a committed lockfile.
 - Fetching a newer configuration revision must not change a running instance.
 - A running instance changes its pinned revision only through an explicit migration.
 
@@ -99,7 +107,7 @@ when it shortens the implementation without weakening these invariants.
 - Different agent types in the same deployment may use different harnesses. For example, an architect may use Claude
   while a developer uses Codex.
 - Each harness must be installed and authenticated on the executor before work starts.
-- Harness adapters own command construction, startup, cancellation, exit decoding, and receipt extraction.
+- Harness adapters own command construction, startup, cancellation, exit decoding, and agent-decision extraction.
 - The initial adapters run Codex through `codex exec` and Claude through `claude -p` as ordinary headless CLI processes
   in the prepared working directory. A Pi adapter or another harness may be added later without changing flow
   semantics.
@@ -111,10 +119,21 @@ when it shortens the implementation without weakening these invariants.
   permissions.
 - Agents publish assessment, plan, questions, pull or merge request changes, review results, and other stage outputs
   themselves.
+- Agent packages describe domain behavior only. They do not define flow events, state labels, publication markers,
+  machine record fields, or the structured response contract.
+- Before each attempt, the controller generates a runtime protocol prompt from the pinned flow state, attempt mode,
+  result contract, and outgoing transitions. Harness adapters add this controller-owned prompt to the compiled APM
+  instructions.
+- The runtime prompt exposes only events that the model may choose in the current state. Provider and controller events,
+  including merge observation, head changes, retry exhaustion, and blocked-state recovery, are never model options.
+- The model writes one minimal JSON decision. It does not repeat deterministic state or provider facts such as the flow
+  instance, attempt ID, target state, retry budget, artifact ID, URL, change-request state, or head SHA.
+- The controller treats the model decision as untrusted input, reads the required provider artifact back, and builds the
+  verified attempt result stored in the control comment. The state machine receives no event until both agree.
 - The controller owns the reserved state labels. Agent instructions must prohibit editing them, and the controller must
   reject a transition that is not valid for the current flow state.
-- Every agent-authored provider comment must contain a machine-readable marker. This is required because agent and human
-  actions may use the same provider account.
+- Every agent-authored provider comment must contain the attempt-specific marker supplied by the generated runtime
+  prompt. This is required because agent and human actions may use the same provider account.
 - After an agent asks a question, the first later unmarked comment from a user with `write` or `maintain` access is the
   human answer. The agent type responsible for the current stage interprets the answer.
 - Human gates accept ordinary comments rather than requiring a command syntax. The current-stage agent maps the first
@@ -124,10 +143,47 @@ when it shortens the implementation without weakening these invariants.
 - A mixed comment without a clear blocking or nonblocking intent maps to `unclear`.
 - `unclear` must not advance the flow. The current-stage agent asks for clarification, and the ticket remains at the
   human gate. A separate gate-interpreter agent is not used.
-- The controller validates the human comment ID, author permission, structured verdict, and agent receipt before
+- The controller validates the human comment ID, author permission, structured decision, and provider evidence before
   applying the corresponding transition.
-- The controller accepts an agent publication only after it validates the returned receipt and reads the relevant
+- The controller accepts an agent publication only after it validates the minimal decision and reads the relevant
   provider object back.
+
+### Runtime agent protocol
+
+The runtime protocol is generated from the pinned state machine rather than copied into every APM package. The
+controller owns a fixed event-source registry. It filters the current state's outgoing transitions to the events whose
+source is `agent`, then renders the exact JSON alternatives and required provider evidence for the attempt.
+
+Stage-mode decisions contain only an allowed event:
+
+```json
+{"event":"agent-succeeded"}
+```
+
+An agent that cannot continue without a human publishes the marked question described by the runtime prompt and writes:
+
+```json
+{"event":"agent-needs-human"}
+```
+
+Human-input mode uses the same mechanism. At `assessment-review`, for example, the generated alternatives are
+`human-approved`, `human-changes-requested`, `human-question`, `human-unclear`, and `human-cancelled`. The same stage
+agent interprets the first authorized, unmarked comment. A changes-requested decision returns to the working state; a
+later successful assessment reaches the human gate again.
+
+The `needs-human` state also accepts an `agent-needs-human` self-transition. It is used when the controller first enters
+the paused state because a linked change request closed before the reviewer could publish the reopen-or-cancel question.
+The reviewer publishes that question in stage mode, the controller records its verified evidence, and the machine stays
+in `needs-human` while preserving the review resume target.
+
+The review agent publishes a provider-native review on the pinned head. Blocking findings produce
+`review-changes-requested`; a review with no blocking findings produces `review-approved`. The controller verifies the
+native review, marker metadata when the provider cannot represent self-approval, and head SHA before deriving the
+transition.
+
+The controller builds all deterministic machine data. The model never chooses a target state and never reports provider
+facts that the controller can read. A missing, malformed, unavailable, or evidence-mismatched decision fails the
+attempt without advancing the machine.
 
 ### Development flow
 
@@ -159,10 +215,12 @@ when it shortens the implementation without weakening these invariants.
 - A retry budget belongs to one logical attempt series: one agent type working in one state on one pinned input
   revision.
 - A technical failure consumes the current series budget. A successful result closes that series.
-- Timeouts, unexpected process exits, and transient provider failures are retryable.
+- Timeouts, unexpected process exits, transient provider failures, and missing or malformed model decisions are
+  retryable.
 - An explicit agent request for a human decision enters `needs-human` without consuming another retry.
-- Invalid configuration, a missing harness, failed authentication, an allowlist or permission violation, and an invalid
-  receipt enter `blocked` immediately. Repeating the same attempt cannot repair these conditions.
+- Invalid configuration, a missing harness, failed authentication, an allowlist or permission violation, and provider
+  evidence that contradicts the pinned ticket or change-request identity enter `blocked` immediately. Repeating the
+  same attempt cannot repair these conditions.
 - Entering a new state or observing a new pinned input revision, such as a new pull or merge request head SHA, starts
   a fresh series with the configured budget.
 - Every retry uses a new agent process and a new local session directory.
@@ -297,8 +355,8 @@ the default agent behavior; external APM artifacts are optional, narrow dependen
 | Assessment and plan | Full machine-marked ticket comments |
 | Agent question | Machine-marked ticket comment plus `agent-stage:needs-human` |
 | Human answer | First later authorized, unmarked ticket comment |
-| Human gate verdict | Structured current-stage agent result tied to the human comment ID |
-| Attempt start, outcome, retry consumption, and latest receipts | Mutable control comment |
+| Human gate verdict | Minimal model decision verified against the authorized human comment |
+| Attempt start, outcome, retry consumption, and latest verified result | Mutable control comment |
 | Development result | One linked pull or merge request and its pinned head SHA |
 | Review result | Provider review or marked comment tied to the reviewed head SHA |
 | Linked change request closed without merge | `agent-stage:needs-human` while the ticket remains open |
@@ -330,8 +388,8 @@ flowchart LR
 | Provider adapters | Normalize tickets, permissions, labels, comments, changes, heads, reviews, and merge state |
 | XState machine | Evaluate allowed transitions and guards without storing execution state |
 | Configuration loader | Fetch the configuration repository and resolve the revision pinned to each flow instance |
-| Agent catalog | Map each flow stage to one APM package, target harness, prompt contract, retry policy, and timeout |
-| Harness adapters | Prepare APM output and run, monitor, and cancel the selected headless CLI |
+| Agent catalog | Map each flow stage to one domain APM package, target harness, retry policy, and timeout |
+| Harness adapters | Add the generated runtime prompt and run, monitor, and cancel the selected headless CLI |
 | Agent process | Perform stage work and publish the final result directly to the provider |
 | Session archive | Keep adjacent local transcripts and process artifacts for operator inspection only |
 | Optional UI | Show state graphs, queues, running processes, processed tickets, and local sessions |
@@ -346,8 +404,9 @@ The controller performs the same bounded reconciliation for every eligible ticke
 4. Ask XState for the next valid transition.
 5. Apply controller-owned label changes and, when required, record and read back an attempt start.
 6. Start one agent attempt for the ticket only after the attempt marker is visible.
-7. Let the agent publish its final result and return a bounded receipt.
-8. Validate the receipt, record the attempt outcome, read the publication and pinned head back, then reconcile again.
+7. Let the agent publish its final result and return one minimal JSON decision.
+8. Validate the decision, discover and read the required provider evidence, build the verified result, and reconcile
+   again.
 
 The control comment stores only bounded machine metadata. Human-readable assessment, plan, questions, and review
 results remain separate comments and are never overwritten by controller state updates.
@@ -408,15 +467,15 @@ parallelism across tickets, while a per-ticket in-memory guard prevents overlapp
 publication markers provide recovery after process loss; the in-memory guard is sufficient because only one controller
 instance is allowed.
 
-A Docker deployment mounts configuration credentials, repository workspaces, and the session directory. A Kubernetes
-deployment uses one replica and a persistent volume for sessions. Horizontal scaling, distributed leases, leader
-election, and an external queue are intentionally outside this design.
+The prototype runs in Docker on macOS and mounts configuration, credentials, repository workspaces, and the session
+directory. A later Kubernetes deployment uses one replica and a persistent volume for sessions. Horizontal scaling,
+distributed leases, leader election, and an external queue are intentionally outside this design.
 
 ## Security and trust boundary
 
 Direct `gh` and `glab` access gives an agent the same provider permissions as the operator. The first version accepts
 that trust model and limits exposure through repository allowlisting, authorized activation, pinned repository and head
-identity, APM configuration pinned by commit, finite execution time, cancellation, receipt validation, and provider
+identity, APM configuration pinned by commit, finite execution time, cancellation, decision validation, and provider
 readback.
 
 Prompt instructions are not an authorization boundary. They tell agents not to edit reserved labels, but the
@@ -430,13 +489,10 @@ from the executor user's machine.
 - Automatic merge remains disabled until a separate policy is agreed.
 - The controller will not implement its own state machine engine, workflow database, or general plugin framework.
 
-## Open design questions
+## Deferred design questions
 
-The following details were not agreed and must not be treated as implementation requirements yet:
+The following details are outside the working prototype and must not be treated as implementation requirements yet:
 
-- the exact YAML fields, built-in actions and guards, control comment schema, markers, and receipt format;
-- the YAML representation for enabling or removing human gates and the flow-specific transition for each gate verdict;
-- local workspace implementation and lifecycle, session directory layout, retention, and redaction;
-- the first deployment target: Docker or Kubernetes;
+- automatic retention and redaction policy for local session files;
 - the read-only UI scope and whether it reuses an existing XState graph viewer;
 - the conditions and provider rules for enabling automerge.

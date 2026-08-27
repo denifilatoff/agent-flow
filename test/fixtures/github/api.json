@@ -1,0 +1,161 @@
+{
+  "user": {
+    "id": 41,
+    "login": "controller"
+  },
+  "repository": {
+    "full_name": "owner/repo",
+    "html_url": "https://github.example.test/owner/repo",
+    "clone_url": "https://github.example.test/owner/repo.git"
+  },
+  "discovery": [
+    {
+      "number": 17,
+      "updated_at": "2026-08-25T10:00:00Z"
+    },
+    {
+      "number": 18,
+      "updated_at": "2026-08-25T10:00:01Z",
+      "pull_request": {
+        "url": "https://api.github.example.test/repos/owner/repo/pulls/18"
+      }
+    }
+  ],
+  "issue": {
+    "number": 17,
+    "title": "Fix the edge case",
+    "body": "Handle the documented edge case without changing existing behavior.",
+    "state": "open",
+    "updated_at": "2026-08-25T10:01:00Z",
+    "labels": [
+      { "name": "bug" },
+      { "name": "agent-flow:development" },
+      { "name": "agent-stage:review" }
+    ]
+  },
+  "timelineFirst": [
+    {
+      "id": 801,
+      "event": "labeled",
+      "created_at": "2026-08-25T09:00:00Z",
+      "actor": { "id": 5, "login": "old-maintainer" },
+      "label": { "name": "agent-flow:development" }
+    },
+    {
+      "id": 802,
+      "event": "unlabeled",
+      "created_at": "2026-08-25T09:30:00Z",
+      "actor": { "id": 5, "login": "old-maintainer" },
+      "label": { "name": "agent-flow:development" }
+    }
+  ],
+  "timelineSecond": [
+    {
+      "id": 803,
+      "event": "labeled",
+      "created_at": "2026-08-25T10:00:00Z",
+      "actor": { "id": 7, "login": "maintainer" },
+      "label": { "name": "agent-flow:development" }
+    },
+    {
+      "id": 804,
+      "event": "cross-referenced",
+      "created_at": "2026-08-25T10:00:10Z",
+      "actor": { "id": 8, "login": "developer" },
+      "source": {
+        "type": "issue",
+        "issue": {
+          "number": 31,
+          "repository_url": "https://api.github.example.test/repos/owner/repo",
+          "pull_request": {
+            "url": "https://api.github.example.test/repos/owner/repo/pulls/31"
+          }
+        }
+      }
+    }
+  ],
+  "commentsFirst": [
+    {
+      "id": 901,
+      "html_url": "https://github.example.test/owner/repo/issues/17#issuecomment-901",
+      "body": "first",
+      "user": { "id": 7, "login": "maintainer" },
+      "created_at": "2026-08-25T10:00:20Z",
+      "updated_at": "2026-08-25T10:00:20Z"
+    }
+  ],
+  "commentsSecond": [
+    {
+      "id": 902,
+      "html_url": "https://github.example.test/owner/repo/issues/17#issuecomment-902",
+      "body": "second",
+      "user": { "id": 8, "login": "developer" },
+      "created_at": "2026-08-25T10:00:30Z",
+      "updated_at": "2026-08-25T10:00:40Z"
+    }
+  ],
+  "pull": {
+    "number": 31,
+    "html_url": "https://github.example.test/owner/repo/pull/31",
+    "state": "closed",
+    "merged_at": "2026-08-25T11:00:00Z",
+    "updated_at": "2026-08-25T11:00:00Z",
+    "head": { "sha": "0123456789abcdef0123456789abcdef01234567" },
+    "user": { "id": 8, "login": "developer" }
+  },
+  "review": {
+    "id": 701,
+    "html_url": "https://github.example.test/owner/repo/pull/31#pullrequestreview-701",
+    "body": "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->\n<!-- agent-flow-review:v1 head=0123456789abcdef0123456789abcdef01234567 verdict=changes-requested -->\nPlease fix the edge case.",
+    "state": "CHANGES_REQUESTED",
+    "commit_id": "0123456789abcdef0123456789abcdef01234567",
+    "submitted_at": "2026-08-25T10:30:00Z",
+    "user": { "id": 9, "login": "reviewer" }
+  },
+  "unrelatedReview": {
+    "id": 700,
+    "html_url": "https://github.example.test/owner/repo/pull/31#pullrequestreview-700",
+    "body": "Unrelated review\n<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->",
+    "state": "PENDING",
+    "commit_id": "0123456789abcdef0123456789abcdef01234567",
+    "submitted_at": "2026-08-25T10:20:00Z",
+    "user": { "id": 10, "login": "other-reviewer" }
+  },
+  "commentReview": {
+    "id": 703,
+    "html_url": "https://github.example.test/owner/repo/pull/31#pullrequestreview-703",
+    "body": "<!-- agent-flow:v1 flow=flow-1 attempt=attempt-1 artifact=review -->\n<!-- agent-flow-review:v1 head=0123456789abcdef0123456789abcdef01234567 verdict=approved -->\nNo blocking findings.",
+    "state": "COMMENTED",
+    "commit_id": "0123456789abcdef0123456789abcdef01234567",
+    "submitted_at": "2026-08-25T10:35:00Z",
+    "user": { "id": 9, "login": "reviewer" }
+  },
+  "permission": {
+    "permission": "push",
+    "user": { "id": 7, "login": "maintainer" }
+  },
+  "comment": {
+    "id": 903,
+    "html_url": "https://github.example.test/owner/repo/issues/17#issuecomment-903",
+    "body": "question",
+    "user": { "id": 7, "login": "maintainer" },
+    "created_at": "2026-08-25T10:02:00Z",
+    "updated_at": "2026-08-25T10:02:00Z"
+  },
+  "createdComment": {
+    "id": 904,
+    "html_url": "https://github.example.test/owner/repo/issues/17#issuecomment-904",
+    "body": "created",
+    "user": { "id": 41, "login": "controller" },
+    "created_at": "2026-08-25T10:03:00Z",
+    "updated_at": "2026-08-25T10:03:00Z"
+  },
+  "updatedComment": {
+    "id": 903,
+    "html_url": "https://github.example.test/owner/repo/issues/17#issuecomment-903",
+    "body": "updated",
+    "user": { "id": 41, "login": "controller" },
+    "created_at": "2026-08-25T10:02:00Z",
+    "updated_at": "2026-08-25T10:04:00Z"
+  }
+}

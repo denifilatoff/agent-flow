@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-flow.dev/schemas/v1/flow.schema.json",
+  "title": "Agent Flow definition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": { "const": "agent-flow/v1alpha1" },
+    "kind": { "const": "Flow" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "activationLabel", "managedLabel"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "activationLabel": { "type": "string", "const": "agent-flow:development" },
+        "managedLabel": { "type": "string", "const": "agent-flow:managed" }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["initial", "states"],
+      "properties": {
+        "initial": { "$ref": "#/$defs/id" },
+        "states": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/id" },
+          "additionalProperties": { "$ref": "#/$defs/state" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["agent", "human-gate", "provider-wait", "paused", "final"]
+        },
+        "agent": { "$ref": "#/$defs/id" },
+        "resultContract": {
+          "type": "string",
+          "enum": ["assessment", "plan", "development", "review", "human-gate", "none"]
+        },
+        "context": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "ticket",
+              "control-state",
+              "assessment",
+              "plan",
+              "change-request",
+              "review",
+              "human-comment"
+            ]
+          }
+        },
+        "on": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/event" },
+          "additionalProperties": { "$ref": "#/$defs/transition" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "enum": ["agent", "human-gate"] } },
+            "required": ["kind"]
+          },
+          "then": { "required": ["agent", "resultContract", "context", "on"] }
+        },
+        {
+          "if": {
+            "properties": { "kind": { "enum": ["provider-wait", "paused"] } },
+            "required": ["kind"]
+          },
+          "then": { "required": ["on"] }
+        },
+        {
+          "if": {
+            "properties": { "kind": { "const": "final" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["agent"] },
+                { "required": ["on"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "agent-succeeded",
+        "agent-needs-human",
+        "attempts-exhausted",
+        "review-approved",
+        "review-changes-requested",
+        "human-approved",
+        "human-changes-requested",
+        "human-question",
+        "human-unclear",
+        "human-cancelled",
+        "human-answer-accepted",
+        "human-answer-cancelled",
+        "human-answer-unclear",
+        "authorized-comment",
+        "change-request-updated",
+        "change-request-merged",
+        "change-request-closed"
+      ]
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target"],
+      "properties": {
+        "target": {
+          "oneOf": [
+            { "$ref": "#/$defs/id" },
+            { "const": "$resume" }
+          ]
+        },
+        "resumeTarget": { "$ref": "#/$defs/id" },
+        "guards": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "authorized-actor",
+              "activation-present",
+              "ticket-open",
+              "head-matches",
+              "receipt-valid"
+            ]
+          }
+        },
+        "actions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "record-receipt",
+              "remember-resume-state",
+              "clear-resume-state",
+              "reset-retry-budget",
+              "remove-activation-label"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

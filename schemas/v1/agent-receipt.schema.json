@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-flow.dev/schemas/v1/agent-receipt.schema.json",
+  "title": "Agent Flow attempt receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "flowInstanceId", "attemptId", "outcome", "summary", "artifacts"],
+  "properties": {
+    "apiVersion": { "const": "agent-flow/v1alpha1" },
+    "kind": { "const": "AgentReceipt" },
+    "flowInstanceId": { "$ref": "#/$defs/uuid" },
+    "attemptId": { "$ref": "#/$defs/uuid" },
+    "outcome": {
+      "type": "string",
+      "enum": ["succeeded", "needs-human", "failed"]
+    },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/comment" },
+          { "$ref": "#/$defs/changeRequest" },
+          { "$ref": "#/$defs/review" }
+        ]
+      }
+    },
+    "humanGate": { "$ref": "#/$defs/humanGate" },
+    "error": { "$ref": "#/$defs/error" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "comment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "url", "marker", "artifactKind"],
+      "properties": {
+        "kind": { "const": "comment" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "url": { "$ref": "#/$defs/url" },
+        "marker": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "artifactKind": {
+          "type": "string",
+          "enum": ["assessment", "plan", "question", "review", "diagnostic"]
+        }
+      }
+    },
+    "changeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "number", "url", "headSha", "state"],
+      "properties": {
+        "kind": { "const": "change-request" },
+        "number": { "type": "integer", "minimum": 1 },
+        "url": { "$ref": "#/$defs/url" },
+        "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "state": { "type": "string", "enum": ["open", "closed", "merged"] }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "url", "headSha", "verdict"],
+      "properties": {
+        "kind": { "const": "review" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "url": { "$ref": "#/$defs/url" },
+        "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "verdict": {
+          "type": "string",
+          "enum": ["approved", "changes-requested", "commented"]
+        }
+      }
+    },
+    "humanGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceCommentId", "verdict", "notes"],
+      "properties": {
+        "sourceCommentId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "verdict": {
+          "type": "string",
+          "enum": ["approved", "changes-requested", "cancelled", "question", "unclear"]
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "outcome": { "const": "failed" } },
+        "required": ["outcome"]
+      },
+      "then": { "required": ["error"] }
+    },
+    {
+      "if": {
+        "properties": { "humanGate": {} },
+        "required": ["humanGate"]
+      },
+      "then": {
+        "properties": {
+          "outcome": { "const": "succeeded" }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+name: architect
+version: 1.0.2
+description: Assess a ticket and publish its architecture assessment.
+author: agent-flow
+targets: [claude, codex]

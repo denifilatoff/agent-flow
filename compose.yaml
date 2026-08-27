@@ -1,0 +1,27 @@
+services:
+  controller:
+    init: true
+    build:
+      context: .
+    environment:
+      AGENT_FLOW_CONTROLLER_CONFIG: ${AGENT_FLOW_CONTROLLER_CONFIG:-config/controller.example.yaml}
+      AGENT_FLOW_CONFIG_REPOSITORY: ${AGENT_FLOW_CONFIG_REPOSITORY:-/config}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${AGENT_FLOW_CONFIG_PATH:-.}:/config:ro
+      - ${AGENT_FLOW_DATA_PATH:-./.agent-flow-data}:/data
+      - ${HOME}/.config/gh:/home/agent/.config/gh:ro
+      - ${HOME}/.config/glab-cli:/home/agent/.config/glab-cli:ro
+      - ${HOME}/.codex:/home/agent/.codex:ro
+      - ${HOME}/.claude:/home/agent/.claude:ro
+      - ${HOME}/.claude.json:/home/agent/.claude.json:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped

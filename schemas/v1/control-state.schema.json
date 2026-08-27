@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-flow.dev/schemas/v1/control-state.schema.json",
+  "title": "Agent Flow control comment state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "flowInstanceId",
+    "flowId",
+    "configRevision",
+    "sequence",
+    "stateId",
+    "resumeStateId",
+    "activatedBy",
+    "activatedAt",
+    "activationEventId",
+    "updatedAt",
+    "attemptSeries",
+    "latestReceipt",
+    "humanGate",
+    "changeRequest"
+  ],
+  "properties": {
+    "apiVersion": { "const": "agent-flow/v1alpha1" },
+    "kind": { "const": "ControlState" },
+    "flowInstanceId": { "$ref": "#/$defs/uuid" },
+    "flowId": { "$ref": "#/$defs/id" },
+    "configRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "stateId": { "$ref": "#/$defs/id" },
+    "resumeStateId": {
+      "oneOf": [
+        { "$ref": "#/$defs/id" },
+        { "type": "null" }
+      ]
+    },
+    "activatedBy": { "$ref": "#/$defs/actor" },
+    "activatedAt": { "$ref": "#/$defs/timestamp" },
+    "activationEventId": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "updatedAt": { "$ref": "#/$defs/timestamp" },
+    "attemptSeries": {
+      "oneOf": [
+        { "$ref": "#/$defs/attemptSeries" },
+        { "type": "null" }
+      ]
+    },
+    "latestReceipt": {
+      "oneOf": [
+        { "$ref": "agent-receipt.schema.json" },
+        { "type": "null" }
+      ]
+    },
+    "humanGate": {
+      "oneOf": [
+        { "$ref": "#/$defs/humanGate" },
+        { "type": "null" }
+      ]
+    },
+    "changeRequest": {
+      "oneOf": [
+        { "$ref": "#/$defs/changeRequest" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["login", "providerId"],
+      "properties": {
+        "login": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "providerId": { "type": "string", "minLength": 1, "maxLength": 255 }
+      }
+    },
+    "attemptSeries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seriesId",
+        "agentId",
+        "stateId",
+        "inputRevision",
+        "maxAttempts",
+        "consumed",
+        "current"
+      ],
+      "properties": {
+        "seriesId": { "$ref": "#/$defs/uuid" },
+        "agentId": { "$ref": "#/$defs/id" },
+        "stateId": { "$ref": "#/$defs/id" },
+        "inputRevision": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "consumed": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "current": {
+          "oneOf": [
+            { "$ref": "#/$defs/attempt" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attemptId", "status", "startedAt"],
+      "properties": {
+        "attemptId": { "$ref": "#/$defs/uuid" },
+        "status": {
+          "type": "string",
+          "enum": ["started", "succeeded", "failed", "cancelled"]
+        },
+        "startedAt": { "$ref": "#/$defs/timestamp" },
+        "finishedAt": { "$ref": "#/$defs/timestamp" },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+            "message": { "type": "string", "minLength": 1, "maxLength": 2000 }
+          }
+        }
+      }
+    },
+    "humanGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceCommentId", "actor", "verdict", "interpretedByAttemptId", "notes"],
+      "properties": {
+        "sourceCommentId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "actor": { "$ref": "#/$defs/actor" },
+        "verdict": {
+          "type": "string",
+          "enum": ["approved", "changes-requested", "cancelled", "question", "unclear"]
+        },
+        "interpretedByAttemptId": { "$ref": "#/$defs/uuid" },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
+    "changeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "repository", "number", "url", "headSha", "state"],
+      "properties": {
+        "provider": { "type": "string", "enum": ["github", "gitlab"] },
+        "repository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+        "number": { "type": "integer", "minimum": 1 },
+        "url": { "type": "string", "format": "uri" },
+        "headSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "state": { "type": "string", "enum": ["open", "closed", "merged"] }
+      }
+    }
+  }
+}

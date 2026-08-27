@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-flow.dev/schemas/v1/agent-catalog.schema.json",
+  "title": "Agent Flow agent catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "agents"],
+  "properties": {
+    "apiVersion": { "const": "agent-flow/v1alpha1" },
+    "kind": { "const": "AgentCatalog" },
+    "agents": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/id" },
+      "additionalProperties": { "$ref": "#/$defs/agent" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package", "target", "retry"],
+      "properties": {
+        "package": {
+          "type": "string",
+          "pattern": "^agent-packages/[a-z][a-z0-9-]{0,62}$"
+        },
+        "target": {
+          "type": "string",
+          "enum": ["codex", "claude"]
+        },
+        "retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maxAttempts", "delaySeconds", "timeoutSeconds"],
+          "properties": {
+            "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+            "delaySeconds": { "type": "integer", "minimum": 0, "maximum": 3600 },
+            "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 }
+          }
+        }
+      }
+    }
+  }
+}
