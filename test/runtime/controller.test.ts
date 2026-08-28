@@ -696,7 +696,7 @@ test("reports controller work from its ephemeral collections", async () => {
   assert.deepEqual(controller.snapshot(), {
     lifecycle: "ready",
     repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: "2026-08-29T10:00:00.000Z" }],
-    tickets: [GITHUB_ONE],
+    tickets: [{ ...GITHUB_ONE, flowInstanceId: null, stateId: null, observedAt: null }],
     queue: { active: 1, queued: 0, concurrency: 1 },
     activeWork: [],
     errors: [],
@@ -708,11 +708,40 @@ test("reports controller work from its ephemeral collections", async () => {
   assert.deepEqual(controller.snapshot(), {
     lifecycle: "ready",
     repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: "2026-08-29T10:00:00.000Z" }],
-    tickets: [GITHUB_ONE],
+    tickets: [{
+      ...GITHUB_ONE,
+      flowInstanceId: key(GITHUB_ONE),
+      stateId: "assessment",
+      observedAt: "2026-08-29T10:00:00.000Z",
+    }],
     queue: { active: 0, queued: 0, concurrency: 1 },
     activeWork: [GITHUB_ONE],
     errors: [],
   });
+});
+
+test("keeps the accepted observation when same-ticket work coalesces before start", async () => {
+  let calls = 0;
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => { calls += 1; return outcome(ref); },
+    launcher: launcher(),
+    now: () => "2026-08-29T11:00:00.000Z",
+  });
+  await controller.bootstrap();
+
+  const first = controller.reconcileNow(GITHUB_ONE);
+  const coalesced = controller.reconcileNow(GITHUB_ONE);
+  await Promise.all([first, coalesced]);
+
+  assert.equal(calls, 1);
+  assert.deepEqual(controller.snapshot().tickets, [{
+    ...GITHUB_ONE,
+    flowInstanceId: key(GITHUB_ONE),
+    stateId: "assessment",
+    observedAt: "2026-08-29T11:00:00.000Z",
+  }]);
 });
 
 test("keeps only bounded generic polling errors in its snapshot", async () => {
@@ -767,7 +796,9 @@ test("keeps a newer coalesced ticket observation after an earlier reconcile fail
   failFirst.resolve();
 
   await assert.rejects(first, /first reconcile failed/);
-  assert.deepEqual(controller.snapshot().tickets, [GITHUB_ONE]);
+  assert.deepEqual(controller.snapshot().tickets.map(({ provider, repository, number }) => ({
+    provider, repository, number,
+  })), [GITHUB_ONE]);
 
   await later;
 });
@@ -800,7 +831,9 @@ test("removes an observation rejected after the ticket scheduler closes", async 
   await cancellationStarted.promise;
 
   await assert.rejects(controller.reconcileNow(GITHUB_TWO), /scheduler is closed/);
-  assert.deepEqual(controller.snapshot().tickets, [GITHUB_ONE]);
+  assert.deepEqual(controller.snapshot().tickets.map(({ provider, repository, number }) => ({
+    provider, repository, number,
+  })), [GITHUB_ONE]);
 
   releaseCancellation.resolve();
   await stopping;

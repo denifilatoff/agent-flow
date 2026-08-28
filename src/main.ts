@@ -99,6 +99,7 @@ export async function main(
       exitCode = 1;
     }
     if (ready) {
+      readiness.bindReady(ready);
       if (!abort.signal.aborted) readiness.markReady();
       try {
         await ready.controller.run(abort.signal);

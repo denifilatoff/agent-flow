@@ -34,6 +34,12 @@ export interface ReadyDependencies {
   providers: Providers;
   harnesses: Harnesses;
   controller: Controller;
+  preflight: {
+    status: "ready";
+    provider: ProviderKind;
+    harnesses: HarnessTarget[];
+    configurationRevision: string;
+  };
 }
 
 const execFile = promisify(execFileCallback);
@@ -89,7 +95,18 @@ export async function runPreflight(dependencies: PreflightDependencies): Promise
     async () => dependencies.createController(bundle, providers, harnesses),
   );
   await checked("controller bootstrap failed", () => controller.bootstrap());
-  return { bundle, providers, harnesses, controller };
+  return {
+    bundle,
+    providers,
+    harnesses,
+    controller,
+    preflight: {
+      status: "ready",
+      provider: kind,
+      harnesses: [...targets].sort(),
+      configurationRevision: bundle.revision,
+    },
+  };
 }
 
 async function prepareDirectories(dataDirectory: string): Promise<void> {

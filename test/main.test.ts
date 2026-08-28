@@ -16,6 +16,7 @@ test("a signal during bootstrap drains launched work without becoming ready", as
   let cancelled = false;
   let closed = false;
   let readiness!: OperationalStatus;
+  let bound = false;
   const controller: Controller = {
     async bootstrap() {
       launched = true;
@@ -26,6 +27,8 @@ test("a signal during bootstrap drains launched work without becoming ready", as
       if (launched) cancelled = true;
     },
     async reconcileNow() {},
+    snapshot: () => ({ lifecycle: "ready", repositories: [], tickets: [],
+      queue: { active: 0, queued: 0, concurrency: 1 }, activeWork: [], errors: [] }),
   };
   const server = {
     listening: true,
@@ -40,7 +43,11 @@ test("a signal during bootstrap drains launched work without becoming ready", as
       status: () => ({ runtimeDigest: "b".repeat(64), validationErrors: [], restartRequired: false,
         restartReason: null, changedRestartFields: [], activeAttempts: 0, safeToRestart: false }),
     } as RuntimeManager; },
-    createHealthServer(_address, _port, state) { readiness = state; return server; },
+    createHealthServer(_address, _port, state) {
+      readiness = state;
+      state.bindReady = (ready) => { bound = ready.controller === controller; };
+      return server;
+    },
     createPreflightDependencies() { return {} as never; },
     async runPreflight() {
       await controller.bootstrap();
@@ -58,6 +65,7 @@ test("a signal during bootstrap drains launched work without becoming ready", as
 
   assert.equal(await running, 0);
   assert.equal(cancelled, true);
+  assert.equal(bound, true);
   assert.equal(readiness.isReady(), false);
   assert.equal(closed, true);
   assert.equal(signals.listenerCount("SIGINT"), 0);

@@ -1,20 +1,26 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { loadConfigBundle } from "../src/config/load.ts";
 import { RuntimeManager } from "../src/config/runtime.ts";
 import { createHealthServer, createOperationalStatus } from "../src/health.ts";
+import type { ReadyDependencies } from "../src/preflight.ts";
+import type { Controller } from "../src/runtime/controller.ts";
+
+const FLOW = "11111111-1111-4111-8111-111111111111";
+const ATTEMPT = "22222222-2222-4222-8222-222222222222";
 
 test("serves liveness, runtime-aware readiness, and read-only redacted status", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agent-flow-health-"));
   const path = join(root, "runtime.yaml");
-  const initial = await readFile("config/runtime.example.yaml", "utf8");
+  const initial = (await readFile("config/runtime.example.yaml", "utf8")).replace("/var/lib/agent-flow", root);
   await writeFile(path, initial);
   const runtime = await RuntimeManager.create(path);
-  const status = createOperationalStatus(runtime);
+  const status = createOperationalStatus(runtime, async (_fd, expectedPath) => expectedPath);
   const server = createHealthServer("127.0.0.1", 0, status);
   await new Promise<void>((resolve) => server.once("listening", resolve));
   t.after(async () => {
@@ -26,8 +32,41 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
 
   assert.equal((await fetch(url("/health/live"))).status, 200);
   assert.equal((await fetch(url("/health/ready"))).status, 503);
+  const unavailable = await fetch(url("/api/dashboard"));
+  assert.equal(unavailable.status, 503);
+  assert.equal(unavailable.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await unavailable.json(), { available: false, reason: "preflight unavailable" });
+  assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/context.json`))).status, 503);
+
+  const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", "a".repeat(40));
+  const controller: Controller = {
+    async bootstrap() {}, async run() {}, async reconcileNow() {},
+    snapshot: () => ({ lifecycle: "ready", repositories: [], tickets: [],
+      queue: { active: 0, queued: 0, concurrency: 4 }, activeWork: [], errors: [] }),
+  };
+  status.bindReady({
+    bundle, providers: { github: {} as never }, harnesses: { claude: {} as never, codex: {} as never }, controller,
+    preflight: { status: "ready", provider: "github", harnesses: ["claude", "codex"],
+      configurationRevision: bundle.revision },
+  } satisfies ReadyDependencies);
+  await mkdir(join(root, "sessions", FLOW, ATTEMPT), { recursive: true });
+  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "context.json"), "session context\n");
   status.markReady();
   assert.equal((await fetch(url("/health/ready"))).status, 200);
+  const dashboard = await fetch(url("/api/dashboard"));
+  assert.equal(dashboard.status, 200);
+  assert.equal(dashboard.headers.get("cache-control"), "no-store");
+  assert.equal((await dashboard.json() as { available: boolean }).available, true);
+  const session = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/context.json`));
+  assert.equal(session.status, 200);
+  assert.equal(session.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await session.json(), { available: true, content: "session context\n", truncated: false });
+  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "harness.log"), "x".repeat(1_048_577));
+  const bounded = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/harness.log`));
+  const boundedBody = Buffer.from(await bounded.arrayBuffer());
+  assert.ok(boundedBody.length <= 1_048_576);
+  assert.equal((JSON.parse(boundedBody.toString("utf8")) as { truncated: boolean }).truncated, true);
+  assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/other.txt`))).status, 400);
 
   await writeFile(path, initial.replace("port: 8080", "port: 8081"));
   await runtime.reload();
@@ -41,5 +80,6 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   assert.equal(JSON.stringify(snapshot).includes("authFile"), false);
 
   assert.equal((await fetch(url("/api/status"), { method: "POST" })).status, 405);
+  assert.equal((await fetch(url("/api/dashboard"), { method: "POST" })).status, 405);
   assert.equal((await fetch(url("/other"))).status, 404);
 });

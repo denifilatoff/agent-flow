@@ -67,6 +67,12 @@ test("runs fail-closed startup checks in a fixed order", async () => {
   const ready = await runPreflight(dependencies(calls));
 
   assert.equal(ready.bundle, bundle);
+  assert.deepEqual(ready.preflight, {
+    status: "ready",
+    provider: "github",
+    harnesses: ["claude", "codex"],
+    configurationRevision: bundle.revision,
+  });
   assert.deepEqual(calls, [
     "config:load", "config:validate", "directories", "github:rest", "provider:environment",
     "gh:auth status --hostname api.github.test", "git:--version", "apm:--version",
