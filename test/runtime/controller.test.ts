@@ -39,6 +39,7 @@ function idleGitHub(): DiscoveryAdapter {
 
 test("bootstraps the unique union returned by every allowlisted repository", async () => {
   const reconciled: string[] = [];
+  const prepared: string[][] = [];
   const github: DiscoveryAdapter = {
     kind: "github",
     async bootstrap(repository) {
@@ -61,6 +62,7 @@ test("bootstraps the unique union returned by every allowlisted repository", asy
       { adapter: gitlab, repositories: ["group/one"] },
     ],
     concurrency: 2,
+    prepareBootstrap: async (refs) => { prepared.push(refs.map(key)); },
     reconcile: async (ref) => { reconciled.push(key(ref)); return outcome(ref); },
     launcher: launcher(),
     now: () => "2026-08-25T10:00:00.000Z",
@@ -69,6 +71,7 @@ test("bootstraps the unique union returned by every allowlisted repository", asy
   await controller.bootstrap();
 
   assert.deepEqual(reconciled, [key(GITHUB_ONE), key(GITLAB_ONE)]);
+  assert.deepEqual(prepared, [[key(GITHUB_ONE), key(GITLAB_ONE)]]);
 });
 
 test("polls serialized repository scans with an in-memory cursor and one-second overlap", async () => {
@@ -146,6 +149,28 @@ test("polls serialized repository scans with an in-memory cursor and one-second 
   assert.deepEqual(reconciled.toSorted(), [
     key(GITHUB_ONE), key(GITHUB_ONE), key(GITHUB_TWO), key(GITHUB_TWO),
   ].toSorted());
+});
+
+test("reloads runtime after sleeping before starting a polling sweep", async () => {
+  const abort = new AbortController();
+  let delays = 0;
+  let discoveries = 0;
+  const adapter: DiscoveryAdapter = {
+    kind: "github",
+    async bootstrap() { return []; },
+    async discover() { discoveries += 1; return { tickets: [], nextCursor: null }; },
+  };
+  const controller = createController({
+    providers: [{ adapter, repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => outcome(ref),
+    launcher: launcher(),
+    runtimeState: async () => ({ mayStartWork: false, pollingIntervalSeconds: 300, concurrency: 1 }),
+    delay: async () => { if (++delays === 2) abort.abort(); },
+  });
+  await controller.bootstrap();
+  await controller.run(abort.signal);
+  assert.equal(discoveries, 0);
 });
 
 test("reconciles active tickets when their provider discovery timestamp does not change", async () => {

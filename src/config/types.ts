@@ -1,4 +1,4 @@
-export type SchemaKind = "Flow" | "AgentCatalog" | "ControllerConfig" | "ControlState" | "AgentReceipt" | "AgentDecision";
+export type SchemaKind = "Stack" | "RuntimeConfig" | "Flow" | "AgentCatalog" | "ControlState" | "AgentReceipt" | "AgentDecision";
 export type HarnessTarget = "codex" | "claude";
 export type ResultContract = "assessment" | "plan" | "development" | "review" | "human-gate" | "none";
 
@@ -45,7 +45,35 @@ export interface FlowTransition {
 export interface AgentCatalog {
   apiVersion: "agent-flow/v1alpha1";
   kind: "AgentCatalog";
-  agents: Record<string, { package: string; target: HarnessTarget; retry: RetryConfig }>;
+  agents: Record<string, { package: string }>;
+}
+
+export interface StackDefinition {
+  apiVersion: "agent-flow/v1alpha1";
+  kind: "Stack";
+  spec: { flow: string; catalog: string; contracts: string[]; schemas: string[] };
+}
+
+export interface RuntimeConfig {
+  apiVersion: "agent-flow/v1alpha1";
+  kind: "RuntimeConfig";
+  configuration: { repository: string; revision: string; stack: string };
+  provider: ProviderConfig & { type: "github" | "gitlab"; tokenFile: string };
+  execution: {
+    agents: Record<string, ExecutionSnapshot>;
+    harnesses: Partial<Record<HarnessTarget, { authFile: string }>>;
+  };
+  polling: { intervalSeconds: number; maxCallsPerMinute: number; quotaReservePercent: number };
+  runtime: { concurrency: number; dataDirectory: string; http: { address: string; port: number } };
+}
+
+export interface ExecutionSnapshot {
+  harness: HarnessTarget;
+  model: string;
+  reasoning: "low" | "medium" | "high" | "xhigh" | "max";
+  maxAttempts: number;
+  delaySeconds: number;
+  timeoutSeconds: number;
 }
 
 export interface RetryConfig {
@@ -54,18 +82,8 @@ export interface RetryConfig {
   timeoutSeconds: number;
 }
 
-export interface ControllerConfig {
-  apiVersion: "agent-flow/v1alpha1";
-  kind: "ControllerConfig";
-  configuration: { repository: string; flow: string; catalog: string };
-  providers: Partial<Record<"github" | "gitlab", ProviderConfig>>;
-  polling: { intervalSeconds: number; maxCallsPerMinute: number; quotaReservePercent: number };
-  runtime: { concurrency: number; dataDirectory: string; healthPort: number };
-}
-
 export interface ProviderConfig {
   apiUrl: string;
-  tokenEnv: string;
   repositories: string[];
 }
 
@@ -147,6 +165,8 @@ export interface AttemptSeries {
   agentId: string;
   stateId: string;
   inputRevision: string;
+  runtimeDigest?: string;
+  executionSnapshot?: ExecutionSnapshot;
   maxAttempts: number;
   consumed: number;
   current: Attempt | null;

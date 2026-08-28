@@ -1,6 +1,6 @@
 import { open } from "node:fs/promises";
 
-import { validateDocument } from "../config/schema-validator.ts";
+import { validateDocument, type DocumentValidator } from "../config/schema-validator.ts";
 import type {
   AgentDecision,
   AgentEventType,
@@ -101,6 +101,7 @@ export async function readDecisionAndBuildReceipt(
   expected: DecisionExpectation,
   provider: ProviderAdapter,
   cancelled: boolean,
+  validate: DocumentValidator = validateDocument,
 ): Promise<AgentReceipt> {
   if (cancelled) decisionTrust("cancelled attempt cannot accept a decision");
   if (provider.kind !== expected.ticket.provider) {
@@ -117,7 +118,7 @@ export async function readDecisionAndBuildReceipt(
 
   let decision: AgentDecision;
   try {
-    decision = validateDocument<AgentDecision>("AgentDecision", parsed);
+    decision = validate<AgentDecision>("AgentDecision", parsed);
   } catch {
     invalidDecision("decision does not match the AgentDecision schema");
   }

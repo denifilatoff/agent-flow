@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { ConfigBundle } from "../config/load.js";
+import { validateBundleDocument, type ConfigBundle } from "../config/load.ts";
 import type {
   AttemptSeries,
   ControlChangeRequest,
@@ -62,6 +62,7 @@ export interface ReconcileDependencies {
   config: ReconcileConfigSource;
   launcher: AttemptLauncher;
   writeControl: ControlWriter;
+  isAllowed?(ref: TicketRef): boolean;
   now?: () => string;
   newFlowInstanceId?: () => string;
 }
@@ -115,7 +116,7 @@ export async function reconcileTicket(
   }
 
   const current = active[0]!;
-  assertAllowed(current.bundle, ref);
+  assertAllowed(dependencies, ref);
   const control = current.parsed.state;
   if (control.stateId === "awaiting-merge") {
     assertChangeIdentity(control.changeRequest, snapshot.changeRequest);
@@ -188,7 +189,7 @@ async function activate(
 
   const bundle = await configCall("current configuration load failed", () => dependencies.config.loadCurrent());
   assertBundle(bundle, bundle.revision);
-  assertAllowed(bundle, snapshot.ref);
+  assertAllowed(dependencies, snapshot.ref);
   if (!snapshot.labels.includes(bundle.flow.metadata.activationLabel)) {
     throw new Error("activation snapshot does not match controller labels");
   }
@@ -285,6 +286,11 @@ async function loadControls(
   const bundles = new Map<string, ConfigBundle>();
   const result: LoadedControl[] = [];
   for (const item of parsed) {
+    if (item.state.stateId === "done" || item.state.stateId === "cancelled") {
+      const bundle = await configCall("current configuration load failed", () => config.loadCurrent());
+      result.push({ parsed: item, bundle, terminal: true });
+      continue;
+    }
     let bundle = bundles.get(item.state.configRevision);
     if (!bundle) {
       bundle = await configCall(
@@ -294,6 +300,7 @@ async function loadControls(
       assertBundle(bundle, item.state.configRevision);
       bundles.set(item.state.configRevision, bundle);
     }
+    validateBundleDocument(bundle, "ControlState", item.state);
     if (bundle.flow.metadata.id !== item.state.flowId) throw new Error("control flow does not match pinned configuration");
     const state = bundle.flow.spec.states[item.state.stateId];
     if (!state) throw new Error("control state does not exist in pinned flow");
@@ -311,8 +318,8 @@ function assertBundle(bundle: ConfigBundle, revision: string): void {
   }
 }
 
-function assertAllowed(bundle: ConfigBundle, ref: TicketRef): void {
-  if (!bundle.controller.providers[ref.provider]?.repositories.includes(ref.repository)) {
+function assertAllowed(dependencies: ReconcileDependencies, ref: TicketRef): void {
+  if (dependencies.isAllowed && !dependencies.isAllowed(ref)) {
     throw new Error("ticket repository is not in the pinned allowlist");
   }
 }

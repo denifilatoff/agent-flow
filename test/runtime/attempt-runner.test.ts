@@ -3,6 +3,7 @@ import test from "node:test";
 import { inspect } from "node:util";
 
 import type { ConfigBundle } from "../../src/config/load.ts";
+import type { DocumentValidator } from "../../src/config/schema-validator.ts";
 import type { AgentReceipt, ControlState } from "../../src/config/types.ts";
 import { ApmPreflightError } from "../../src/harness/apm.ts";
 import { HarnessPreflightError, HarnessProcessError } from "../../src/harness/process.ts";
@@ -28,17 +29,13 @@ const HEAD = "b".repeat(40);
 const NOW = "2026-08-26T10:00:00.000Z";
 const OK: HarnessResult = { exitCode: 0, signal: null, timedOut: false };
 
-function bundle(maxAttempts = 3): ConfigBundle {
+function bundle(maxAttempts = 3): ConfigBundle & { testMaxAttempts: number; testDelaySeconds: number } {
   return {
     revision: REVISION,
     root: "/config",
-    controller: {
-      apiVersion: "agent-flow/v1alpha1", kind: "ControllerConfig",
-      configuration: { repository: "config", flow: "config/flow.yaml", catalog: "config/agents.yaml" },
-      providers: { github: { apiUrl: "https://api.github.com", tokenEnv: "GITHUB_TOKEN", repositories: ["owner/repo"] } },
-      polling: { intervalSeconds: 30, maxCallsPerMinute: 60, quotaReservePercent: 20 },
-      runtime: { concurrency: 4, dataDirectory: "/data", healthPort: 8080 },
-    },
+    stack: { apiVersion: "agent-flow/v1alpha1", kind: "Stack", spec: {
+      flow: "config/flow.yaml", catalog: "config/agents.yaml", contracts: [], schemas: [],
+    } },
     flow: {
       apiVersion: "agent-flow/v1alpha1", kind: "Flow",
       metadata: { id: "development", activationLabel: "agent-flow:development", managedLabel: "agent-flow:managed" },
@@ -51,10 +48,10 @@ function bundle(maxAttempts = 3): ConfigBundle {
       } },
     },
     catalog: { apiVersion: "agent-flow/v1alpha1", kind: "AgentCatalog", agents: {
-      developer: { package: "agent-packages/developer", target: "codex", retry: {
-        maxAttempts, delaySeconds: 7, timeoutSeconds: 90,
-      } },
+      developer: { package: "agent-packages/developer" },
     } },
+    testMaxAttempts: maxAttempts,
+    testDelaySeconds: 7,
   };
 }
 
@@ -105,7 +102,7 @@ function deferred<T>() {
 
 interface Fixture {
   events: string[]; controls: ControlState[]; attempts: string[]; delays: number[]; prompts: string[];
-  verifications: Array<{ path: string; expected: DecisionExpectation; cancelled: boolean }>;
+  verifications: Array<{ path: string; expected: DecisionExpectation; cancelled: boolean; validate: DocumentValidator }>;
   process: ReturnType<typeof deferred<HarnessResult>>;
   runner: ReturnType<typeof createAttemptRunner>; request: AttemptRequest;
 }
@@ -116,6 +113,7 @@ function fixture(options: {
   write?: AttemptRunnerDependencies["writeControl"];
   ids?: string[]; compileError?: Error; delay?: (milliseconds: number) => Promise<void>;
   providerCredential?: ProviderCredential; onSettled?: (ref: AttemptRequest["ref"]) => void;
+  execution?: AttemptRunnerDependencies["execution"];
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
   const prompts: string[] = [];
@@ -129,7 +127,7 @@ function fixture(options: {
     events.push("harness:spawn");
     prompts.push(input.stagePrompt);
     assert.deepEqual(input.providerCredential, {
-      provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
+      provider: "github", name: "GH_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
     });
     const value = results.shift() ?? OK;
     if (value instanceof Error) throw value;
@@ -144,10 +142,17 @@ function fixture(options: {
   });
   const runner = createAttemptRunner({
     dataDirectory: "/data", provider: { kind: "github" } as ProviderAdapter,
-    providerCredential: () => options.providerCredential
+    providerConfig: { apiUrl: "https://api.github.com", repositories: ["owner/repo"] },
+    providerCredential: options.providerCredential
       ?? {
-        provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
+        provider: "github", name: "GH_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
       },
+    execution: options.execution ?? (async () => ({ runtimeDigest: "d".repeat(64), executionSnapshot: {
+      harness: "codex", model: "test-model", reasoning: "high",
+      maxAttempts: (configuredRequest.bundle as ReturnType<typeof bundle>).testMaxAttempts ?? 3,
+      delaySeconds: (configuredRequest.bundle as ReturnType<typeof bundle>).testDelaySeconds ?? 7,
+      timeoutSeconds: 90,
+    } })),
     workspaceManager: { async prepareWorkspace() { events.push("workspace:prepare"); return {
       baseClone: "/data/repositories/repo", worktree: "/data/worktrees/flow", repository: "owner/repo",
       ticketNumber: 7, flowInstanceId: FLOW,
@@ -163,8 +168,8 @@ function fixture(options: {
       assert.equal(packageDirectory, "/config/agent-packages/developer");
       if (options.compileError) throw options.compileError;
       return { agentId, target, instructions: "instructions", runtimeDirectory: "/runtime" }; },
-    async verifyDecision(path, expected, _provider, cancelled) { events.push("decision:verify");
-      verifications.push({ path, expected, cancelled });
+    async verifyDecision(path, expected, _provider, cancelled, validate) { events.push("decision:verify");
+      verifications.push({ path, expected, cancelled, validate });
       return options.verify?.(path, expected, cancelled) ?? receipt(expected.attemptId); },
     async delay(milliseconds) { delays.push(milliseconds); events.push("delay"); await options.delay?.(milliseconds); },
     now: () => NOW, newId: () => ids.shift()!,
@@ -186,11 +191,14 @@ test("persists and reads back started before a background launch", async () => {
   assert.deepEqual(subject.events.slice(0, 6), ["control:update-started", "control:readback", "workspace:prepare",
     "session:create", "apm:compile", "harness:spawn"]);
   assert.equal(subject.controls[0]!.attemptSeries?.consumed, 1);
+  assert.equal(subject.controls[0]!.attemptSeries?.runtimeDigest, "d".repeat(64));
+  assert.equal(subject.controls[0]!.attemptSeries?.executionSnapshot?.model, "test-model");
   subject.process.resolve(OK); await waitIdle(subject);
   assert.match(subject.prompts[0]!, new RegExp(`/data/sessions/${ATTEMPT_1}/context\\.json`));
   assert.match(subject.prompts[0]!, new RegExp(`/data/sessions/${ATTEMPT_1}/decision\\.json`));
   assert.match(subject.prompts[0]!, new RegExp(`flow=${FLOW} attempt=${ATTEMPT_1} artifact=question`));
   assert.equal(subject.verifications[0]?.path, `/data/sessions/${ATTEMPT_1}/decision.json`);
+  assert.equal(typeof subject.verifications[0]?.validate, "function");
   assert.deepEqual({
     flow: subject.verifications[0]?.expected.flow,
     stateId: subject.verifications[0]?.expected.stateId,
@@ -292,10 +300,8 @@ test("blocks APM configuration failures before spawning a harness", async () => 
 });
 
 test("rejects invalid pinned identity and allowlist before consuming an attempt", async () => {
-  const disallowed = bundle();
-  disallowed.controller.providers.github!.repositories = ["owner/other"];
   const badRevision = request({ control: control({ configRevision: "c".repeat(40) }) });
-  for (const invalid of [request({ bundle: disallowed }), badRevision]) {
+  for (const invalid of [badRevision]) {
     const subject = fixture({ request: invalid });
     await assert.rejects(subject.runner.start(subject.request));
     assert.equal(subject.controls.length, 0);
@@ -310,38 +316,6 @@ test("rejects a credential that does not match the active provider configuration
   ] as const) {
     const subject = fixture({ providerCredential });
     await assert.rejects(subject.runner.start(subject.request), /provider credential does not match/);
-    assert.equal(subject.controls.length, 0);
-    assert.equal(subject.events.includes("workspace:prepare"), false);
-  }
-});
-
-test("rejects an unsupported provider token environment before consuming an attempt", async () => {
-  const configured = bundle();
-  configured.controller.providers.github!.tokenEnv = "HOME";
-  const subject = fixture({
-    request: request({ bundle: configured }),
-    providerCredential: {
-      provider: "github", name: "HOME", value: "credential-secret", apiUrl: "https://api.github.com",
-    },
-  });
-  await assert.rejects(subject.runner.start(subject.request), /provider token environment is not supported/);
-  assert.equal(subject.controls.length, 0);
-  assert.equal(subject.events.includes("workspace:prepare"), false);
-});
-
-test("rejects a GitHub token environment for the wrong host class before consuming an attempt", async () => {
-  for (const [apiUrl, tokenEnv] of [
-    ["https://api.github.com", "GH_ENTERPRISE_TOKEN"],
-    ["https://github.enterprise.test/api/v3", "GH_TOKEN"],
-  ] as const) {
-    const configured = bundle();
-    configured.controller.providers.github!.apiUrl = apiUrl;
-    configured.controller.providers.github!.tokenEnv = tokenEnv;
-    const subject = fixture({
-      request: request({ bundle: configured }),
-      providerCredential: { provider: "github", name: tokenEnv, value: "credential-secret", apiUrl },
-    });
-    await assert.rejects(subject.runner.start(subject.request), /provider token environment is not supported/);
     assert.equal(subject.controls.length, 0);
     assert.equal(subject.events.includes("workspace:prepare"), false);
   }
@@ -442,10 +416,10 @@ test("recovers a persisted started attempt in the same retry series", async () =
     current: { attemptId: ATTEMPT_1, status: "started", startedAt: NOW } } });
   const subject = fixture({ request: request({ control: existing }), ids: [ATTEMPT_2], results: [OK] });
   await subject.runner.start(subject.request); await waitIdle(subject);
-  assert.equal(subject.controls[0]!.attemptSeries?.seriesId, SERIES);
-  assert.equal(subject.controls[0]!.attemptSeries?.consumed, 1);
-  assert.equal(subject.controls[0]!.attemptSeries?.current?.status, "failed");
-  assert.equal(subject.controls[0]!.attemptSeries?.current?.error?.code, "CONTROLLER_RESTARTED");
+  assert.equal(subject.controls[1]!.attemptSeries?.seriesId, SERIES);
+  assert.equal(subject.controls[1]!.attemptSeries?.consumed, 1);
+  assert.equal(subject.controls[1]!.attemptSeries?.current?.status, "failed");
+  assert.equal(subject.controls[1]!.attemptSeries?.current?.error?.code, "CONTROLLER_RESTARTED");
   assert.deepEqual(subject.delays, [7_000]);
   assert.equal(subject.controls.at(-1)!.attemptSeries?.consumed, 2);
 });
@@ -458,8 +432,8 @@ test("resumes a persisted retryable failure after delay without resetting budget
   const subject = fixture({ request: request({ control: existing }), ids: [ATTEMPT_2], results: [OK] });
   await subject.runner.start(subject.request); await waitIdle(subject);
   assert.deepEqual(subject.delays, [7_000]);
-  assert.equal(subject.controls[0]!.attemptSeries?.seriesId, SERIES);
-  assert.equal(subject.controls[0]!.attemptSeries?.consumed, 2);
+  assert.equal(subject.controls.at(-1)!.attemptSeries?.seriesId, SERIES);
+  assert.equal(subject.controls.at(-1)!.attemptSeries?.consumed, 2);
 });
 
 test("blocks an exhausted persisted started attempt without spawning", async () => {
@@ -493,7 +467,7 @@ test("restart and failed recovery resolve readiness before a deferred retry dela
   for (const status of ["started", "failed"] as const) {
     const never = deferred<void>();
     const configured = bundle();
-    configured.catalog.agents.developer!.retry.delaySeconds = 3_600;
+    configured.testDelaySeconds = 3_600;
     const current = status === "started"
       ? { attemptId: ATTEMPT_1, status, startedAt: NOW }
       : { attemptId: ATTEMPT_1, status, startedAt: NOW, finishedAt: NOW,
@@ -506,6 +480,8 @@ test("restart and failed recovery resolve readiness before a deferred retry dela
     await subject.runner.start(subject.request);
 
     assert.equal(subject.runner.isRunning(FLOW), true);
+    assert.equal(subject.controls[0]!.attemptSeries?.runtimeDigest, "d".repeat(64));
+    assert.equal(subject.controls[0]!.attemptSeries?.executionSnapshot?.model, "test-model");
     assert.deepEqual(subject.delays, [3_600_000]);
     assert.equal(subject.events.includes("harness:spawn"), false);
     await subject.runner.cancel(FLOW);

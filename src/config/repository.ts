@@ -36,22 +36,46 @@ export interface GitAuthentication {
   environment: NodeJS.ProcessEnv;
 }
 
-export function gitAuthentication(url?: URL): GitAuthentication {
-  const helper = url?.protocol === "https:" && url.hostname === "github.com" && !url.port
-    ? "gh auth git-credential"
-    : url?.protocol === "https:" && url.hostname === "gitlab.com" && !url.port
-      ? "glab auth git-credential"
-      : undefined;
+interface GitProviderCredential {
+  provider: "github" | "gitlab";
+  name: string;
+  value: string;
+  apiUrl: string;
+}
+
+export function gitAuthentication(url?: URL, credential?: GitProviderCredential): GitAuthentication {
+  const credentialMatches = url?.protocol === "https:" && credential
+    && url.hostname.toLowerCase() === providerGitHostname(credential);
+  const helper = credentialMatches
+    ? credential.provider === "github" ? "gh auth git-credential" : "glab auth git-credential"
+    : url?.protocol === "https:" && url.hostname === "github.com" && !url.port
+      ? "gh auth git-credential"
+      : url?.protocol === "https:" && url.hostname === "gitlab.com" && !url.port
+        ? "glab auth git-credential"
+        : undefined;
   const key = url && helper ? `credential.https://${url.hostname}.helper` : undefined;
   return {
     arguments: key ? ["-c", `${key}=`, "-c", `${key}=!${helper}`] : [],
-    environment: { GIT_TERMINAL_PROMPT: "0" },
+    environment: {
+      GIT_TERMINAL_PROMPT: "0",
+      ...(credentialMatches ? { [credential.name]: credential.value } : {}),
+    },
   };
 }
 
-export function configurationGitAuthentication(source: string): GitAuthentication {
+export function configurationGitAuthentication(
+  source: string,
+  credential?: GitProviderCredential,
+): GitAuthentication {
   const normalized = normalizeConfigurationSource(source);
-  return gitAuthentication(isAbsolute(normalized) ? undefined : new URL(normalized));
+  return gitAuthentication(isAbsolute(normalized) ? undefined : new URL(normalized), credential);
+}
+
+function providerGitHostname(credential: GitProviderCredential): string {
+  const hostname = new URL(credential.apiUrl).hostname.toLowerCase();
+  if (credential.provider !== "github") return hostname;
+  if (hostname === "api.github.com") return "github.com";
+  return hostname.startsWith("api.") && hostname.endsWith(".ghe.com") ? hostname.slice(4) : hostname;
 }
 
 interface ConfigurationSource {
@@ -93,6 +117,7 @@ export interface PreparedConfigurationRepository {
 export async function prepareConfigurationRepository(
   source: string,
   dataDirectory: string,
+  authenticationOverride?: GitAuthentication,
 ): Promise<PreparedConfigurationRepository> {
   const configured = configurationSource(source);
   if (configured.kind === "local") {
@@ -101,7 +126,7 @@ export async function prepareConfigurationRepository(
 
   const dataRoot = await prepareDataRoot(dataDirectory);
   const target = resolve(dataRoot, "config-repository");
-  const authentication = configurationGitAuthentication(configured.normalized);
+  const authentication = authenticationOverride ?? configurationGitAuthentication(configured.normalized);
   try {
     const entry = await lstat(target);
     if (entry.isSymbolicLink()) throw new Error("configuration repository must not be a symbolic link");
@@ -124,9 +149,7 @@ export async function prepareConfigurationRepository(
         maxBuffer: 16 * 1024 * 1024,
         env: { ...process.env, ...authentication.environment },
       });
-    } catch {
-      throw new Error("configuration repository fetch failed");
-    }
+    } catch {}
     return { source: configured.normalized, repository: target };
   } catch (error) {
     if (!isNodeError(error, "ENOENT")) throw error;
@@ -291,7 +314,7 @@ export async function loadPinnedConfig(
   repository: string,
   dataDirectory: string,
   requested?: string,
-  controllerPath = "config/controller.example.yaml",
+  stackPath = "config/stack.yaml",
 ): Promise<ConfigBundle> {
   if (requested !== undefined) {
     if (!SHA.test(requested)) throw new Error("requested revision must be a 40-character SHA");
@@ -306,11 +329,11 @@ export async function loadPinnedConfig(
       const normalized = requested.toLowerCase();
       const materialized = resolve(configRoot, normalized);
       if (await completeDirectory(materialized, normalized)) {
-        return loadConfigBundle(materialized, controllerPath, normalized);
+        return loadConfigBundle(materialized, stackPath, normalized);
       }
     }
   }
   const revision = await resolveRevision(repository, requested);
   const root = await materializeRevision(repository, revision, dataDirectory);
-  return loadConfigBundle(root, controllerPath, revision);
+  return loadConfigBundle(root, stackPath, revision);
 }

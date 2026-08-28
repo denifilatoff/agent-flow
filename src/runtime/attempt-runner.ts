@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import type { ConfigBundle } from "../config/load.js";
+import { validateBundleDocument, type ConfigBundle } from "../config/load.ts";
 import type {
   AgentReceipt,
   Attempt,
@@ -10,9 +10,9 @@ import type {
   ControlHumanGate,
   ControlState,
   ControlState as PersistedControl,
+  ExecutionSnapshot,
 } from "../config/types.js";
 import { validateDocument } from "../config/schema-validator.ts";
-import { isProviderTokenEnvironmentForApiUrl } from "../config/provider-credentials.ts";
 import { compileAgentContext, type CompiledAgent } from "../harness/apm.ts";
 import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../harness/types.ts";
 import { advanceControlState, type ControlStatePatch } from "../provider/control-comment.ts";
@@ -28,7 +28,11 @@ import { writeControlCas, type ControlWriter } from "./control-state.ts";
 export interface AttemptRunnerDependencies {
   dataDirectory: string;
   provider: ProviderAdapter;
-  providerCredential(tokenEnv: string, apiUrl: string): ProviderCredential;
+  providerConfig: { apiUrl: string; repositories: string[] };
+  providerCredential: ProviderCredential;
+  execution(agentId: string): Promise<{ runtimeDigest: string; executionSnapshot: ExecutionSnapshot }>;
+  attemptStarted?(): void;
+  attemptFinished?(): void;
   workspaceManager: Pick<WorkspaceManager, "prepareWorkspace">;
   harnesses: Partial<Record<"claude" | "codex", HarnessAdapter>>;
   writeControl: ControlWriter;
@@ -65,9 +69,15 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
 
   return {
     async start(request): Promise<void> {
-      const config = validateRequest(request, dependencies);
       const flowId = request.control.flowInstanceId;
-      if (active.has(flowId) || shouldNotStart(request, config.retry.maxAttempts)) return;
+      if (active.has(flowId)) return;
+      const persisted = matchingSeries(request.control.attemptSeries, request)
+        ? request.control.attemptSeries : null;
+      const binding = persisted?.runtimeDigest && persisted.executionSnapshot
+        ? { runtimeDigest: persisted.runtimeDigest, executionSnapshot: persisted.executionSnapshot }
+        : await dependencies.execution(request.agentId);
+      const config = validateRequest(request, dependencies, binding.executionSnapshot);
+      if (shouldNotStart(request, binding.executionSnapshot.maxAttempts)) return;
 
       let resolveReady!: () => void;
       let rejectReady!: (error: unknown) => void;
@@ -87,10 +97,12 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         rejectReady,
       };
       active.set(flowId, running);
-      const job = runSeries(request, config, running);
+      dependencies.attemptStarted?.();
+      const job = runSeries(request, config, binding, running);
       running.completion = job.catch((error: unknown) => {
         if (!running.launched) running.rejectReady(classifyAttemptError(error));
       }).finally(() => {
+        dependencies.attemptFinished?.();
         if (!running.launched) running.resolveReady();
         if (active.get(flowId) === running) active.delete(flowId);
         if (running.launched && !running.cancelled) onSettled?.(request.ref);
@@ -118,12 +130,18 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
   async function runSeries(
     request: AttemptRequest,
     config: ReturnType<typeof validateRequest>,
+    binding: { runtimeDigest: string; executionSnapshot: ExecutionSnapshot },
     running: ActiveAttempt,
   ): Promise<void> {
     let control = request.control;
     let series = matchingSeries(control.attemptSeries, request)
       ? control.attemptSeries!
-      : newSeries(request, config.retry.maxAttempts, newId());
+      : newSeries(request, binding, newId());
+
+    if (!series.runtimeDigest || !series.executionSnapshot) {
+      series = { ...series, runtimeDigest: binding.runtimeDigest, executionSnapshot: binding.executionSnapshot };
+      control = await persist(dependencies, now(), request, running, control, { attemptSeries: series });
+    }
 
     if (series.current?.status === "started") {
       const interrupted: AttemptSeries = {
@@ -161,11 +179,11 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       );
       series = interrupted;
       running.resolveReady();
-      await cancellableDelay(config.retry.delaySeconds * 1_000, running, delay);
+      await cancellableDelay(config.executionSnapshot.delaySeconds * 1_000, running, delay);
       if (running.cancelled) return;
     } else if (series.current?.status === "failed" && series.consumed < series.maxAttempts) {
       running.resolveReady();
-      await cancellableDelay(config.retry.delaySeconds * 1_000, running, delay);
+      await cancellableDelay(config.executionSnapshot.delaySeconds * 1_000, running, delay);
       if (running.cancelled) return;
     }
 
@@ -217,12 +235,12 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         const compiled = await compileAgent(
           request.agentId,
           config.packageDirectory,
-          config.target,
+          config.executionSnapshot.harness,
           session.harnessSessionDirectory,
         );
-        assertCompiled(compiled, request.agentId, config.target);
-        const harness = dependencies.harnesses[config.target];
-        if (!harness || harness.target !== config.target) {
+        assertCompiled(compiled, request.agentId, config.executionSnapshot.harness);
+        const harness = dependencies.harnesses[config.executionSnapshot.harness];
+        if (!harness || harness.target !== config.executionSnapshot.harness) {
           throw new AttemptError("HARNESS_NOT_CONFIGURED", "configured harness is unavailable", false);
         }
         const prompt = renderRuntimePrompt({
@@ -242,9 +260,10 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           session,
           compiledAgent: compiled,
           stagePrompt: prompt,
-          timeoutSeconds: config.retry.timeoutSeconds,
+          timeoutSeconds: config.executionSnapshot.timeoutSeconds,
           signal: running.abort.signal,
           providerCredential: config.providerCredential,
+          execution: config.executionSnapshot,
         });
         if (!running.launched) {
           running.launched = true;
@@ -269,6 +288,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           },
           dependencies.provider,
           running.cancelled,
+          (kind, value) => validateBundleDocument(request.bundle, kind, value),
         );
         if (running.cancelled || running.abort.signal.aborted) return;
         series = {
@@ -319,15 +339,19 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           { attemptSeries: failedSeries },
         );
         series = failedSeries;
-        await cancellableDelay(config.retry.delaySeconds * 1_000, running, delay);
+        await cancellableDelay(config.executionSnapshot.delaySeconds * 1_000, running, delay);
         if (running.cancelled) return;
       }
     }
   }
 }
 
-function validateRequest(request: AttemptRequest, dependencies: AttemptRunnerDependencies) {
-  validateDocument<PersistedControl>("ControlState", request.control);
+function validateRequest(
+  request: AttemptRequest,
+  dependencies: AttemptRunnerDependencies,
+  executionSnapshot: ExecutionSnapshot,
+) {
+  validateBundleDocument<PersistedControl>(request.bundle, "ControlState", request.control);
   const { bundle, control, ref, snapshot } = request;
   if (dependencies.provider.kind !== ref.provider
     || snapshot.ref.provider !== ref.provider
@@ -347,20 +371,12 @@ function validateRequest(request: AttemptRequest, dependencies: AttemptRunnerDep
   if (!snapshot.open || !snapshot.activation.present || request.state.kind === "final") {
     throw new AttemptError("FLOW_NOT_ACTIVE", "flow is not active", false);
   }
-  const providerConfig = bundle.controller.providers[ref.provider];
-  if (!providerConfig?.repositories.includes(ref.repository)) {
+  const providerConfig = dependencies.providerConfig;
+  if (!providerConfig.repositories.includes(ref.repository)) {
     throw new AttemptError("REPOSITORY_NOT_ALLOWED", "repository is not allowlisted", false);
   }
-  if (!isProviderTokenEnvironmentForApiUrl(ref.provider, providerConfig.tokenEnv, providerConfig.apiUrl)) {
-    throw new AttemptError(
-      "PROVIDER_CREDENTIAL_INVALID",
-      "provider token environment is not supported",
-      false,
-    );
-  }
-  const providerCredential = dependencies.providerCredential(providerConfig.tokenEnv, providerConfig.apiUrl);
+  const providerCredential = dependencies.providerCredential;
   if (providerCredential.provider !== ref.provider
-    || providerCredential.name !== providerConfig.tokenEnv
     || providerCredential.apiUrl !== providerConfig.apiUrl) {
     throw new AttemptError("PROVIDER_CREDENTIAL_INVALID", "provider credential does not match", false);
   }
@@ -368,7 +384,7 @@ function validateRequest(request: AttemptRequest, dependencies: AttemptRunnerDep
   if (!agent) throw new AttemptError("AGENT_NOT_CONFIGURED", "agent is not configured", false);
   assertModeContract(request);
   const packageDirectory = safePackageDirectory(bundle, agent.package);
-  return { ...agent, packageDirectory, providerCredential };
+  return { ...agent, packageDirectory, providerCredential, executionSnapshot };
 }
 
 function selectedState(bundle: ConfigBundle, control: ControlState) {
@@ -425,13 +441,19 @@ function matchingSeries(series: AttemptSeries | null, request: AttemptRequest): 
     && series.inputRevision === request.inputRevision;
 }
 
-function newSeries(request: AttemptRequest, maxAttempts: number, seriesId: string): AttemptSeries {
+function newSeries(
+  request: AttemptRequest,
+  binding: { runtimeDigest: string; executionSnapshot: ExecutionSnapshot },
+  seriesId: string,
+): AttemptSeries {
   return {
     seriesId,
     agentId: request.agentId,
     stateId: request.stateId,
     inputRevision: request.inputRevision,
-    maxAttempts,
+    runtimeDigest: binding.runtimeDigest,
+    executionSnapshot: binding.executionSnapshot,
+    maxAttempts: binding.executionSnapshot.maxAttempts,
     consumed: 0,
     current: null,
   };

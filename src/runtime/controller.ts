@@ -15,6 +15,8 @@ export interface ControllerDependencies {
   concurrency: number;
   reconcile(ref: TicketRef): Promise<ReconcileOutcome>;
   launcher: Pick<AttemptLauncher, "cancel" | "isRunning" | "onSettled">;
+  prepareBootstrap?(refs: readonly TicketRef[]): Promise<void>;
+  runtimeState?(): Promise<{ mayStartWork: boolean; pollingIntervalSeconds: number; concurrency: number }>;
   pollingIntervalSeconds?: number;
   now?: () => string;
   delay?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
@@ -44,7 +46,7 @@ const repositoryKey = (provider: ControllerProvider, repository: string) =>
 
 export function createController(dependencies: ControllerDependencies): Controller {
   const now = dependencies.now ?? (() => new Date().toISOString());
-  const interval = (dependencies.pollingIntervalSeconds ?? 300) * 1_000;
+  let interval = (dependencies.pollingIntervalSeconds ?? 300) * 1_000;
   const delay = dependencies.delay ?? abortableDelay;
   const repositories = dependencies.providers.flatMap((provider) => provider.repositories.map((repository) => ({
     provider,
@@ -108,6 +110,14 @@ export function createController(dependencies: ControllerDependencies): Controll
         throw collectedError(errors, "controller bootstrap failed");
       }
 
+      try {
+        await dependencies.prepareBootstrap?.([...found.values()]);
+      } catch (error) {
+        const errors = [error];
+        await cleanup(errors);
+        lifecycle = "failed";
+        throw collectedError(errors, "controller bootstrap failed");
+      }
       const results = await Promise.allSettled([...found.values()].map((ref) => tickets.schedule(ref)));
       const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
       if (errors.length > 0) {
@@ -132,7 +142,15 @@ export function createController(dependencies: ControllerDependencies): Controll
           } catch (error) {
             if (!signal.aborted) throw error;
           }
-          if (!signal.aborted) queueSweep();
+          let mayStartWork = true;
+          if (!signal.aborted && dependencies.runtimeState) {
+            const state = await dependencies.runtimeState();
+            mayStartWork = state.mayStartWork;
+            interval = state.pollingIntervalSeconds * 1_000;
+            if (!Number.isFinite(interval) || interval <= 0) throw new Error("polling interval must be positive");
+            tickets.setConcurrency(state.concurrency);
+          }
+          if (!signal.aborted && mayStartWork) queueSweep();
         }
       } catch (error) {
         errors.push(error);

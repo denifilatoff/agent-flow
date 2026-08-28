@@ -3,7 +3,9 @@ import { EventEmitter } from "node:events";
 import type { Server } from "node:http";
 import test from "node:test";
 
-import type { Readiness } from "../src/health.ts";
+import type { RuntimeManager } from "../src/config/runtime.ts";
+import type { RuntimeConfig } from "../src/config/types.ts";
+import type { OperationalStatus } from "../src/health.ts";
 import { main } from "../src/main.ts";
 import type { Controller } from "../src/runtime/controller.ts";
 
@@ -13,7 +15,7 @@ test("a signal during bootstrap drains launched work without becoming ready", as
   let launched = false;
   let cancelled = false;
   let closed = false;
-  let readiness!: Readiness;
+  let readiness!: OperationalStatus;
   const controller: Controller = {
     async bootstrap() {
       launched = true;
@@ -30,7 +32,15 @@ test("a signal during bootstrap drains launched work without becoming ready", as
     close(callback: (error?: Error) => void) { closed = true; callback(); return this; },
   } as unknown as Server;
   const dependencies = {
-    createHealthServer(_port, state) { readiness = state; return server; },
+    async createRuntime() { return {
+      effective: () => ({ runtime: { http: { address: "127.0.0.1", port: 8080 } }, configuration: {
+        repository: "/config", revision: "a".repeat(40),
+      } } as RuntimeConfig),
+      mayStartWork: () => true,
+      status: () => ({ runtimeDigest: "b".repeat(64), validationErrors: [], restartRequired: false,
+        restartReason: null, changedRestartFields: [], activeAttempts: 0, safeToRestart: false }),
+    } as RuntimeManager; },
+    createHealthServer(_address, _port, state) { readiness = state; return server; },
     createPreflightDependencies() { return {} as never; },
     async runPreflight() {
       await controller.bootstrap();
@@ -40,8 +50,8 @@ test("a signal during bootstrap drains launched work without becoming ready", as
     reportError() {},
   };
 
-  const running = main({ AGENT_FLOW_HEALTH_PORT: "8080" }, dependencies);
-  await Promise.resolve();
+  const running = main({}, dependencies);
+  while (!launched) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(launched, true);
   signals.emit("SIGTERM");
   bootstrap.resolve();

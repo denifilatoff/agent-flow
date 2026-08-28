@@ -45,8 +45,13 @@ const ATTEMPT = "33333333-3333-4333-8333-333333333333";
 const SERIES = "44444444-4444-4444-8444-444444444444";
 const NOW = "2026-08-26T12:00:00.000Z";
 const PROVIDER_CREDENTIAL = {
-  provider: "github", name: "GITHUB_TOKEN", value: "fixture-token", apiUrl: "https://api.github.com",
+  provider: "github", name: "GH_TOKEN", value: "fixture-token", apiUrl: "https://api.github.com",
 } as const;
+const EXECUTION = {
+  harness: "claude", model: "fixture-model", reasoning: "high",
+  maxAttempts: 3, delaySeconds: 0, timeoutSeconds: 60,
+} as const;
+const execution = async () => ({ runtimeDigest: "b".repeat(64), executionSnapshot: EXECUTION });
 const TICKET: TicketRef = {
   provider: "github",
   repository: "example-owner/example-repository",
@@ -55,7 +60,7 @@ const TICKET: TicketRef = {
 const MAINTAINER: Actor = { login: "maintainer", providerId: "7" };
 const OUTSIDER: Actor = { login: "outsider", providerId: "8" };
 
-const BUNDLE = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", SHA);
+const BUNDLE = await loadConfigBundle(process.cwd(), "config/stack.yaml", SHA);
 
 function repository(): ProviderRepository {
   return {
@@ -386,13 +391,15 @@ async function assertRunnerAccepts(request: AttemptRequest, provider: ProviderAd
   const runner = createAttemptRunner({
     dataDirectory: "/data",
     provider,
-    providerCredential: () => PROVIDER_CREDENTIAL,
+    providerConfig: { apiUrl: PROVIDER_CREDENTIAL.apiUrl, repositories: [request.ref.repository] },
+    providerCredential: PROVIDER_CREDENTIAL,
+    execution,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: request.ref.repository,
       ticketNumber: request.ref.number, flowInstanceId: request.control.flowInstanceId,
     }; } },
-    harnesses: { [request.bundle.catalog.agents[request.agentId]!.target]: {
-      target: request.bundle.catalog.agents[request.agentId]!.target,
+    harnesses: { [EXECUTION.harness]: {
+      target: EXECUTION.harness,
       async preflight() {},
       async run(input) {
         return new Promise((resolve) => input.signal.addEventListener("abort", () => resolve({
@@ -601,7 +608,9 @@ test("reconciler owns terminal cancellation for an actual running attempt", asyn
   const runner = createAttemptRunner({
     dataDirectory: "/data",
     provider,
-    providerCredential: () => PROVIDER_CREDENTIAL,
+    providerConfig: { apiUrl: PROVIDER_CREDENTIAL.apiUrl, repositories: [TICKET.repository] },
+    providerCredential: PROVIDER_CREDENTIAL,
+    execution,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: TICKET.repository,
       ticketNumber: TICKET.number, flowInstanceId: FLOW_1,
@@ -652,7 +661,10 @@ test("terminal cancellation overrides an in-flight success from the same attempt
   const releaseSuccessCas = deferred<void>();
   const abortObserved = deferred<void>();
   const runner = createAttemptRunner({
-    dataDirectory: "/data", provider, providerCredential: () => PROVIDER_CREDENTIAL,
+    dataDirectory: "/data", provider,
+    providerConfig: { apiUrl: PROVIDER_CREDENTIAL.apiUrl, repositories: [TICKET.repository] },
+    providerCredential: PROVIDER_CREDENTIAL,
+    execution,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: TICKET.repository,
       ticketNumber: TICKET.number, flowInstanceId: FLOW_1,

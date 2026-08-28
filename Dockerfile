@@ -58,9 +58,8 @@ RUN set -eux; \
 
 RUN groupadd --gid 10001 agent \
     && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin agent \
-    && mkdir -p /data /home/agent/.config/gh /home/agent/.config/glab-cli /home/agent/.codex /home/agent/.claude \
-    && touch /home/agent/.claude.json \
-    && chown -R agent:agent /data /home/agent
+    && mkdir -p /etc/agent-flow /run/secrets/agent-flow /var/lib/agent-flow /tmp/agent-flow \
+    && chown -R agent:agent /var/lib/agent-flow /tmp/agent-flow /home/agent
 
 WORKDIR /app
 COPY --from=build --chown=agent:agent /app/dist ./dist
@@ -70,12 +69,7 @@ COPY --from=tools --chown=agent:agent /tools/node_modules /opt/tools/node_module
 COPY --chown=agent:agent schemas ./schemas
 
 ENV PATH=/opt/tools/node_modules/.bin:$PATH \
-    HOME=/home/agent \
-    CODEX_HOME=/home/agent/.codex \
-    CLAUDE_CONFIG_DIR=/home/agent/.claude \
-    AGENT_FLOW_CONFIG_REPOSITORY=/config \
-    AGENT_FLOW_DATA_DIRECTORY=/data \
-    AGENT_FLOW_HEALTH_PORT=8080
+    HOME=/home/agent
 
 USER 10001:10001
 EXPOSE 8080

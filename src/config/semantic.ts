@@ -3,8 +3,9 @@ import { isAbsolute, relative, resolve } from "node:path";
 
 import { parseYaml } from "./schema-validator.ts";
 import type { ConfigBundle } from "./load.js";
-import type { FlowTransition } from "./types.js";
-import { isProviderTokenEnvironmentForApiUrl } from "./provider-credentials.ts";
+import type { FlowTransition, HarnessTarget } from "./types.js";
+
+export type CatalogHarnesses = Record<string, readonly HarnessTarget[]>;
 
 type FlowGuardName = NonNullable<FlowTransition["guards"]>[number];
 type FlowActionName = NonNullable<FlowTransition["actions"]>[number];
@@ -62,6 +63,7 @@ async function validatePackage(
   bundle: ConfigBundle,
   agentId: string,
   errors: SemanticError[],
+  catalogHarnesses: CatalogHarnesses,
 ): Promise<void> {
   const agent = bundle.catalog.agents[agentId];
   const path = `catalog.agents.${agentId}.package`;
@@ -97,11 +99,12 @@ async function validatePackage(
   } else {
     try {
       const manifest = await parseYaml(resolve(packageRoot, "apm.yml")) as Record<string, unknown>;
-      if (!Array.isArray(manifest.targets) || !manifest.targets.includes(agent.target)) {
-        errors.push({
-          path: `catalog.agents.${agentId}.target`,
-          message: `target ${agent.target} does not match the package manifest`,
-        });
+      if (!Array.isArray(manifest.targets) || manifest.targets.length === 0) {
+        errors.push({ path, message: "apm.yml must declare at least one harness target" });
+      } else if (!manifest.targets.every((target) => target === "claude" || target === "codex")) {
+        errors.push({ path, message: "apm.yml declares an unsupported harness target" });
+      } else {
+        catalogHarnesses[agentId] = [...new Set(manifest.targets as HarnessTarget[])].sort();
       }
     } catch {
       errors.push({ path, message: "apm.yml is not valid YAML" });
@@ -123,8 +126,9 @@ async function validatePackage(
   }
 }
 
-export async function validateSemantics(bundle: ConfigBundle): Promise<void> {
+export async function validateSemantics(bundle: ConfigBundle): Promise<CatalogHarnesses> {
   const errors: SemanticError[] = [];
+  const catalogHarnesses: CatalogHarnesses = {};
   const states = bundle.flow.spec.states;
 
   if (!Object.hasOwn(states, bundle.flow.spec.initial)) {
@@ -190,33 +194,11 @@ export async function validateSemantics(bundle: ConfigBundle): Promise<void> {
   }
 
   for (const agentId of Object.keys(bundle.catalog.agents).sort()) {
-    await validatePackage(bundle, agentId, errors);
-  }
-
-  const repositories = new Map<string, string>();
-  for (const provider of (["github", "gitlab"] as const)) {
-    const config = bundle.controller.providers[provider];
-    if (config && !isProviderTokenEnvironmentForApiUrl(provider, config.tokenEnv, config.apiUrl)) {
-      const host = new URL(config.apiUrl).hostname;
-      errors.push({
-        path: `controller.providers.${provider}.tokenEnv`,
-        message: provider === "github"
-          ? `token environment ${config.tokenEnv} is not supported for GitHub API host ${host}`
-          : `token environment ${config.tokenEnv} is not supported by gitlab CLI`,
-      });
-    }
-    for (const [index, repository] of (config?.repositories ?? []).entries()) {
-      const path = `controller.providers.${provider}.repositories.${index}`;
-      const previous = repositories.get(repository);
-      if (previous) {
-        errors.push({ path, message: `repository ${repository} is configured more than once (first at ${previous})` });
-      } else {
-        repositories.set(repository, path);
-      }
-    }
+    await validatePackage(bundle, agentId, errors, catalogHarnesses);
   }
 
   if (errors.length > 0) {
     throw new SemanticConfigError(errors);
   }
+  return catalogHarnesses;
 }

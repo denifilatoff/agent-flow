@@ -1,41 +1,38 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ConfigBundle } from "../src/config/load.ts";
+import { loadConfigBundle } from "../src/config/load.ts";
+import type { RuntimeManager } from "../src/config/runtime.ts";
+import type { RuntimeConfig } from "../src/config/types.ts";
 import type { HarnessAdapter } from "../src/harness/types.ts";
 import type { ProviderAdapter } from "../src/provider/types.ts";
 import type { Controller } from "../src/runtime/controller.ts";
 import { runPreflight, type PreflightDependencies } from "../src/preflight.ts";
 
-const bundle = {
-  revision: "a".repeat(40),
-  root: "/pinned",
-  controller: {
-    apiVersion: "agent-flow/v1alpha1",
-    kind: "ControllerConfig",
-    configuration: { repository: "/config", flow: "config/flows/development.yaml", catalog: "config/agents.yaml" },
-    providers: {
-      github: { apiUrl: "https://api.github.test", tokenEnv: "GITHUB_TOKEN", repositories: ["owner/repo"] },
-      gitlab: { apiUrl: "https://gitlab.test/api/v4", tokenEnv: "GITLAB_TOKEN", repositories: ["group/repo"] },
-    },
-    polling: { intervalSeconds: 300, maxCallsPerMinute: 20, quotaReservePercent: 25 },
-    runtime: { concurrency: 2, dataDirectory: "/data", healthPort: 8080 },
+const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", "a".repeat(40));
+const runtimeConfig: RuntimeConfig = {
+  apiVersion: "agent-flow/v1alpha1",
+  kind: "RuntimeConfig",
+  configuration: { repository: "/config", revision: bundle.revision, stack: "config/stack.yaml" },
+  provider: {
+    type: "github", apiUrl: "https://api.github.test", repositories: ["owner/repo"], tokenFile: "/secrets/token",
   },
-  flow: { apiVersion: "agent-flow/v1alpha1", kind: "Flow", metadata: {
-    id: "development", activationLabel: "agent-flow:development", managedLabel: "agent-flow:managed",
-  }, spec: { initial: "assessment", states: {} } },
-  catalog: { apiVersion: "agent-flow/v1alpha1", kind: "AgentCatalog", agents: {
-    architect: { package: "agent-packages/architect", target: "claude", retry: {
-      maxAttempts: 1, delaySeconds: 0, timeoutSeconds: 1,
-    } },
-    developer: { package: "agent-packages/developer", target: "codex", retry: {
-      maxAttempts: 1, delaySeconds: 0, timeoutSeconds: 1,
-    } },
-  } },
-} satisfies ConfigBundle;
+  execution: {
+    agents: Object.fromEntries(Object.keys(bundle.catalog.agents).map((id) => [id, {
+      harness: id === "architect" || id === "planner" ? "claude" : "codex",
+      model: "fixture-model", reasoning: "high", maxAttempts: 1, delaySeconds: 0, timeoutSeconds: 1,
+    }])),
+    harnesses: { claude: { authFile: "/secrets/claude" }, codex: { authFile: "/secrets/codex" } },
+  },
+  polling: { intervalSeconds: 300, maxCallsPerMinute: 20, quotaReservePercent: 25 },
+  runtime: { concurrency: 2, dataDirectory: "/data", http: { address: "127.0.0.1", port: 8080 } },
+};
 
-function provider(kind: "github" | "gitlab", calls: string[]): ProviderAdapter {
-  return { kind, async verifyAuth() { calls.push(`${kind}:rest`); return { login: "operator", providerId: "1" }; } } as ProviderAdapter;
+function provider(calls: string[]): ProviderAdapter {
+  return {
+    kind: "github",
+    async verifyAuth() { calls.push("github:rest"); return { login: "operator", providerId: "1" }; },
+  } as ProviderAdapter;
 }
 
 function harness(target: "claude" | "codex", calls: string[]): HarnessAdapter {
@@ -48,15 +45,13 @@ function dependencies(calls: string[], fail?: string): PreflightDependencies {
     async run() {}, async reconcileNow() {},
   };
   return {
+    runtime: { effective: () => runtimeConfig, bindCatalog() {} } as RuntimeManager,
     async loadConfig() { calls.push("config:load"); if (fail === "config") throw new Error("token=secret"); return bundle; },
     async validateConfig() { calls.push("config:validate"); if (fail === "validate") throw new Error("secret schema"); },
     async prepareDirectories() { calls.push("directories"); if (fail === "directories") throw new Error("/secret/path"); },
-    createProviders() {
-      return { github: provider("github", calls), gitlab: provider("gitlab", calls) };
-    },
-    createHarnesses() {
-      return { claude: harness("claude", calls), codex: harness("codex", calls) };
-    },
+    createProviders() { return { github: provider(calls) }; },
+    async providerEnvironment() { calls.push("provider:environment"); return { PATH: "/bin", GH_ENTERPRISE_TOKEN: "secret" }; },
+    createHarnesses() { return { claude: harness("claude", calls), codex: harness("codex", calls) }; },
     async runCommand(file, args) {
       const name = `${file}:${args.join(" ")}`;
       calls.push(name);
@@ -73,12 +68,9 @@ test("runs fail-closed startup checks in a fixed order", async () => {
 
   assert.equal(ready.bundle, bundle);
   assert.deepEqual(calls, [
-    "config:load", "config:validate", "directories",
-    "github:rest", "gitlab:rest",
-    "gh:auth status --hostname api.github.test", "glab:auth status --hostname gitlab.test",
-    "git:--version", "apm:--version",
-    "claude:auth", "codex:auth",
-    "controller:create", "controller:bootstrap",
+    "config:load", "config:validate", "directories", "github:rest", "provider:environment",
+    "gh:auth status --hostname api.github.test", "git:--version", "apm:--version",
+    "claude:auth", "codex:auth", "controller:create", "controller:bootstrap",
   ]);
 });
 
@@ -87,7 +79,6 @@ for (const [failure, message] of [
   ["validate", "configuration validation failed"],
   ["directories", "data directory preflight failed"],
   ["gh:auth status --hostname api.github.test", "github agent authentication failed"],
-  ["glab:auth status --hostname gitlab.test", "gitlab agent authentication failed"],
   ["git:--version", "git executable preflight failed"],
   ["apm:--version", "apm executable preflight failed"],
   ["controller", "controller bootstrap failed"],
@@ -101,20 +92,11 @@ for (const [failure, message] of [
   });
 }
 
-for (const directory of ["repository", "worktree", "session"] as const) {
-  test(`fails closed when the ${directory} data path is not writable`, async () => {
-    const configured = dependencies([]);
-    configured.prepareDirectories = async () => { throw new Error(`${directory} /private/secret`); };
-    await assert.rejects(runPreflight(configured), { message: "data directory preflight failed" });
-  });
-}
-
 test("fails closed on provider REST authentication before CLI checks", async () => {
   const calls: string[] = [];
   const configured = dependencies(calls);
   configured.createProviders = () => ({
-    github: { ...provider("github", calls), async verifyAuth() { throw new Error("token=secret"); } },
-    gitlab: provider("gitlab", calls),
+    github: { ...provider(calls), async verifyAuth() { throw new Error("token=secret"); } },
   });
   await assert.rejects(runPreflight(configured), { message: "github REST authentication failed" });
   assert.equal(calls.some((call) => call.startsWith("gh:")), false);

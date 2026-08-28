@@ -16,7 +16,7 @@ const ATTEMPT_ID = "22222222-2222-4222-8222-222222222222";
 const HEAD_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 
 async function shippedFlow(): Promise<FlowDefinition> {
-  return (await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION)).flow;
+  return (await loadConfigBundle(process.cwd(), "config/stack.yaml", REVISION)).flow;
 }
 
 function promptInput(flow: FlowDefinition, overrides: Partial<RuntimePromptInput> = {}): RuntimePromptInput {

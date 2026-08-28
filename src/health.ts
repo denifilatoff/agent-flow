@@ -1,30 +1,61 @@
 import { createServer, type Server } from "node:http";
 
-export interface Readiness {
+import type { RuntimeManager } from "./config/runtime.ts";
+
+export interface OperationalStatus {
   isReady(): boolean;
   markReady(): void;
   markNotReady(): void;
-}
-
-export function createReadiness(): Readiness {
-  let ready = false;
-  return {
-    isReady: () => ready,
-    markReady: () => { ready = true; },
-    markNotReady: () => { ready = false; },
+  snapshot(): {
+    configurationRepository: string;
+    configurationRevision: string;
+    runtimeDigest: string;
+    validationErrors: string[];
+    restartRequired: boolean;
+    restartReason: string | null;
+    changedRestartFields: string[];
+    activeAttempts: number;
+    safeToRestart: boolean;
   };
 }
 
-export function createHealthServer(port: number, readiness: Readiness): Server {
+export function createOperationalStatus(runtime: RuntimeManager): OperationalStatus {
+  let startupReady = false;
+  return {
+    isReady: () => startupReady && runtime.mayStartWork(),
+    markReady: () => { startupReady = true; },
+    markNotReady: () => { startupReady = false; },
+    snapshot: () => {
+      const configuration = runtime.effective().configuration;
+      return {
+        configurationRepository: configuration.repository,
+        configurationRevision: configuration.revision,
+        ...runtime.status(),
+      };
+    },
+  };
+}
+
+export function createHealthServer(address: string, port: number, status: OperationalStatus): Server {
   const server = createServer((request, response) => {
-    const status = request.url === "/health/live"
+    if (request.method !== "GET") {
+      response.writeHead(405, { allow: "GET", "content-type": "text/plain; charset=utf-8" });
+      response.end("405\n");
+      return;
+    }
+    if (request.url === "/api/status") {
+      response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      response.end(`${JSON.stringify(status.snapshot())}\n`);
+      return;
+    }
+    const code = request.url === "/health/live"
       ? 200
       : request.url === "/health/ready"
-        ? readiness.isReady() ? 200 : 503
+        ? status.isReady() ? 200 : 503
         : 404;
-    response.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
-    response.end(`${status}\n`);
+    response.writeHead(code, { "content-type": "text/plain; charset=utf-8" });
+    response.end(`${code}\n`);
   });
-  server.listen(port);
+  server.listen(port, address);
   return server;
 }

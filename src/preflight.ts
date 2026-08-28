@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import type { ConfigBundle } from "./config/load.js";
+import type { RuntimeManager } from "./config/runtime.ts";
 import { validateSemantics } from "./config/semantic.ts";
 import type { HarnessTarget } from "./config/types.js";
 import type { HarnessAdapter } from "./harness/types.js";
@@ -14,11 +15,13 @@ import { ensureSafeDirectory, prepareDataRoot } from "./runtime/filesystem.ts";
 
 type Providers = Partial<Record<ProviderKind, ProviderAdapter>>;
 type Harnesses = Partial<Record<HarnessTarget, HarnessAdapter>>;
-type CommandRunner = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
+type CommandRunner = (file: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => Promise<{ stdout: string; stderr: string }>;
 
 export interface PreflightDependencies {
+  runtime: RuntimeManager;
   loadConfig(): Promise<ConfigBundle>;
-  createProviders(bundle: ConfigBundle): Providers;
+  createProviders(bundle: ConfigBundle): Providers | Promise<Providers>;
+  providerEnvironment(): Promise<NodeJS.ProcessEnv>;
   createHarnesses(bundle: ConfigBundle): Harnesses;
   createController(bundle: ConfigBundle, providers: Providers, harnesses: Harnesses): Controller;
   validateConfig?: (bundle: ConfigBundle) => Promise<void>;
@@ -34,43 +37,47 @@ export interface ReadyDependencies {
 }
 
 const execFile = promisify(execFileCallback);
-const defaultCommand: CommandRunner = async (file, args) => {
-  const result = await execFile(file, args, { encoding: "utf8", maxBuffer: 1_048_576, shell: false });
+const defaultCommand: CommandRunner = async (file, args, options = {}) => {
+  const result = await execFile(file, args, {
+    encoding: "utf8", maxBuffer: 1_048_576, shell: false, env: options.env,
+  });
   return { stdout: result.stdout, stderr: result.stderr };
 };
 
 export async function runPreflight(dependencies: PreflightDependencies): Promise<ReadyDependencies> {
   const bundle = await checked("configuration load failed", dependencies.loadConfig);
-  await checked("configuration validation failed", () =>
-    (dependencies.validateConfig ?? validateSemantics)(bundle));
+  const runtime = dependencies.runtime.effective();
+  await checked("configuration validation failed", async () => {
+    const harnesses = dependencies.validateConfig
+      ? (await dependencies.validateConfig(bundle), Object.fromEntries(
+          Object.keys(bundle.catalog.agents).map((agentId) => [agentId, ["claude", "codex"] as const]),
+        ))
+      : await validateSemantics(bundle);
+    dependencies.runtime.bindCatalog(harnesses);
+  });
   await checked("data directory preflight failed", () =>
-    (dependencies.prepareDirectories ?? prepareDirectories)(bundle.controller.runtime.dataDirectory));
+    (dependencies.prepareDirectories ?? prepareDirectories)(runtime.runtime.dataDirectory));
 
   const providers = await checked("provider configuration failed", async () => dependencies.createProviders(bundle));
-  for (const kind of ["github", "gitlab"] as const) {
-    if (bundle.controller.providers[kind]) {
-      const adapter = providers[kind];
-      if (!adapter || adapter.kind !== kind) throw new Error(`${kind} provider configuration failed`);
-      await checked(`${kind} REST authentication failed`, () => adapter.verifyAuth());
-    }
-  }
+  const kind = runtime.provider.type;
+  const adapter = providers[kind];
+  if (!adapter || adapter.kind !== kind) throw new Error(`${kind} provider configuration failed`);
+  await checked(`${kind} REST authentication failed`, () => adapter.verifyAuth());
 
   const run = dependencies.runCommand ?? defaultCommand;
-  for (const [kind, executable] of [["github", "gh"], ["gitlab", "glab"]] as const) {
-    const config = bundle.controller.providers[kind];
-    if (config) {
-      const hostname = providerHostname(kind, config.apiUrl);
-      await checked(
-        `${kind} agent authentication failed`,
-        () => run(executable, ["auth", "status", "--hostname", hostname]),
-      );
-    }
-  }
+  const executable = kind === "github" ? "gh" : "glab";
+  const hostname = providerHostname(kind, runtime.provider.apiUrl);
+  await checked(
+    `${kind} agent authentication failed`,
+    async () => run(executable, ["auth", "status", "--hostname", hostname], {
+      env: await dependencies.providerEnvironment(),
+    }),
+  );
   await checked("git executable preflight failed", () => run("git", ["--version"]));
   await checked("apm executable preflight failed", () => run("apm", ["--version"]));
 
   const harnesses = await checked("harness configuration failed", async () => dependencies.createHarnesses(bundle));
-  const targets = new Set(Object.values(bundle.catalog.agents).map((agent) => agent.target));
+  const targets = new Set(Object.keys(runtime.execution.harnesses) as HarnessTarget[]);
   for (const target of [...targets].sort()) {
     const harness = harnesses[target];
     if (!harness || harness.target !== target) throw new Error(`${target} harness configuration failed`);

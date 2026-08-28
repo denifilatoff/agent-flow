@@ -152,3 +152,25 @@ test("preserves an undefined worker rejection", async () => {
 
   await assert.rejects(scheduler.schedule("ticket"), () => true);
 });
+
+test("applies reduced concurrency only to work not yet claimed", async () => {
+  const gates = [deferred(), deferred(), deferred()];
+  const started: number[] = [];
+  const scheduler = createScheduler<number>({
+    concurrency: 2,
+    key: String,
+    run: async (value) => { started.push(value); await gates[value]!.promise; },
+  });
+  const work = [0, 1, 2].map((value) => scheduler.schedule(value));
+  await Promise.resolve();
+  scheduler.setConcurrency(1);
+  assert.deepEqual(started, [0, 1]);
+  gates[0]!.resolve();
+  await Promise.resolve();
+  assert.deepEqual(started, [0, 1]);
+  gates[1]!.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, [0, 1, 2]);
+  gates[2]!.resolve();
+  await Promise.all(work);
+});
