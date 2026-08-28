@@ -15,9 +15,8 @@ import {
   providerCredentialEnvironment,
   preflightHarness,
   processDependencies,
-  linkPrivateFile,
+  readRegularFile,
   runHarnessProcess,
-  validateRegularFile,
   type ProcessDependencies,
 } from "./process.ts";
 
@@ -31,9 +30,9 @@ export function createClaudeAdapter(
   dependencyOverrides: Partial<ProcessDependencies> = {},
 ): HarnessAdapter {
   const dependencies = processDependencies(dependencyOverrides);
-  let credentialsFile: Promise<string> | undefined;
+  let credentialsFile: Promise<Buffer> | undefined;
   let settingsFile: Promise<Buffer> | undefined;
-  const loadCredentials = () => credentialsFile ??= validateRegularFile(auth.credentialsFile, "Claude authentication file");
+  const loadCredentials = () => credentialsFile ??= readRegularFile(auth.credentialsFile, "Claude authentication file");
   const loadSettings = () => auth.settingsFile
     ? settingsFile ??= readFile(auth.settingsFile)
     : undefined;
@@ -116,8 +115,8 @@ The entry agent must read contextPath and write one AgentDecision to decisionPat
 If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_DECISION_PATH, it may use these parsed paths directly.`;
 }
 
-async function seedClaudeAuth(credentials: Promise<string>, settings: Promise<Buffer> | undefined, home: string): Promise<void> {
-  await linkPrivateFile(join(home, ".credentials.json"), await credentials);
+async function seedClaudeAuth(credentials: Promise<Buffer>, settings: Promise<Buffer> | undefined, home: string): Promise<void> {
+  await writeFile(join(home, ".credentials.json"), await credentials, { flag: "wx", mode: 0o600 });
   if (settings) await writeFile(join(home, "settings.json"), await settings, { flag: "wx", mode: 0o600 });
 }
 

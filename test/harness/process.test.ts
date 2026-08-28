@@ -297,7 +297,9 @@ test("runs Codex with canonical, unambiguous private attempt paths", async (t) =
     assert.equal(call.env[name], undefined);
   }
   assert.match(call.env.CODEX_HOME!, /agent-flow\/codex-/);
-  assert.equal((await lstat(join(call.env.CODEX_HOME!, "auth.json"))).isSymbolicLink(), true);
+  const authInfo = await lstat(join(call.env.CODEX_HOME!, "auth.json"));
+  assert.equal(authInfo.isFile(), true);
+  assert.equal(authInfo.mode & 0o777, 0o600);
   assert.equal(await readFile(join(call.env.CODEX_HOME!, "auth.json"), "utf8"), "{}\n");
   assert.equal(await readFile(join(call.env.CODEX_HOME!, "config.toml"), "utf8"), "{}\n");
   assert.equal(
@@ -737,6 +739,36 @@ test("preflights Claude from a canonical isolated credential copy", async (t) =>
 
   assert.deepEqual(commands, [["claude", "--version"], ["claude", "auth", "status"]]);
   await assert.rejects(access(preflightHome), { code: "ENOENT" });
+});
+
+test("stages the startup snapshot after a mounted harness credential is replaced", async (t) => {
+  for (const target of ["codex", "claude"] as const) {
+    const fixture = await runFixture(target);
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const processes = processFixture();
+    const adapter = target === "codex"
+      ? createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies)
+      : createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies);
+    const startupCredential = `{"source":"${target}-startup"}\n`;
+
+    await writeFile(fixture.authFile, startupCredential, { mode: 0o600 });
+    await adapter.preflight();
+    const replacement = join(fixture.root, `${target}-replacement`);
+    await writeFile(replacement, `{"source":"${target}-replacement"}\n`, { mode: 0o600 });
+    await rename(replacement, fixture.authFile);
+
+    const pending = adapter.run(fixture.input);
+    await waitForSpawn(processes.calls);
+    const home = processes.calls[0]!.env[target === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]!;
+    const credentialPath = join(home, target === "codex" ? "auth.json" : ".credentials.json");
+    const stagedCredential = await readFile(credentialPath, "utf8");
+    const stagedMode = (await lstat(credentialPath)).mode & 0o777;
+    processes.children[0]!.finish(0, null);
+    await pending;
+
+    assert.equal(stagedCredential, startupCredential, target);
+    assert.equal(stagedMode, 0o600, target);
+  }
 });
 
 test("classifies missing or failed authentication as sanitized non-retryable preflight errors", async (t) => {

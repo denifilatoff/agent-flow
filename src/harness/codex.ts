@@ -12,9 +12,8 @@ import {
   providerCredentialEnvironment,
   preflightHarness,
   processDependencies,
-  linkPrivateFile,
+  readRegularFile,
   runHarnessProcess,
-  validateRegularFile,
   type ProcessDependencies,
 } from "./process.ts";
 
@@ -28,9 +27,9 @@ export function createCodexAdapter(
   dependencyOverrides: Partial<ProcessDependencies> = {},
 ): HarnessAdapter {
   const dependencies = processDependencies(dependencyOverrides);
-  let authFile: Promise<string> | undefined;
+  let authFile: Promise<Buffer> | undefined;
   let configFile: Promise<Buffer> | undefined;
-  const loadAuth = () => authFile ??= validateRegularFile(auth.authFile, "Codex authentication file");
+  const loadAuth = () => authFile ??= readRegularFile(auth.authFile, "Codex authentication file");
   const loadConfig = () => auth.configFile
     ? configFile ??= readFile(auth.configFile)
     : undefined;
@@ -117,8 +116,8 @@ The entry agent must read contextPath and write one AgentDecision to decisionPat
 If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_DECISION_PATH, it may use these parsed paths directly.`;
 }
 
-async function seedCodexHome(auth: Promise<string>, config: Promise<Buffer> | undefined, home: string): Promise<void> {
-  await linkPrivateFile(join(home, "auth.json"), await auth);
+async function seedCodexHome(auth: Promise<Buffer>, config: Promise<Buffer> | undefined, home: string): Promise<void> {
+  await writeFile(join(home, "auth.json"), await auth, { flag: "wx", mode: 0o600 });
   if (config) await writeFile(join(home, "config.toml"), await config, { flag: "wx", mode: 0o600 });
 }
 

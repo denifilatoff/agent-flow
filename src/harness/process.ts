@@ -13,7 +13,6 @@ import {
   opendir,
   realpath,
   rm,
-  symlink,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
@@ -180,18 +179,13 @@ export async function createHarnessHome(_session: AttemptSession, target: Harnes
   return realpath(await mkdtemp(join(harnessRoot, `${target}-`)));
 }
 
-export async function validateRegularFile(source: string, label: string): Promise<string> {
+export async function readRegularFile(source: string, label: string): Promise<Buffer> {
   const sourceHandle = await openRegularSource(source, label);
   try {
-    return resolve(source);
+    return await sourceHandle.readFile();
   } finally {
     await sourceHandle.close();
   }
-}
-
-export async function linkPrivateFile(destination: string, source: string): Promise<void> {
-  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-  await symlink(source, destination, "file");
 }
 
 export async function createCliConfigEnvironment(
