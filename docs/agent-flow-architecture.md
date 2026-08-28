@@ -261,55 +261,40 @@ human gates, and names from the controller's fixed set of actions and guards. Th
 shell commands, or another executable extension mechanism. The controller validates the YAML and converts it to an
 XState machine before activating a flow.
 
-The stage sequence is:
+The diagrams show the primary agent paths. Human input, retry exhaustion, and cancellation remain part of the flow
+policy described below, but they are omitted here to keep the supported development scenarios clear.
+
+### Feature development transitions
 
 ```mermaid
 stateDiagram-v2
-    state "assessment-review" as AssessmentReview
-    state "plan-review" as PlanReview
-    state "needs-human" as NeedsHuman
     state "awaiting-merge" as AwaitingMerge
 
-    [*] --> Inactive
-    Inactive --> Assessment: authorized activation label
-    Assessment --> AssessmentReview: assessment published
-    AssessmentReview --> Planning: approved
-    AssessmentReview --> Assessment: changes requested
-    Planning --> PlanReview: plan published
-    PlanReview --> Development: approved
-    PlanReview --> Planning: changes requested
+    [*] --> Assessment: development label
+    Assessment --> Planning: assessment published
+    Planning --> Development: plan published
     Development --> Review: PR or MR updated
     Review --> Development: changes requested
     Review --> AwaitingMerge: review accepted
     AwaitingMerge --> Done: PR or MR merged
+```
 
-    Assessment --> NeedsHuman: question
-    Planning --> NeedsHuman: question
-    Development --> NeedsHuman: question
-    Review --> NeedsHuman: question
-    NeedsHuman --> Assessment: authorized answer
-    NeedsHuman --> Planning: authorized answer
-    NeedsHuman --> Development: authorized answer
-    NeedsHuman --> Review: authorized answer
+### Bugfix transitions
 
-    Assessment --> Blocked: retries exhausted
-    Planning --> Blocked: retries exhausted
-    Development --> Blocked: retries exhausted
-    Review --> Blocked: retries exhausted
-    Blocked --> Assessment: authorized comment resets retries
-    Blocked --> Planning: authorized comment resets retries
-    Blocked --> Development: authorized comment resets retries
-    Blocked --> Review: authorized comment resets retries
+```mermaid
+stateDiagram-v2
+    state "bug-reproduction" as BugReproduction
+    state "bug-verification" as BugVerification
+    state "awaiting-merge" as AwaitingMerge
 
-    Assessment --> Cancelled: activation label removed
-    AssessmentReview --> Cancelled: activation label removed
-    Planning --> Cancelled: activation label removed
-    PlanReview --> Cancelled: activation label removed
-    Development --> Cancelled: activation label removed
-    Review --> Cancelled: activation label removed
-    NeedsHuman --> Cancelled: activation label removed
-    Blocked --> Cancelled: activation label removed
-    AwaitingMerge --> Cancelled: activation label removed
+    [*] --> BugReproduction: bugfix label
+    BugReproduction --> Bugfix: diagnostic published
+    Bugfix --> Review: PR or MR updated
+    Review --> Bugfix: changes requested
+    Review --> BugVerification: review accepted
+    BugVerification --> Review: PR or MR head changed
+    BugVerification --> AwaitingMerge: bug receipt verified
+    AwaitingMerge --> Done: PR or MR merged
 ```
 
 The cancellation transitions also apply when the ticket closes. A merged change that completes `awaiting-merge` takes
