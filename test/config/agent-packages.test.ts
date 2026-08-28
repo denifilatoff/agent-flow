@@ -10,11 +10,34 @@ const PACKAGE_TARGETS = {
   planner: ["claude", "codex"],
   developer: ["codex"],
   reviewer: ["codex"],
+  "bug-investigator": ["claude", "codex"],
+  bugfixer: ["codex"],
+} as const;
+
+const PACKAGE_VERSIONS = {
+  architect: "1.0.3",
+  planner: "1.0.3",
+  developer: "1.0.3",
+  reviewer: "1.0.3",
+  "bug-investigator": "1.0.0",
+  bugfixer: "1.0.0",
+} as const;
+
+const ADVERSARIAL_REVIEW_DEPENDENCY =
+  "Netcracker/qubership-ai-packages/agent-packages/adversarial-code-review#9b0af51d160b866548f97af0ee50c9467766815d";
+const BUG_SKILL_REVISION = "634b92f887487fc61cddc2f61d77830e09e8f589";
+const ENGINEERING_SKILL_REVISION = "f63ec56a3cc936408d792956ae583c3c96a825bd";
+const ENGINEERING_SKILLS = {
+  architect: ["spec-driven-development"],
+  planner: ["planning-and-task-breakdown"],
+  developer: ["incremental-implementation", "test-driven-development"],
+  bugfixer: ["debugging-and-error-recovery", "test-driven-development"],
 } as const;
 
 const DOMAIN_CONTRACTS = {
-  architect: [/\bscope\b/, /\bconstraints\b/, /\binterfaces\b/, /\brisks\b/, /acceptance conditions/],
+  architect: [/spec-driven-development/, /\bscope\b/, /\bconstraints\b/, /\binterfaces\b/, /\brisks\b/, /acceptance conditions/],
   planner: [
+    /planning-and-task-breakdown/,
     /complete implementation plan/,
     /required changes/,
     /\border\b/,
@@ -23,13 +46,24 @@ const DOMAIN_CONTRACTS = {
     /acceptance checks/,
   ],
   developer: [
+    /incremental-implementation/,
+    /test-driven-development/,
     /smallest change/,
     /repository's instructions/,
     /trace (?:the )?(?:relevant )?(?:callers|call sites?)/,
     /review the diff/,
     /relevant test suite/,
   ],
-  reviewer: [/pinned head/, /blocking/, /nonblocking/, /Do not edit code/, /Do not merge/, /native `COMMENT` review/],
+  reviewer: [/adversarial-code-review/, /pinned head/, /Do not edit code/, /Do not merge/, /native `COMMENT` review/],
+  "bug-investigator": [/bug-reproduction-brief/, /bug-receipt/, /stop before changing code/, /Do not edit code/],
+  bugfixer: [
+    /debugging-and-error-recovery/,
+    /test-driven-development/,
+    /reproduction brief/,
+    /smallest/,
+    /regression\s+check/,
+    /root cause/,
+  ],
 } as const;
 
 for (const event of [
@@ -65,7 +99,7 @@ async function assertAgentPackage(packageName: keyof typeof PACKAGE_TARGETS, art
   const manifest = parse(await readFile(new URL("apm.yml", packageRoot), "utf8")) as Record<string, unknown>;
 
   assert.equal(manifest.name, packageName);
-  assert.equal(manifest.version, "1.0.2");
+  assert.equal(manifest.version, PACKAGE_VERSIONS[packageName]);
   assert.deepEqual(manifest.targets, PACKAGE_TARGETS[packageName]);
   await readFile(new URL("apm.lock.yaml", packageRoot), "utf8");
 
@@ -105,6 +139,76 @@ test("reviewer package has one entry agent and a lockfile", async () => {
   await assertAgentPackage("reviewer", "review");
 });
 
+test("bug investigator package has one entry agent and a lockfile", async () => {
+  await assertAgentPackage("bug-investigator", "diagnostic");
+});
+
+test("bug investigator publishes controller diagnostics on the ticket", async () => {
+  const investigator = parsePrimitive(
+    await readFile(
+      new URL("../../agent-packages/bug-investigator/.apm/agents/bug-investigator.agent.md", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.match(investigator.body, /both diagnostic artifacts on the supplied ticket/);
+  assert.match(investigator.body, /never on its change request/);
+});
+
+test("bugfixer package has one entry agent and a lockfile", async () => {
+  await assertAgentPackage("bugfixer", "regression");
+});
+
+test("reviewer pins and locks the adversarial review skill", async () => {
+  const packageRoot = new URL("../../agent-packages/reviewer/", import.meta.url);
+  const manifest = parse(await readFile(new URL("apm.yml", packageRoot), "utf8")) as {
+    dependencies?: { apm?: string[] };
+  };
+  assert.deepEqual(manifest.dependencies?.apm, [ADVERSARIAL_REVIEW_DEPENDENCY]);
+
+  const lock = await readFile(new URL("apm.lock.yaml", packageRoot), "utf8");
+  assert.match(lock, /name: adversarial-code-review/);
+  assert.match(lock, /resolved_commit: 9b0af51d160b866548f97af0ee50c9467766815d/);
+  assert.match(lock, /\.agents\/skills\/adversarial-code-review\/SKILL\.md/);
+});
+
+test("bug investigator pins and locks both bug skills for Claude and Codex", async () => {
+  const packageRoot = new URL("../../agent-packages/bug-investigator/", import.meta.url);
+  const manifest = parse(await readFile(new URL("apm.yml", packageRoot), "utf8")) as {
+    dependencies?: { apm?: string[] };
+  };
+  assert.deepEqual(manifest.dependencies?.apm, [
+    `github/awesome-copilot/skills/bug-reproduction-brief#${BUG_SKILL_REVISION}`,
+    `github/awesome-copilot/skills/bug-receipt#${BUG_SKILL_REVISION}`,
+  ]);
+
+  const lock = await readFile(new URL("apm.lock.yaml", packageRoot), "utf8");
+  assert.match(lock, /name: bug-reproduction-brief/);
+  assert.match(lock, /name: bug-receipt/);
+  assert.equal(lock.match(new RegExp(`resolved_commit: ${BUG_SKILL_REVISION}`, "g"))?.length, 2);
+  assert.match(lock, /\.claude\/skills\/bug-receipt\/SKILL\.md/);
+  assert.match(lock, /\.agents\/skills\/bug-receipt\/SKILL\.md/);
+});
+
+for (const [packageName, skills] of Object.entries(ENGINEERING_SKILLS)) {
+  test(`${packageName} pins and locks its engineering skills`, async () => {
+    const packageRoot = new URL(`../../agent-packages/${packageName}/`, import.meta.url);
+    const manifest = parse(await readFile(new URL("apm.yml", packageRoot), "utf8")) as {
+      dependencies?: { apm?: string[] };
+    };
+    assert.deepEqual(
+      manifest.dependencies?.apm,
+      skills.map((skill) => `addyosmani/agent-skills/skills/${skill}#${ENGINEERING_SKILL_REVISION}`),
+    );
+
+    const lock = await readFile(new URL("apm.lock.yaml", packageRoot), "utf8");
+    for (const skill of skills) {
+      assert.match(lock, new RegExp(`name: ${skill}`));
+      assert.match(lock, new RegExp(`\\.agents/skills/${skill}/SKILL\\.md`));
+    }
+    assert.equal(lock.match(new RegExp(`resolved_commit: ${ENGINEERING_SKILL_REVISION}`, "g"))?.length, skills.length);
+  });
+}
+
 test("role packages interpret human feedback without defining flow decisions", async () => {
   for (const packageName of Object.keys(PACKAGE_TARGETS)) {
     const agent = parsePrimitive(
@@ -142,18 +246,6 @@ test("reviewer reviews only the pinned head and does not change the repository",
   assert.match(reviewer.body, /Do not merge/);
 });
 
-test("reviewer separates blocking from nonblocking findings", async () => {
-  const reviewer = parsePrimitive(
-    await readFile(
-      new URL("../../agent-packages/reviewer/.apm/agents/reviewer.agent.md", import.meta.url),
-      "utf8",
-    ),
-  );
-  assert.match(reviewer.body, /blocking finding/);
-  assert.match(reviewer.body, /nonblocking finding/);
-  assert.match(reviewer.body, /Request changes only/);
-});
-
 test("reviewer interprets human feedback without inventing command syntax", async () => {
   const reviewer = parsePrimitive(
     await readFile(
@@ -173,5 +265,5 @@ test("reviewer keeps the GitHub native self-review fallback", async () => {
       "utf8",
     ),
   );
-  assert.match(reviewer.body, /GitHub self-review fallback[\s\S]*native `COMMENT` review/);
+  assert.match(reviewer.body, /GitHub self-review\s+fallback[\s\S]*native `COMMENT` review/);
 });

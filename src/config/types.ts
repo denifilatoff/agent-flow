@@ -1,6 +1,6 @@
 export type SchemaKind = "Flow" | "AgentCatalog" | "ControllerConfig" | "ControlState" | "AgentReceipt" | "AgentDecision";
 export type HarnessTarget = "codex" | "claude";
-export type ResultContract = "assessment" | "plan" | "development" | "review" | "human-gate" | "none";
+export type ResultContract = "assessment" | "plan" | "diagnostic" | "verification" | "development" | "review" | "human-gate" | "none";
 
 export type AgentEventType =
   | "agent-succeeded"
@@ -24,14 +24,14 @@ export interface FlowDefinition {
   apiVersion: "agent-flow/v1alpha1";
   kind: "Flow";
   metadata: { id: string; activationLabel: "agent-flow:development"; managedLabel: "agent-flow:managed" };
-  spec: { initial: string; states: Record<string, FlowState> };
+  spec: { initial: string; activationRoutes?: Record<string, string>; states: Record<string, FlowState> };
 }
 
 export interface FlowState {
   kind: "agent" | "human-gate" | "provider-wait" | "paused" | "final";
   agent?: string;
   resultContract?: ResultContract;
-  context?: Array<"ticket" | "control-state" | "assessment" | "plan" | "change-request" | "review" | "human-comment">;
+  context?: Array<"ticket" | "control-state" | "assessment" | "plan" | "diagnostic" | "change-request" | "review" | "human-comment">;
   on?: Record<string, FlowTransition>;
 }
 
@@ -130,6 +130,7 @@ export interface ControlState {
   activatedBy: Actor;
   activatedAt: string;
   activationEventId: string;
+  activationLabel?: string;
   updatedAt: string;
   attemptSeries: AttemptSeries | null;
   latestReceipt: AgentReceipt | null;

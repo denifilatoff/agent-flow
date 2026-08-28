@@ -58,6 +58,10 @@ export function createClaudeAdapter(
         } else {
           throw new Error("Claude runtime has no root instructions");
         }
+        const skills = join(runtime, ".claude/skills");
+        if (await pathIsDirectory(skills)) {
+          await copyRegularTree(skills, join(home, "skills"), "Claude skills");
+        }
         const cliConfig = await createCliConfigEnvironment(home);
         environment = harnessEnvironment({
           ...await providerCredentialEnvironment(

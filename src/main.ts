@@ -154,6 +154,10 @@ export function createProductionDependencies(
     },
     createProviders(bundle: ConfigBundle): Providers {
       const providers: Providers = {};
+      const activationLabels = [
+        bundle.flow.metadata.activationLabel,
+        ...Object.keys(bundle.flow.spec.activationRoutes ?? {}),
+      ];
       for (const kind of ["github", "gitlab"] as const) {
         const config = bundle.controller.providers[kind];
         if (!config) continue;
@@ -164,8 +168,8 @@ export function createProductionDependencies(
           limiter,
         );
         providers[kind] = kind === "github"
-          ? createGitHubAdapter(config, client)
-          : createGitLabAdapter(config, client);
+          ? createGitHubAdapter(config, client, activationLabels)
+          : createGitLabAdapter(config, client, activationLabels);
       }
       return providers;
     },

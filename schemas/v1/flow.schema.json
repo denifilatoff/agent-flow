@@ -24,6 +24,12 @@
       "required": ["initial", "states"],
       "properties": {
         "initial": { "$ref": "#/$defs/id" },
+        "activationRoutes": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "type": "string", "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/id" }
+        },
         "states": {
           "type": "object",
           "minProperties": 1,
@@ -50,7 +56,7 @@
         "agent": { "$ref": "#/$defs/id" },
         "resultContract": {
           "type": "string",
-          "enum": ["assessment", "plan", "development", "review", "human-gate", "none"]
+          "enum": ["assessment", "plan", "diagnostic", "verification", "development", "review", "human-gate", "none"]
         },
         "context": {
           "type": "array",
@@ -62,6 +68,7 @@
               "control-state",
               "assessment",
               "plan",
+              "diagnostic",
               "change-request",
               "review",
               "human-comment"

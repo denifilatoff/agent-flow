@@ -1,5 +1,8 @@
 name: reviewer
-version: 1.0.2
+version: 1.0.3
 description: Review the linked change request at its pinned head.
 author: agent-flow
 targets: [codex]
+dependencies:
+  apm:
+    - Netcracker/qubership-ai-packages/agent-packages/adversarial-code-review#9b0af51d160b866548f97af0ee50c9467766815d

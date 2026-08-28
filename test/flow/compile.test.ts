@@ -10,6 +10,10 @@ async function loadDevelopmentFlow(): Promise<FlowDefinition> {
   return validateDocument("Flow", await parseYaml("config/flows/development.yaml"));
 }
 
+async function loadAutonomousDevelopmentFlow(): Promise<FlowDefinition> {
+  return validateDocument("Flow", await parseYaml("config/flows/development-autonomous.yaml"));
+}
+
 function event(type: FlowEventType, values: Partial<Omit<FlowEvent, "type">> = {}): FlowEvent {
   return {
     type,
@@ -40,6 +44,74 @@ test("uses XState for the shipped assessment transition", async () => {
     resumeStateId: null,
     actions: ["record-receipt"],
   });
+});
+
+test("autonomous development advances without intermediate human gates", async () => {
+  const machine = compileFlow(await loadAutonomousDevelopmentFlow());
+  const succeeded = event("agent-succeeded", {
+    receiptValid: true,
+    activationPresent: true,
+    ticketOpen: true,
+  });
+
+  assert.equal(machine.transition({
+    stateId: "assessment",
+    resumeStateId: null,
+    event: succeeded,
+  }).stateId, "planning");
+  assert.equal(machine.transition({
+    stateId: "planning",
+    resumeStateId: null,
+    event: succeeded,
+  }).stateId, "development");
+});
+
+test("bugfix branch reproduces, fixes, reviews, and verifies", async () => {
+  const machine = compileFlow(await loadAutonomousDevelopmentFlow());
+  const succeeded = event("agent-succeeded", {
+    receiptValid: true,
+    activationPresent: true,
+    ticketOpen: true,
+  });
+
+  assert.equal(machine.transition({
+    stateId: "bug-reproduction", resumeStateId: null, event: succeeded,
+  }).stateId, "bug-development");
+  assert.equal(machine.transition({
+    stateId: "bug-development", resumeStateId: null, event: succeeded,
+  }).stateId, "bug-review");
+  assert.equal(machine.transition({
+    stateId: "bug-review", resumeStateId: null, event: event("review-approved", {
+      receiptValid: true, headMatches: true, activationPresent: true, ticketOpen: true,
+    }),
+  }).stateId, "bug-verification");
+  assert.equal(machine.transition({
+    stateId: "bug-verification", resumeStateId: null, event: succeeded,
+  }).stateId, "bug-awaiting-merge");
+});
+
+test("conservative bugfix flow waits for human approval after reproduction", async () => {
+  const machine = compileFlow(await loadDevelopmentFlow());
+
+  assert.equal(machine.transition({
+    stateId: "bug-reproduction",
+    resumeStateId: null,
+    event: event("agent-succeeded", {
+      receiptValid: true,
+      activationPresent: true,
+      ticketOpen: true,
+    }),
+  }).stateId, "bug-reproduction-review");
+  assert.equal(machine.transition({
+    stateId: "bug-reproduction-review",
+    resumeStateId: null,
+    event: event("human-approved", {
+      authorizedActor: true,
+      receiptValid: true,
+      activationPresent: true,
+      ticketOpen: true,
+    }),
+  }).stateId, "bug-development");
 });
 
 test("refuses a transition when a configured guard fails", async () => {

@@ -6,9 +6,11 @@ import {
   HarnessPreflightError,
   buildPrompt,
   copyRegularFile,
+  copyRegularTree,
   createCliConfigEnvironment,
   createHarnessHome,
   harnessEnvironment,
+  pathIsDirectory,
   providerCredentialEnvironment,
   preflightHarness,
   processDependencies,
@@ -43,6 +45,16 @@ export function createCodexAdapter(
         ]);
         home = await createHarnessHome(input.session, "codex");
         await seedCodexHome(auth, home);
+        const runtime = input.compiledAgent.runtimeDirectory;
+        await copyRegularFile(
+          join(runtime, ".codex/agents", `${input.compiledAgent.agentId}.toml`),
+          join(home, "agents", `${input.compiledAgent.agentId}.toml`),
+          "Codex deployed agent",
+        );
+        const skills = join(runtime, ".agents/skills");
+        if (await pathIsDirectory(skills)) {
+          await copyRegularTree(skills, join(home, "skills"), "Codex skills");
+        }
         const cliConfig = await createCliConfigEnvironment(home);
         environment = harnessEnvironment({
           ...await providerCredentialEnvironment(

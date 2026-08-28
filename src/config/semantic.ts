@@ -130,6 +130,11 @@ export async function validateSemantics(bundle: ConfigBundle): Promise<void> {
   if (!Object.hasOwn(states, bundle.flow.spec.initial)) {
     errors.push({ path: "flow.spec.initial", message: `initial state ${bundle.flow.spec.initial} does not exist` });
   }
+  for (const [label, stateId] of Object.entries(bundle.flow.spec.activationRoutes ?? {})) {
+    if (!Object.hasOwn(states, stateId)) {
+      errors.push({ path: `flow.spec.activationRoutes.${label}`, message: `initial state ${stateId} does not exist` });
+    }
+  }
 
   for (const stateId of Object.keys(states).sort()) {
     const state = states[stateId];

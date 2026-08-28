@@ -86,7 +86,9 @@ class Provider implements ProviderAdapter {
     return {
       ref: this.ticket, repository: await this.readRepository(), title: "Test scoped credentials", description: "Test.",
       open: true, labels: [...this.labels], updatedAt: NOW,
-      activation: { present: true, eventId: "activation-1", actor: ACTOR, occurredAt: NOW },
+      activation: {
+        present: true, label: "agent-flow:development", eventId: "activation-1", actor: ACTOR, occurredAt: NOW,
+      },
       comments: structuredClone(this.comments), changeRequest: null,
     };
   }
@@ -128,8 +130,10 @@ test("production retries keep the pinned provider credential scoped to the child
   const codexHome = join(home, ".codex");
   const worktree = join(root, "worktree");
   await mkdir(codexHome, { recursive: true });
+  await mkdir(join(root, ".codex/agents"), { recursive: true });
   await mkdir(worktree);
   await writeFile(join(codexHome, "auth.json"), "{}\n", { mode: 0o600 });
+  await writeFile(join(root, ".codex/agents/architect.toml"), 'name = "architect"\n');
 
   const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
   bundle.controller.providers = {
@@ -237,8 +241,10 @@ test("production passes a custom GHES credential without exposing public GitHub 
   const codexHome = join(home, ".codex");
   const worktree = join(root, "worktree");
   await mkdir(codexHome, { recursive: true });
+  await mkdir(join(root, ".codex/agents"), { recursive: true });
   await mkdir(worktree);
   await writeFile(join(codexHome, "auth.json"), "{}\n", { mode: 0o600 });
+  await writeFile(join(root, ".codex/agents/architect.toml"), 'name = "architect"\n');
 
   const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
   bundle.controller.providers = {

@@ -142,6 +142,13 @@ test("renders event-specific evidence and the pinned change identity", async () 
   assert.match(plan, /plan comment/);
   assert.match(plan, /artifact=plan/);
 
+  const diagnostic = renderRuntimePrompt(promptInput(flow, {
+    stateId: "bug-reproduction",
+    resultContract: "diagnostic",
+  }));
+  assert.match(diagnostic, /diagnostic comment/);
+  assert.match(diagnostic, /artifact=diagnostic/);
+
   const initialDevelopment = renderRuntimePrompt(promptInput(flow, {
     stateId: "development",
     resultContract: "development",
@@ -174,6 +181,15 @@ test("renders event-specific evidence and the pinned change identity", async () 
   assert.match(review, /https:\/\/github\.test\/owner\/repo\/pull\/8/);
   assert.match(review, /artifact=review/);
 
+  const verification = renderRuntimePrompt(promptInput(flow, {
+    stateId: "bug-verification",
+    resultContract: "verification",
+    changeRequest,
+  }));
+  assert.match(verification, /BUG RECEIPT · VERIFIED/);
+  assert.match(verification, new RegExp(HEAD_SHA));
+  assert.match(verification, /artifact=diagnostic/);
+
   const paused = renderRuntimePrompt(promptInput(flow, {
     stateId: "needs-human",
     resultContract: "review",
@@ -193,6 +209,18 @@ test("rejects a review prompt without a pinned change request", async () => {
   assert.throws(
     () => renderRuntimePrompt(promptInput(flow, { stateId: "review", resultContract: "review" })),
     /review event requires a pinned change request/,
+  );
+});
+
+test("rejects a verification prompt without a pinned change request", async () => {
+  const flow = await shippedFlow();
+
+  assert.throws(
+    () => renderRuntimePrompt(promptInput(flow, {
+      stateId: "bug-verification",
+      resultContract: "verification",
+    })),
+    /verification requires a pinned change request/,
   );
 });
 

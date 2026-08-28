@@ -12,6 +12,7 @@ test("rejects unknown fields and unsupported versions", async () => {
 
 test("accepts every shipped YAML document", async () => {
   validateDocument("Flow", await parseYaml("config/flows/development.yaml"));
+  validateDocument("Flow", await parseYaml("config/flows/development-autonomous.yaml"));
   validateDocument("AgentCatalog", await parseYaml("config/agents.yaml"));
   validateDocument("AgentCatalog", await parseYaml("config/agents-codex.yaml"));
   validateDocument("ControllerConfig", await parseYaml("config/controller.example.yaml"));

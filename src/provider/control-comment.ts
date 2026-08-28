@@ -3,8 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 import { validateDocument } from "../config/schema-validator.ts";
 import type { ControlState } from "../config/types.js";
 
-const CONTROL_MARKER = "<!-- agent-flow-control:v1 -->";
-const CONTROL_COMMENT = /^<!-- agent-flow-control:v1 -->\n```json\n([\s\S]+)\n```\n?$/;
+const CONTROL_MARKER = "<!-- agent-flow-control:v1";
+const LEGACY_CONTROL_MARKER = `${CONTROL_MARKER} -->`;
+const CONTROL_COMMENT = /^<!-- agent-flow-control:v1\n([A-Za-z0-9+/]+={0,2})\n-->\n?$/;
+const LEGACY_CONTROL_COMMENT = /^<!-- agent-flow-control:v1 -->\n```json\n([\s\S]+)\n```\n?$/;
 const PATCH_FIELDS = new Set<keyof ControlStatePatch>([
   "stateId",
   "resumeStateId",
@@ -30,14 +32,20 @@ export type ControlStatePatch = Partial<Pick<
 >>;
 
 export function parseControlComment(body: string): ControlState | null {
-  if (body.split("\n", 1)[0] !== CONTROL_MARKER) return null;
+  const firstLine = body.split("\n", 1)[0];
+  if (firstLine !== CONTROL_MARKER && firstLine !== LEGACY_CONTROL_MARKER) return null;
 
-  const match = CONTROL_COMMENT.exec(body);
+  const hidden = firstLine === CONTROL_MARKER;
+  const match = (hidden ? CONTROL_COMMENT : LEGACY_CONTROL_COMMENT).exec(body);
   if (!match) throw new Error("invalid control comment format");
 
   let value: unknown;
   try {
-    value = JSON.parse(match[1]!);
+    const json = hidden ? Buffer.from(match[1]!, "base64").toString("utf8") : match[1]!;
+    if (hidden && Buffer.from(json).toString("base64") !== match[1]) {
+      throw new Error("non-canonical base64");
+    }
+    value = JSON.parse(json);
   } catch (error) {
     throw new Error("invalid control comment JSON", { cause: error });
   }
@@ -46,7 +54,8 @@ export function parseControlComment(body: string): ControlState | null {
 
 export function renderControlComment(state: ControlState): string {
   const valid = validateDocument<ControlState>("ControlState", state);
-  return `${CONTROL_MARKER}\n\`\`\`json\n${JSON.stringify(valid, null, 2)}\n\`\`\`\n`;
+  const payload = Buffer.from(JSON.stringify(valid)).toString("base64");
+  return `${CONTROL_MARKER}\n${payload}\n-->\n`;
 }
 
 export function parseExpectedControlComment(body: string, expected: ControlState): ControlState | null {

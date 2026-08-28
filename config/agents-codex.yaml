@@ -29,3 +29,17 @@ agents:
       maxAttempts: 3
       delaySeconds: 30
       timeoutSeconds: 2700
+  bug-investigator:
+    package: agent-packages/bug-investigator
+    target: codex
+    retry:
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 2700
+  bugfixer:
+    package: agent-packages/bugfixer
+    target: codex
+    retry:
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 7200

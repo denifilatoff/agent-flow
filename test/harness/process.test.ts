@@ -170,11 +170,21 @@ async function runFixture(target: "codex" | "claude"): Promise<{
   if (target === "claude") {
     await mkdir(join(runtimeDirectory, ".claude/agents"), { recursive: true });
     await mkdir(join(runtimeDirectory, ".claude/rules"), { recursive: true });
+    await mkdir(join(runtimeDirectory, ".claude/skills/review-change"), { recursive: true });
     await writeFile(
       join(runtimeDirectory, ".claude/agents/developer.md"),
       "---\nname: developer\n---\n\nDevelop the change.\n",
     );
     await writeFile(join(runtimeDirectory, ".claude/rules/root.md"), "Follow repository rules.\n");
+    await writeFile(join(runtimeDirectory, ".claude/skills/review-change/SKILL.md"), "# Review change\n");
+  } else {
+    await mkdir(join(runtimeDirectory, ".codex/agents"), { recursive: true });
+    await mkdir(join(runtimeDirectory, ".agents/skills/review-change"), { recursive: true });
+    await writeFile(
+      join(runtimeDirectory, ".codex/agents/developer.toml"),
+      'name = "developer"\ndeveloper_instructions = "Develop the change.\\n"\n',
+    );
+    await writeFile(join(runtimeDirectory, ".agents/skills/review-change/SKILL.md"), "# Review change\n");
   }
 
   const authFile = join(root, target === "codex" ? "auth.json" : ".credentials.json");
@@ -319,6 +329,14 @@ If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_D
   assert.equal(await readFile(fixture.input.session.logPath, "utf8"), "stdout line\nstderr line\n");
   assert.equal(await readFile(join(call.env.CODEX_HOME!, "auth.json"), "utf8"), "{}\n");
   assert.equal(await readFile(join(call.env.CODEX_HOME!, "config.toml"), "utf8"), "{}\n");
+  assert.match(
+    await readFile(join(call.env.CODEX_HOME!, "agents/developer.toml"), "utf8"),
+    /name = "developer"/,
+  );
+  assert.equal(
+    await readFile(join(call.env.CODEX_HOME!, "skills/review-change/SKILL.md"), "utf8"),
+    "# Review change\n",
+  );
 });
 
 test("keeps late stdio errors guarded after a normal close", async (t) => {
@@ -423,6 +441,10 @@ If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_D
   assert.equal(
     await readFile(join(call.env.CLAUDE_CONFIG_DIR!, "rules/root.md"), "utf8"),
     "Follow repository rules.\n",
+  );
+  assert.equal(
+    await readFile(join(call.env.CLAUDE_CONFIG_DIR!, "skills/review-change/SKILL.md"), "utf8"),
+    "# Review change\n",
   );
   call.child.finish(0, null);
   assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });

@@ -46,7 +46,7 @@ test("accepts the shipped bundle", async () => {
 test("accepts the all-Codex catalog without changing the mixed default", async () => {
   const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
   assert.deepEqual(Object.values(bundle.catalog.agents).map((agent) => agent.target), [
-    "claude", "claude", "codex", "codex",
+    "claude", "claude", "codex", "codex", "claude", "codex",
   ]);
   bundle.catalog = validateDocument("AgentCatalog", await parseYaml("config/agents-codex.yaml"));
   assert.deepEqual(new Set(Object.values(bundle.catalog.agents).map((agent) => agent.target)), new Set(["codex"]));

@@ -120,6 +120,7 @@ function snapshot(patch: Partial<ProviderTicketSnapshot> = {}): ProviderTicketSn
     updatedAt: "2026-08-26T11:45:00.000Z",
     activation: {
       present: true,
+      label: "agent-flow:development",
       eventId: "803",
       actor: MAINTAINER,
       occurredAt: "2026-08-26T10:00:00.000Z",
@@ -450,6 +451,74 @@ test("accepts one authorized activation and owns one stage label", async () => {
   assert.ok(provider.events.indexOf("provider:read-control") < provider.events.indexOf("provider:set-labels"));
 });
 
+test("routes the exact bugfix label to the bugfix branch", async () => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["bugfix"];
+  provider.snapshot.activation.label = "bugfix";
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.stateId, "bug-reproduction");
+  assert.equal(launcher.requests[0]?.agentId, "bug-investigator");
+  assert.ok(provider.snapshot.labels.includes("bugfix"));
+});
+
+test("routes by the authorized activation event when both labels are present", async () => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["bugfix", "agent-flow:development"];
+  provider.snapshot.activation.label = "agent-flow:development";
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.stateId, "assessment");
+  assert.equal(launcher.requests[0]?.agentId, "architect");
+  assert.equal(launcher.requests[0]?.control.activationLabel, "agent-flow:development");
+});
+
+test("keeps a pinned bugfix flow active when startup activation routes change", async () => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["bugfix"];
+  provider.snapshot.activation = {
+    present: false,
+    label: null,
+    eventId: null,
+    actor: null,
+    occurredAt: null,
+  };
+  installControl(provider, controlState({
+    stateId: "bug-reproduction",
+    activationLabel: "bugfix",
+  }));
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.stateId, "bug-reproduction");
+  assert.equal(launcher.requests[0]?.agentId, "bug-investigator");
+  assert.deepEqual(launcher.cancelled, []);
+});
+
+test("keeps retry identity pinned to the accepted activation event", async () => {
+  async function inputRevision(eventId: string | null): Promise<string> {
+    const provider = new FakeProvider();
+    provider.snapshot.labels = ["bugfix"];
+    provider.snapshot.activation.eventId = eventId;
+    installControl(provider, controlState({
+      stateId: "bug-reproduction",
+      activationLabel: "bugfix",
+    }));
+    const launcher = new FakeLauncher();
+
+    await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+    return launcher.requests[0]!.inputRevision;
+  }
+
+  assert.equal(await inputRevision("new-route-event"), await inputRevision(null));
+});
+
 test("accepts a GitLab control creation readback without the final newline", async () => {
   const provider = new FakeProvider();
   provider.stripGitLabFinalNewline = true;
@@ -476,7 +545,9 @@ test("ignores an activation by an actor below write permission", async () => {
 });
 
 for (const scenario of [
-  { name: "activation removal", patch: { labels: ["bug"], activation: { present: false, eventId: null, actor: null, occurredAt: null } } },
+  { name: "activation removal", patch: { labels: ["bug"], activation: {
+    present: false, label: null, eventId: null, actor: null, occurredAt: null,
+  } } },
   { name: "ordinary ticket closure", patch: { open: false } },
 ] as const) {
   test(`cancels on ${scenario.name} and preserves the managed label`, async () => {
@@ -734,6 +805,7 @@ test("reactivation creates a new flow and preserves terminal control history", a
   installControl(provider, controlState({ stateId: "done" }));
   provider.snapshot.activation = {
     present: true,
+    label: "agent-flow:development",
     eventId: "804",
     actor: MAINTAINER,
     occurredAt: "2026-08-26T10:00:00.000Z",
@@ -744,8 +816,8 @@ test("reactivation creates a new flow and preserves terminal control history", a
   assert.equal(provider.created, 1);
   assert.equal(provider.updated, 0);
   assert.equal(provider.snapshot.comments.length, 2);
-  assert.ok(provider.snapshot.comments[0]?.body.includes(FLOW_1));
-  assert.ok(provider.snapshot.comments[1]?.body.includes(FLOW_2));
+  assert.equal(parseControlComment(provider.snapshot.comments[0]!.body)?.flowInstanceId, FLOW_1);
+  assert.equal(parseControlComment(provider.snapshot.comments[1]!.body)?.flowInstanceId, FLOW_2);
   assert.equal(launcher.requests[0]?.control.flowInstanceId, FLOW_2);
 });
 
@@ -756,6 +828,7 @@ test("finishes crash-window cleanup instead of reactivating the original label e
   installControl(provider, terminal);
   provider.snapshot.activation = {
     present: true,
+    label: "agent-flow:development",
     eventId: "803",
     actor: MAINTAINER,
     occurredAt: "2026-08-26T13:00:00.000Z",
@@ -772,7 +845,7 @@ test("finishes crash-window cleanup instead of reactivating the original label e
 
 test("repairs the permanent managed label for terminal history", async () => {
   const provider = new FakeProvider();
-  provider.snapshot.activation = { present: false, eventId: null, actor: null, occurredAt: null };
+  provider.snapshot.activation = { present: false, label: null, eventId: null, actor: null, occurredAt: null };
   provider.snapshot.labels = ["bug", "agent-stage:planning"];
   provider.snapshot.comments.push(controlComment(controlState({ stateId: "done" })));
 
@@ -886,6 +959,24 @@ test("enters needs-human for a closed change and reviews a new head", async (t) 
     const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
 
     assert.equal(outcome.stateId, "review");
+    assert.equal(launcher.requests[0]?.agentId, "reviewer");
+    assert.equal(launcher.requests[0]?.snapshot.changeRequest?.headSha, NEW_HEAD);
+  });
+
+  await t.test("verification head change", async () => {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({
+      stateId: "bug-verification",
+      activationLabel: "bugfix",
+      changeRequest: controlChange(),
+    }));
+    provider.snapshot.labels = ["bugfix", "agent-flow:managed", "agent-stage:bug-verification"];
+    provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD });
+    const launcher = new FakeLauncher();
+
+    const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+    assert.equal(outcome.stateId, "bug-review");
     assert.equal(launcher.requests[0]?.agentId, "reviewer");
     assert.equal(launcher.requests[0]?.snapshot.changeRequest?.headSha, NEW_HEAD);
   });
@@ -1241,6 +1332,32 @@ test("an authorized blocked comment resets the series and resumes the stage", as
   assert.equal(launcher.requests[0]?.agentId, "developer");
   assert.equal(launcher.requests[0]?.control.attemptSeries?.consumed, 0);
   assert.equal(launcher.requests[0]?.control.attemptSeries?.current, null);
+});
+
+test("routes a moved verification head back through review when unblocked", async () => {
+  const provider = new FakeProvider();
+  installControl(provider, controlState({
+    stateId: "blocked",
+    resumeStateId: "bug-verification",
+    activationLabel: "bugfix",
+    attemptSeries: attemptSeries({ agentId: "bug-investigator", stateId: "bug-verification" }),
+    changeRequest: controlChange(),
+  }));
+  provider.snapshot.labels = ["bugfix"];
+  provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD });
+  provider.snapshot.comments.push(comment(
+    "unblock",
+    "Retry after the head update.",
+    MAINTAINER,
+    "2026-08-26T12:02:00.000Z",
+  ));
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.stateId, "bug-review");
+  assert.equal(launcher.requests[0]?.agentId, "reviewer");
+  assert.equal(launcher.requests[0]?.control.changeRequest?.headSha, NEW_HEAD);
 });
 
 test("rejects an event that the current XState state cannot accept", async () => {

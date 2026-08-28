@@ -134,6 +134,7 @@ export async function readDecisionAndBuildReceipt(
 
   const initialTicket = await decisionProviderRead(() => provider.readTicket(expected.ticket));
   assertDecisionTicket(initialTicket, expected.ticket);
+  if (expected.resultContract === "verification") assertPinnedChange(initialTicket, expected, "verification");
 
   const artifacts: ReceiptArtifact[] = [];
   const verifiedComments: ProviderComment[] = [];
@@ -142,14 +143,18 @@ export async function readDecisionAndBuildReceipt(
   let outcome: AgentReceipt["outcome"] = "succeeded";
 
   if (decision.event === "agent-succeeded") {
-    if (expected.resultContract === "assessment" || expected.resultContract === "plan") {
-      const artifactKind = expected.resultContract;
+    if (expected.resultContract === "assessment"
+      || expected.resultContract === "plan"
+      || expected.resultContract === "diagnostic"
+      || expected.resultContract === "verification") {
+      const artifactKind = expected.resultContract === "verification" ? "diagnostic" : expected.resultContract;
       const published = await discoverDecisionComment(
         initialTicket,
         artifactKind,
         expected,
         provider,
       );
+      if (expected.resultContract === "verification") assertVerifiedBugReceipt(published.body);
       verifiedComments.push(published);
       artifacts.push(commentArtifact(published, artifactKind, expected));
     } else if (expected.resultContract === "development") {
@@ -192,8 +197,9 @@ export async function readDecisionAndBuildReceipt(
   assertDecisionCommentMembership(verifiedComments, finalTicket, expected, provider.kind);
   if (verifiedChange) assertFinalDecisionChange(finalTicket, verifiedChange, expected);
   if (decision.event === "review-approved" || decision.event === "review-changes-requested") {
-    assertFinalReviewChange(finalTicket, expected);
+    assertPinnedChange(finalTicket, expected, "review");
   }
+  if (expected.resultContract === "verification") assertPinnedChange(finalTicket, expected, "verification");
 
   return {
     apiVersion: "agent-flow/v1alpha1",
@@ -209,7 +215,7 @@ export async function readDecisionAndBuildReceipt(
 
 async function discoverDecisionComment(
   ticket: ProviderTicketSnapshot,
-  artifactKind: "assessment" | "plan" | "question",
+  artifactKind: "assessment" | "plan" | "diagnostic" | "question",
   expected: DecisionExpectation,
   provider: ProviderAdapter,
 ): Promise<ProviderComment> {
@@ -374,7 +380,7 @@ function humanVerdict(event: AgentEventType): ReceiptHumanGate["verdict"] {
 
 function commentArtifact(
   published: ProviderComment,
-  artifactKind: "assessment" | "plan" | "question",
+  artifactKind: "assessment" | "plan" | "diagnostic" | "question",
   expected: DecisionExpectation,
 ): ReceiptComment {
   return {
@@ -478,17 +484,28 @@ function assertFinalDecisionChange(
   assertSameDecisionChange(ticket.changeRequest, published);
 }
 
-function assertFinalReviewChange(ticket: ProviderTicketSnapshot, expected: DecisionExpectation): void {
-  const pinned = expected.pinnedChangeRequest!;
-  if (!ticket.changeRequest) decisionTrust("linked change request is missing from the final review snapshot");
+function assertPinnedChange(
+  ticket: ProviderTicketSnapshot,
+  expected: DecisionExpectation,
+  stage: "review" | "verification",
+): void {
+  const pinned = expected.pinnedChangeRequest;
+  if (!pinned) decisionTrust(`${stage} has no pinned change request`);
+  if (!ticket.changeRequest) decisionTrust(`linked change request is missing from the ${stage} snapshot`);
   if (!sameChangeIdentity(ticket.changeRequest, pinned)) {
-    decisionTrust("linked change request identity changed during review readback");
+    decisionTrust(`linked change request identity changed during ${stage} readback`);
   }
   if (ticket.changeRequest.headSha !== pinned.headSha) {
-    decisionTrust("linked change request head SHA changed during review readback");
+    decisionTrust(`linked change request head SHA changed during ${stage} readback`);
   }
   if (ticket.changeRequest.state !== "open") {
-    decisionTrust("linked change request state changed during review readback");
+    decisionTrust(`linked change request state changed during ${stage} readback`);
+  }
+}
+
+function assertVerifiedBugReceipt(body: string): void {
+  if (body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") {
+    decisionTrust("bug verification requires a BUG RECEIPT · VERIFIED diagnostic");
   }
 }
 
@@ -505,7 +522,7 @@ function sameReview(left: NormalizedReview, right: NormalizedReview): boolean {
 
 function decisionMarker(
   expected: DecisionExpectation,
-  artifact: "assessment" | "plan" | "question" | "review",
+  artifact: "assessment" | "plan" | "diagnostic" | "question" | "review",
 ): string {
   return `<!-- agent-flow:v1 flow=${expected.flowInstanceId} attempt=${expected.attemptId} artifact=${artifact} -->`;
 }

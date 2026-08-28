@@ -144,9 +144,11 @@ not both model-owned and configured on the current state.
 
 After a successful harness exit, the controller reads the decision and discovers its evidence through the provider:
 
-- `agent-succeeded` requires the stage's marked assessment or plan comment. A development attempt without a linked
-  change request creates one linked open change request during the current attempt. A retry with a pinned change
-  request keeps that exact request open and updates it during the current attempt instead of creating another;
+- `agent-succeeded` requires the stage's marked assessment, plan, or diagnostic comment. Verification requires a
+  diagnostic whose second line is exactly `BUG RECEIPT · VERIFIED`; the linked change request must remain open at the
+  pinned head throughout readback. A development attempt without a linked change request creates one linked open
+  change request during the current attempt. A retry with a pinned change request keeps that exact request open and
+  updates it during the current attempt instead of creating another;
 - `agent-needs-human` requires one marked question comment;
 - `review-approved` and `review-changes-requested` require one native review on the pinned head whose logical verdict
   agrees with the decision;
@@ -175,17 +177,22 @@ JSON Schema validates file shape. Before polling, the controller also verifies t
 
 ## Control comment
 
-The controller owns one mutable ticket comment per flow instance. Its first line is the exact marker:
+The controller owns one mutable ticket comment per flow instance. The comment is a hidden machine record:
 
 ```text
-<!-- agent-flow-control:v1 -->
+<!-- agent-flow-control:v1
+<base64-encoded-control-state>
+-->
 ```
 
-The marker is followed by one fenced JSON object validated by `control-state.schema.json`. The controller edits this
-comment in place and increments `sequence` for each accepted change. It records the pinned config SHA, current state,
-resume state, accepted activation event ID, current attempt series, latest validated receipt, human gate result, and
-linked change request. A terminal flow starts again only for a different authorized activation event ID; timestamps do
-not determine reactivation because provider and controller clocks may differ.
+The payload is the Base64 encoding of one compact JSON object validated by `control-state.schema.json`. GitHub and
+GitLab hide the complete record when they render the comment. The controller also reads the legacy visible fenced-JSON
+format so an existing flow migrates on its next state update. The controller edits this comment in place and increments
+`sequence` for each accepted change. It records the pinned config SHA, current state, resume state, accepted activation
+label and event ID, current attempt series, latest validated receipt, human gate result, and linked change request. A
+terminal flow starts again only for a different authorized activation event ID; timestamps do not determine
+reactivation because provider and controller clocks may differ. Legacy records without the activation label use the
+pinned flow's default activation label.
 
 The controller writes an attempt with status `started` and reads the comment back before launching a harness. A restart
 therefore cannot restore a consumed retry. Older attempt series do not need to remain in the control comment because

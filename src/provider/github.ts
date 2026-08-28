@@ -23,13 +23,14 @@ const HEADERS = {
   accept: "application/vnd.github+json",
   "x-github-api-version": "2022-11-28",
 };
-const ACTIVATION_LABEL = "agent-flow:development";
+const DEFAULT_ACTIVATION_LABELS = ["agent-flow:development"];
 const REVIEW_METADATA =
   /^<!-- agent-flow-review:v1 head=([0-9a-f]{40}) verdict=(approved|changes-requested|commented) -->$/;
 
 export function createGitHubAdapter(
   config: GitHubConfig,
   client: RateLimitedHttpClient,
+  activationLabels: readonly string[] = DEFAULT_ACTIVATION_LABELS,
 ): ProviderAdapter {
   const allowlist = new Set(config.repositories);
   const apiBase = new URL(config.apiUrl);
@@ -169,7 +170,7 @@ export function createGitHubAdapter(
     async bootstrap(repository: string): Promise<TicketRef[]> {
       const route = repositoryPath(repository);
       const found = new Map<number, TicketRef>();
-      for (const label of ["agent-flow:managed", ACTIVATION_LABEL]) {
+      for (const label of ["agent-flow:managed", ...activationLabels]) {
         const query = new URLSearchParams({ state: "all", labels: label, per_page: "100" });
         for (const ref of issueRefs(
           await listAll(`repos/${route}/issues?${query}`, "background"),
@@ -194,9 +195,12 @@ export function createGitHubAdapter(
       const comments = (await listAll(`${path}/comments?per_page=100`, "active"))
         .map(normalizeComment);
 
-      const activationEvent = labels.includes(ACTIVATION_LABEL)
-        ? [...timeline].reverse().find((event) => isLabelEvent(event, "labeled", ACTIVATION_LABEL))
-        : undefined;
+      const activeLabels = activationLabels.filter((label) => labels.includes(label));
+      const activationEvent = [...timeline].reverse().find((event) =>
+        activeLabels.some((label) => isLabelEvent(event, "labeled", label)));
+      const activationLabel = activationEvent
+        ? activeLabels.find((label) => isLabelEvent(activationEvent, "labeled", label)) ?? null
+        : null;
       const activation = activationEvent
         ? object(activationEvent, "GitHub activation event")
         : null;
@@ -214,7 +218,8 @@ export function createGitHubAdapter(
         labels,
         updatedAt: string(issue, "updated_at"),
         activation: {
-          present: labels.includes(ACTIVATION_LABEL),
+          present: activeLabels.length > 0,
+          label: activationLabel,
           eventId: activation ? identifier(activation.id, "GitHub activation event id") : null,
           actor: activation ? normalizeActor(activation.actor, "GitHub activation actor") : null,
           occurredAt: activation ? string(activation, "created_at") : null,
@@ -264,9 +269,16 @@ export function createGitHubAdapter(
       return normalizeComment(response.data);
     },
 
-    async setControllerLabels(ref: TicketRef, remove: string[], add: string[]): Promise<string[]> {
+    async setControllerLabels(
+      ref: TicketRef,
+      remove: string[],
+      add: string[],
+      pinnedActivationLabels: readonly string[] = [],
+    ): Promise<string[]> {
       for (const label of [...remove, ...add]) {
-        if (!isControllerLabel(label)) throw new Error(`label is not controller-owned: ${label}`);
+        if (!isControllerLabel(label, [...activationLabels, ...pinnedActivationLabels])) {
+          throw new Error(`label is not controller-owned: ${label}`);
+        }
       }
       const path = ticketPath(ref);
       for (const label of new Set(remove)) {
@@ -474,9 +486,9 @@ function permission(value: string): Permission {
   }
 }
 
-function isControllerLabel(label: string): boolean {
+function isControllerLabel(label: string, activationLabels: readonly string[]): boolean {
   return label === "agent-flow:managed"
-    || label === ACTIVATION_LABEL
+    || activationLabels.includes(label)
     || label.startsWith("agent-stage:");
 }
 
