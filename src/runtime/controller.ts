@@ -1,9 +1,11 @@
 import type { ProviderAdapter, TicketRef } from "../provider/types.js";
-import { createScheduler } from "./scheduler.ts";
+import { createScheduler, type SchedulerSnapshot } from "./scheduler.ts";
 import type { AttemptLauncher, ReconcileOutcome } from "./reconcile.ts";
 
 type DiscoveryAdapter = Pick<ProviderAdapter, "kind" | "bootstrap" | "discover">;
-type Lifecycle = "created" | "bootstrapping" | "ready" | "running" | "failed" | "stopped";
+export type ControllerLifecycle = "created" | "bootstrapping" | "ready" | "running" | "failed" | "stopped";
+
+const SNAPSHOT_ERROR_LIMIT = 10;
 
 export interface ControllerProvider {
   adapter: DiscoveryAdapter;
@@ -27,6 +29,16 @@ export interface Controller {
   bootstrap(): Promise<void>;
   run(signal: AbortSignal): Promise<void>;
   reconcileNow(ref: TicketRef): Promise<void>;
+  snapshot(): ControllerSnapshot;
+}
+
+export interface ControllerSnapshot {
+  lifecycle: ControllerLifecycle;
+  repositories: Array<{ provider: string; repository: string; nextWindowStartedAt: string | null }>;
+  tickets: TicketRef[];
+  queue: SchedulerSnapshot;
+  activeWork: TicketRef[];
+  errors: string[];
 }
 
 interface RepositoryScan {
@@ -38,6 +50,10 @@ interface RepositoryScan {
 interface ScanCall {
   scan: RepositoryScan & { windowStartedAt: string };
   tickets: TicketRef[];
+}
+
+interface ObservedTicket {
+  ref: TicketRef;
 }
 
 const ticketKey = (ref: TicketRef) => `${ref.provider}:${ref.repository}#${ref.number}`;
@@ -56,22 +72,32 @@ export function createController(dependencies: ControllerDependencies): Controll
   const allowed = new Set(repositories.map(({ key }) => key));
   const cursors = new Map<string, string>();
   const flowInstances = new Set<string>();
+  const observedTickets = new Map<string, ObservedTicket>();
   const activeTickets = new Map<string, TicketRef>();
-  let lifecycle: Lifecycle = "created";
+  const errors: string[] = [];
+  let lifecycle: ControllerLifecycle = "created";
   let stopping = false;
 
   if (!Number.isFinite(interval) || interval <= 0) throw new Error("polling interval must be positive");
 
-  const tickets = createScheduler<TicketRef>({
+  const tickets = createScheduler<ObservedTicket>({
     concurrency: dependencies.concurrency,
-    key: ticketKey,
-    run: async (ref) => {
-      const result = await dependencies.reconcile(ref);
-      if (result.flowInstanceId) flowInstances.add(result.flowInstanceId);
-      if (result.flowInstanceId && result.stateId !== "done" && result.stateId !== "cancelled") {
-        activeTickets.set(ticketKey(ref), ref);
-      } else {
-        activeTickets.delete(ticketKey(ref));
+    key: ({ ref }) => ticketKey(ref),
+    run: async (observation) => {
+      const { ref } = observation;
+      const id = ticketKey(ref);
+      try {
+        const result = await dependencies.reconcile(ref);
+        if (result.flowInstanceId) flowInstances.add(result.flowInstanceId);
+        if (result.flowInstanceId && result.stateId !== "done" && result.stateId !== "cancelled") {
+          activeTickets.set(id, ref);
+        } else {
+          removeObservation(id, observation);
+          activeTickets.delete(id);
+        }
+      } catch (error) {
+        removeObservation(id, observation);
+        throw error;
       }
     },
   });
@@ -86,7 +112,7 @@ export function createController(dependencies: ControllerDependencies): Controll
     run: reconcileRepository,
   });
   dependencies.launcher.onSettled?.((ref) => {
-    if (!stopping) void tickets.schedule(ref).catch(reportError);
+    if (!stopping) void scheduleTicket(ref).catch(reportError);
   });
 
   return {
@@ -118,7 +144,7 @@ export function createController(dependencies: ControllerDependencies): Controll
         lifecycle = "failed";
         throw collectedError(errors, "controller bootstrap failed");
       }
-      const results = await Promise.allSettled([...found.values()].map((ref) => tickets.schedule(ref)));
+      const results = await Promise.allSettled([...found.values()].map(scheduleTicket));
       const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
       if (errors.length > 0) {
         await cleanup(errors);
@@ -166,9 +192,38 @@ export function createController(dependencies: ControllerDependencies): Controll
         throw new Error(`controller reconcileNow requires ready or running (current: ${lifecycle})`);
       }
       assertAllowedRef(ref);
-      await tickets.schedule(ref);
+      await scheduleTicket(ref);
+    },
+
+    snapshot(): ControllerSnapshot {
+      return {
+        lifecycle,
+        repositories: repositories.map(({ provider, repository, key }) => ({
+          provider: provider.adapter.kind,
+          repository,
+          nextWindowStartedAt: cursors.get(key) ?? null,
+        })),
+        tickets: [...observedTickets.values()].map(({ ref }) => copyTicket(ref)),
+        queue: tickets.snapshot(),
+        activeWork: [...activeTickets.values()].map(copyTicket),
+        errors: [...errors],
+      };
     },
   };
+
+  function scheduleTicket(ref: TicketRef): Promise<void> {
+    const id = ticketKey(ref);
+    const observation = { ref };
+    observedTickets.set(id, observation);
+    return tickets.schedule(observation).catch((error: unknown) => {
+      removeObservation(id, observation);
+      throw error;
+    });
+  }
+
+  function removeObservation(id: string, observation: ObservedTicket): void {
+    if (observedTickets.get(id) === observation) observedTickets.delete(id);
+  }
 
   function queueSweep(): void {
     const nextWindowStartedAt = now();
@@ -192,7 +247,7 @@ export function createController(dependencies: ControllerDependencies): Controll
         found.set(ticketKey(ref), ref);
       }
     }
-    await Promise.all([...found.values()].map((ref) => tickets.schedule(ref)));
+    await Promise.all([...found.values()].map(scheduleTicket));
     cursors.set(key, scan.nextWindowStartedAt);
   }
 
@@ -249,12 +304,18 @@ export function createController(dependencies: ControllerDependencies): Controll
   }
 
   function reportError(error: unknown): void {
+    errors.push("controller error");
+    if (errors.length > SNAPSHOT_ERROR_LIMIT) errors.shift();
     try {
       dependencies.onError?.(error);
     } catch {
       // Error reporting must not break the polling chain.
     }
   }
+}
+
+function copyTicket(ref: TicketRef): TicketRef {
+  return { ...ref };
 }
 
 function collectedError(errors: unknown[], message: string): unknown {

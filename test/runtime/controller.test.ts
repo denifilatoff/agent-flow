@@ -666,3 +666,189 @@ test("reconcileNow is available only while ready or running", async () => {
   await running;
   await assert.rejects(controller.reconcileNow(GITHUB_ONE), /ready or running/);
 });
+
+test("reports controller work from its ephemeral collections", async () => {
+  const gate = Promise.withResolvers<void>();
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => {
+      await gate.promise;
+      return outcome(ref);
+    },
+    launcher: launcher(),
+    now: () => "2026-08-29T10:00:00.000Z",
+  });
+
+  assert.deepEqual(controller.snapshot(), {
+    lifecycle: "created",
+    repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: null }],
+    tickets: [],
+    queue: { active: 0, queued: 0, concurrency: 1 },
+    activeWork: [],
+    errors: [],
+  });
+
+  await controller.bootstrap();
+  const scheduled = controller.reconcileNow(GITHUB_ONE);
+  await Promise.resolve();
+
+  assert.deepEqual(controller.snapshot(), {
+    lifecycle: "ready",
+    repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: "2026-08-29T10:00:00.000Z" }],
+    tickets: [GITHUB_ONE],
+    queue: { active: 1, queued: 0, concurrency: 1 },
+    activeWork: [],
+    errors: [],
+  });
+
+  gate.resolve();
+  await scheduled;
+
+  assert.deepEqual(controller.snapshot(), {
+    lifecycle: "ready",
+    repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: "2026-08-29T10:00:00.000Z" }],
+    tickets: [GITHUB_ONE],
+    queue: { active: 0, queued: 0, concurrency: 1 },
+    activeWork: [GITHUB_ONE],
+    errors: [],
+  });
+});
+
+test("keeps only bounded generic polling errors in its snapshot", async () => {
+  const abort = new AbortController();
+  let delays = 0;
+  const controller = createController({
+    providers: [{
+      adapter: {
+        kind: "github",
+        async bootstrap() { return []; },
+        async discover() { throw new Error("provider response body: credential=secret"); },
+      },
+      repositories: ["owner/one"],
+    }],
+    concurrency: 1,
+    reconcile: async (ref) => outcome(ref),
+    launcher: launcher(),
+    delay: async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (++delays === 12) abort.abort();
+    },
+  });
+
+  await controller.bootstrap();
+  await controller.run(abort.signal);
+
+  assert.deepEqual(controller.snapshot().errors, Array(10).fill("controller error"));
+});
+
+test("keeps a newer coalesced ticket observation after an earlier reconcile fails", async () => {
+  const firstStarted = Promise.withResolvers<void>();
+  const failFirst = Promise.withResolvers<void>();
+  let calls = 0;
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => {
+      if (++calls === 1) {
+        firstStarted.resolve();
+        await failFirst.promise;
+        throw new Error("first reconcile failed");
+      }
+      return outcome(ref);
+    },
+    launcher: launcher(),
+  });
+
+  await controller.bootstrap();
+  const first = controller.reconcileNow(GITHUB_ONE);
+  await firstStarted.promise;
+  const later = controller.reconcileNow(GITHUB_ONE);
+  failFirst.resolve();
+
+  await assert.rejects(first, /first reconcile failed/);
+  assert.deepEqual(controller.snapshot().tickets, [GITHUB_ONE]);
+
+  await later;
+});
+
+test("removes an observation rejected after the ticket scheduler closes", async () => {
+  const cancellationStarted = Promise.withResolvers<void>();
+  const releaseCancellation = Promise.withResolvers<void>();
+  let cancellations = 0;
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: ["owner/one", "owner/two"] }],
+    concurrency: 1,
+    reconcile: async (ref) => outcome(ref),
+    launcher: {
+      async start() {},
+      async cancel() {
+        if (++cancellations === 1) {
+          cancellationStarted.resolve();
+          await releaseCancellation.promise;
+        }
+      },
+      isRunning: () => true,
+    },
+  });
+  const abort = new AbortController();
+
+  await controller.bootstrap();
+  await controller.reconcileNow(GITHUB_ONE);
+  abort.abort();
+  const stopping = controller.run(abort.signal);
+  await cancellationStarted.promise;
+
+  await assert.rejects(controller.reconcileNow(GITHUB_TWO), /scheduler is closed/);
+  assert.deepEqual(controller.snapshot().tickets, [GITHUB_ONE]);
+
+  releaseCancellation.resolve();
+  await stopping;
+});
+
+test("reports running and stopped snapshots around a polling repository scan", async () => {
+  const abort = new AbortController();
+  const discovered: Array<{ updatedAfter: string; overlapSeconds: number }> = [];
+  let delays = 0;
+  const controller = createController({
+    providers: [{
+      adapter: {
+        kind: "github",
+        async bootstrap() { return []; },
+        async discover(_repository, window) {
+          discovered.push(window);
+          return { tickets: [], nextCursor: null };
+        },
+      },
+      repositories: ["owner/one"],
+    }],
+    concurrency: 1,
+    reconcile: async (ref) => outcome(ref),
+    launcher: launcher(),
+    now: (() => {
+      const values = ["2026-08-29T10:00:00.000Z", "2026-08-29T10:05:00.000Z"];
+      return () => values.shift() ?? "2026-08-29T10:10:00.000Z";
+    })(),
+    delay: async () => {
+      if (++delays === 1) return;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      abort.abort();
+    },
+  });
+
+  await controller.bootstrap();
+  const running = controller.run(abort.signal);
+
+  assert.equal(controller.snapshot().lifecycle, "running");
+  await running;
+
+  assert.deepEqual(controller.snapshot(), {
+    lifecycle: "stopped",
+    repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: "2026-08-29T10:05:00.000Z" }],
+    tickets: [],
+    queue: { active: 0, queued: 0, concurrency: 1 },
+    activeWork: [],
+    errors: [],
+  });
+  assert.deepEqual(discovered, [{ updatedAfter: "2026-08-29T10:00:00.000Z", overlapSeconds: 1 }]);
+});

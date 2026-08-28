@@ -174,3 +174,22 @@ test("applies reduced concurrency only to work not yet claimed", async () => {
   gates[2]!.resolve();
   await Promise.all(work);
 });
+
+test("reports active and queued work counts", async () => {
+  const gate = deferred();
+  const scheduler = createScheduler<string>({
+    concurrency: 1,
+    key: (value) => value,
+    run: async () => gate.promise,
+  });
+
+  const active = scheduler.schedule("active");
+  const queued = scheduler.schedule("queued");
+  await Promise.resolve();
+
+  assert.deepEqual(scheduler.snapshot(), { active: 1, queued: 1, concurrency: 1 });
+
+  gate.resolve();
+  await Promise.all([active, queued]);
+  assert.deepEqual(scheduler.snapshot(), { active: 0, queued: 0, concurrency: 1 });
+});

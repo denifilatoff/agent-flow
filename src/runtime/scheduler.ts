@@ -9,6 +9,13 @@ export interface Scheduler<T> {
   setConcurrency(concurrency: number): void;
   close(): void;
   drain(): Promise<void>;
+  snapshot(): SchedulerSnapshot;
+}
+
+export interface SchedulerSnapshot {
+  active: number;
+  queued: number;
+  concurrency: number;
 }
 
 interface Entry<T> {
@@ -78,6 +85,10 @@ export function createScheduler<T>(options: SchedulerOptions<T>): Scheduler<T> {
     drain(): Promise<void> {
       if (active === 0 && pending.length === 0) return Promise.resolve();
       return new Promise<void>((resolve) => drained.push(resolve));
+    },
+
+    snapshot(): SchedulerSnapshot {
+      return { active, queued: pending.length, concurrency };
     },
   };
 
