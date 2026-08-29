@@ -54,11 +54,11 @@ Compose.
 - Produces `StackDefinition`, containing the flow, logical catalog, contract, and schema paths for one revision.
 - Produces a logical `AgentCatalog` whose entries contain only `{ package: string }`.
 
-- [ ] Write schema tests that accept `config/stack.yaml`, reject stack paths outside the pinned repository, reject
+- [x] Write schema tests that accept `config/stack.yaml`, reject stack paths outside the pinned repository, reject
   execution settings in the logical catalog, and reject the removed target-specific catalog.
-- [ ] Run the focused tests and confirm they fail because `Stack` is unknown and the catalog still owns execution.
-- [ ] Add the minimal types, schema registration, `Stack` schema, stack manifest, and logical catalog migration.
-- [ ] Run `node --test test/config/schema-validator.test.ts` and confirm it passes.
+- [x] Run the focused tests and confirm they fail because `Stack` is unknown and the catalog still owns execution.
+- [x] Add the minimal types, schema registration, `Stack` schema, stack manifest, and logical catalog migration.
+- [x] Run `node --test test/config/schema-validator.test.ts` and confirm it passes.
 
 ### Task 2: Load and validate every stack reference from the same commit
 
@@ -77,11 +77,11 @@ Compose.
 - `loadPinnedConfig(repository, dataDirectory, revision, stackPath)` retains verified cached materializations and never
   resolves `HEAD` when a revision is supplied.
 
-- [ ] Write failing tests for missing, unreferenced, escaping, symlinked, or cross-revision stack references.
-- [ ] Extend materialization from hard-coded controller paths to the stack-owned roots without allowing arbitrary files
+- [x] Write failing tests for missing, unreferenced, escaping, symlinked, or cross-revision stack references.
+- [x] Extend materialization from hard-coded controller paths to the stack-owned roots without allowing arbitrary files
   or symbolic links.
-- [ ] Validate package manifests and committed APM lockfiles without consulting a harness target.
-- [ ] Run the focused config tests and confirm they pass.
+- [x] Validate package manifests and committed APM lockfiles without consulting a harness target.
+- [x] Run the focused config tests and confirm they pass.
 
 ### Task 3: Preload current and unfinished flow revisions before reconciliation
 
@@ -103,15 +103,15 @@ Compose.
   provider-visible control comments.
 - Preflight loads and validates the runtime revision and every unfinished revision before any ticket reconciliation.
 
-- [ ] Write failing provider tests proving bootstrap collects exact SHAs from unfinished control comments while ignoring
+- [x] Write failing provider tests proving bootstrap collects exact SHAs from unfinished control comments while ignoring
   terminal history.
-- [ ] Write a failing preflight/controller test proving no reconciliation starts when any required revision is missing
+- [x] Write a failing preflight/controller test proving no reconciliation starts when any required revision is missing
   or invalid.
-- [ ] Add the smallest provider bootstrap metadata and preflight preload step; reuse control-comment parsing and the
+- [x] Add the smallest provider bootstrap metadata and preflight preload step; reuse control-comment parsing and the
   existing verified materialization cache.
-- [ ] Run the provider, controller, preflight, config, and repository tests.
-- [ ] Run `npm run typecheck` and `npm test`.
-- [ ] Commit checkpoint 1 as `feat: load Git-owned stacks by pinned revision`.
+- [x] Run the provider, controller, preflight, config, and repository tests.
+- [x] Run `npm run typecheck` and `npm test`.
+- [x] Commit checkpoint 1 as `feat: load Git-owned stacks by pinned revision`.
 
 ---
 
@@ -136,10 +136,10 @@ Compose.
   data and includes secret paths but never secret contents.
 - `ExecutionSnapshot` contains `{ harness, model, reasoning, maxAttempts, delaySeconds, timeoutSeconds }`.
 
-- [ ] Write failing tests for the example runtime, exact SHA enforcement, unknown fields, unsafe paths, stable digest
+- [x] Write failing tests for the example runtime, exact SHA enforcement, unknown fields, unsafe paths, stable digest
   normalization, and secret-content exclusion.
-- [ ] Add the runtime schema, example, types, canonical JSON normalization, and digest computation using `node:crypto`.
-- [ ] Run `node --test test/config/runtime.test.ts test/config/schema-validator.test.ts`.
+- [x] Add the runtime schema, example, types, canonical JSON normalization, and digest computation using `node:crypto`.
+- [x] Run `node --test test/config/runtime.test.ts test/config/schema-validator.test.ts`.
 
 ### Task 5: Read provider and harness credentials only from mounted files
 
@@ -164,11 +164,11 @@ Compose.
   environment variables.
 - Harness adapters receive runtime-owned auth paths and run with the selected `model` and `reasoning` arguments.
 
-- [ ] Write failing tests that start production dependencies without `HOME`, token variables, `CODEX_HOME`, or
+- [x] Write failing tests that start production dependencies without `HOME`, token variables, `CODEX_HOME`, or
   `CLAUDE_CONFIG_DIR`, and prove mounted secret values stay out of logs and unrelated child environment.
-- [ ] Write failing harness tests for Codex `--model` plus reasoning config and Claude `--model` plus `--effort`.
-- [ ] Replace environment lookups and host-directory discovery with validated mounted file inputs.
-- [ ] Run the harness, credential, main, and preflight tests.
+- [x] Write failing harness tests for Codex `--model` plus reasoning config and Claude `--model` plus `--effort`.
+- [x] Replace environment lookups and host-directory discovery with validated mounted file inputs.
+- [x] Run the harness, credential, main, and preflight tests.
 
 ### Task 6: Implement reload acceptance, drain status, and dynamic scheduling limits
 
@@ -191,13 +191,13 @@ Compose.
 - Rate-limit settings apply on the next provider request; scheduler concurrency applies to newly claimed jobs only;
   polling interval applies before the next delay.
 
-- [ ] Write failing table tests for every reloadable and restart-only field, invalid replacement recovery, and a
+- [x] Write failing table tests for every reloadable and restart-only field, invalid replacement recovery, and a
   correction back to valid configuration.
-- [ ] Write failing tests proving reduced concurrency does not cancel active jobs and rate-limit updates affect only the
+- [x] Write failing tests proving reduced concurrency does not cancel active jobs and rate-limit updates affect only the
   next acquisition.
-- [ ] Implement one in-memory runtime manager and minimal setters/getters on the existing limiter, scheduler, and
+- [x] Implement one in-memory runtime manager and minimal setters/getters on the existing limiter, scheduler, and
   controller.
-- [ ] Run the runtime manager, limiter, scheduler, and controller tests.
+- [x] Run the runtime manager, limiter, scheduler, and controller tests.
 
 ### Task 7: Persist one execution snapshot for every logical attempt series
 
@@ -219,15 +219,15 @@ Compose.
   `RuntimeManager.reload("attempt-series")`.
 - Active-attempt counting feeds runtime drain status without becoming canonical state.
 
-- [ ] Write failing tests proving a runtime replacement between retries does not alter the series and a new series uses
+- [x] Write failing tests proving a runtime replacement between retries does not alter the series and a new series uses
   the new generation.
-- [ ] Write a failing control-state round-trip test for `runtimeDigest` and `executionSnapshot`, including rejection of
+- [x] Write a failing control-state round-trip test for `runtimeDigest` and `executionSnapshot`, including rejection of
   credential fields.
-- [ ] Move retry and harness selection from the Git catalog into series creation and persist the exact snapshot before
+- [x] Move retry and harness selection from the Git catalog into series creation and persist the exact snapshot before
   workspace or harness work.
-- [ ] Run attempt-runner, reconcile, control-comment, config, harness, and production credential tests.
-- [ ] Run `npm run typecheck` and `npm test`.
-- [ ] Commit checkpoint 2 as `feat: manage mounted runtime generations`.
+- [x] Run attempt-runner, reconcile, control-comment, config, harness, and production credential tests.
+- [x] Run `npm run typecheck` and `npm test`.
+- [x] Commit checkpoint 2 as `feat: manage mounted runtime generations`.
 
 ---
 
@@ -249,10 +249,10 @@ Compose.
 - `GET /api/status` returns Git repository/SHA, runtime digest, validation errors, restart state, changed fields, active
   attempt count, and `safeToRestart`; no mutating method or secret field exists.
 
-- [ ] Write failing HTTP tests for ready/draining/live status, safe restart transitions, status JSON redaction, 404s,
+- [x] Write failing HTTP tests for ready/draining/live status, safe restart transitions, status JSON redaction, 404s,
   and rejection of mutation methods.
-- [ ] Replace the boolean readiness holder with one read-only status source shared by main and the runtime manager.
-- [ ] Run the health and main tests outside the sandbox if local socket creation is blocked.
+- [x] Replace the boolean readiness holder with one read-only status source shared by main and the runtime manager.
+- [x] Run the health and main tests outside the sandbox if local socket creation is blocked.
 
 ### Task 9: Enforce the Docker filesystem and startup contract
 
@@ -269,9 +269,9 @@ Compose.
 - The image declares the fixed paths and starts without `AGENT_FLOW_*`, provider-token, `HOME`-configuration, or runtime
   configuration environment variables.
 
-- [ ] Rewrite the Docker contract test first so the old broad mounts and environment interface fail.
-- [ ] Make the minimal Compose and image path changes; retain the existing pinned toolchain and unprivileged user.
-- [ ] Run `node --test test/docker-contract.test.ts`.
+- [x] Rewrite the Docker contract test first so the old broad mounts and environment interface fail.
+- [x] Make the minimal Compose and image path changes; retain the existing pinned toolchain and unprivileged user.
+- [x] Run `node --test test/docker-contract.test.ts`.
 
 ### Task 10: Integrate and verify the complete startup and recovery path
 
@@ -282,18 +282,18 @@ Compose.
 - Modify: `test/e2e/recovery.test.ts`
 - Modify only if required by a failing behavior test: implementation files from Tasks 1-9
 
-- [ ] Update E2E fixtures to create one runtime YAML and mounted credential files while keeping provider state as the
+- [x] Update E2E fixtures to create one runtime YAML and mounted credential files while keeping provider state as the
   recovery source.
-- [ ] Add an E2E case that starts with two unfinished flow revisions and fails closed when either cannot be verified.
-- [ ] Add an E2E case that drains on a restart-only replacement, lets an active attempt finish, reports
+- [x] Add an E2E case that starts with two unfinished flow revisions and fails closed when either cannot be verified.
+- [x] Add an E2E case that drains on a restart-only replacement, lets an active attempt finish, reports
   `safeToRestart`, and resumes after correction.
-- [ ] Run `npm run typecheck`, `npm test`, and `npm run test:e2e` outside the sandbox when sockets are required.
-- [ ] Build the Docker image and run its health/status smoke check with mounted runtime, secrets, and persistent data.
-- [ ] Re-read the design acceptance criteria and map each criterion to a passing test or explicit Docker observation.
-- [ ] Review `git diff origin/main...HEAD` and the working tree for secret leakage, configuration mutation surfaces,
+- [x] Run `npm run typecheck`, `npm test`, and `npm run test:e2e` outside the sandbox when sockets are required.
+- [x] Build the Docker image and run its health/status smoke check with mounted runtime, secrets, and persistent data.
+- [x] Re-read the design acceptance criteria and map each criterion to a passing test or explicit Docker observation.
+- [x] Review `git diff origin/main...HEAD` and the working tree for secret leakage, configuration mutation surfaces,
   moving-revision fallback, and unrelated changes; fix every finding with a reproducing test.
-- [ ] Run the full verification suite again after the final fix.
-- [ ] Commit checkpoint 3 as `feat: complete the GitOps runtime contract`.
+- [x] Run the full verification suite again after the final fix.
+- [x] Commit checkpoint 3 as `feat: complete the GitOps runtime contract`.
 
 ## Explicitly skipped
 
