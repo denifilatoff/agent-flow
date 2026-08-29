@@ -90,7 +90,7 @@ export function createHealthServer(address: string, port: number, status: Operat
     if (asset) {
       try {
         response.writeHead(200, {
-          "cache-control": "no-store",
+          "cache-control": "no-cache",
           "content-type": asset.contentType,
         });
         response.end(await readFile(new URL(asset.file, import.meta.url)));

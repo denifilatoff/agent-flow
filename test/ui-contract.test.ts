@@ -19,7 +19,8 @@ test("ships the four-screen read-only dashboard contract", () => {
   assert.match(script, /agent-flow-menu-collapsed/);
   assert.match(css, /grid-template-columns:\s*232px minmax\(0, 1fr\)/);
   assert.match(css, /grid-template-columns:\s*48px minmax\(0, 1fr\)/);
-  assert.doesNotMatch(html, /Обновить снимок|demo|демонстрац/i);
+  assert.doesNotMatch(html, /Refresh snapshot|demo/i);
+  assert.doesNotMatch(`${html}\n${script}`, /[А-Яа-яЁё]/);
 });
 
 test("keeps the approved visual and responsive constraints", () => {
@@ -46,8 +47,8 @@ test("persists refresh settings and exposes safe diagnostic readers", () => {
   assert.match(script, /harness\.log/);
   assert.match(script, /decision\.json/);
   assert.match(script, /context\.json/);
-  assert.match(`${html}\n${script}`, /События/);
-  assert.match(script, /Поток событий не сохраняется/);
+  assert.match(`${html}\n${script}`, /Events/);
+  assert.match(script, /The event stream is not stored/);
   assert.match(script, /textContent/);
   assert.doesNotMatch(script, /innerHTML/);
 });
@@ -60,9 +61,9 @@ test("uses exact observation, lock, and bounded session evidence", () => {
   assert.match(script, /ticket\.stateKind/);
   assert.match(script, /ticket\.configRevision/);
   assert.doesNotMatch(script, /flow\.spec\.states\[ticket\.stateId\]/);
-  assert.match(missingSession, /if \(!discovery\.available\).*Список сессий недоступен/);
-  assert.match(missingSession, /if \(discovery\.truncated\).*ограниченном snapshot/);
-  assert.match(missingSession, /return "Диагностическая сессия для flowInstanceId не найдена\."/);
+  assert.match(missingSession, /if \(!discovery\.available\).*Session discovery is unavailable/);
+  assert.match(missingSession, /if \(discovery\.truncated\).*limited snapshot/);
+  assert.match(missingSession, /return "No diagnostic session found for this flowInstanceId\."/);
 });
 
 test("preserves wizard input across refresh and invalidates stale previews", () => {
@@ -103,8 +104,8 @@ test("exposes interactive graph nodes, tabs, and refresh controls accessibly", (
   assert.match(css, /\.refresh-interval \{[^}]*min-height:\s*44px/);
 });
 
-test("labels the RuntimeConfig output path in Russian", () => {
-  assert.match(html, /Файл: <code>\/etc\/agent-flow\/runtime\.yaml<\/code>/);
+test("labels the RuntimeConfig output path in English", () => {
+  assert.match(html, /File: <code>\/etc\/agent-flow\/runtime\.yaml<\/code>/);
   assert.doesNotMatch(html, /Target:/);
 });
 

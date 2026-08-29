@@ -40,12 +40,12 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
     const asset = await fetch(url(route));
     assert.equal(asset.status, 200, route);
     assert.equal(asset.headers.get("content-type"), contentType, route);
-    assert.equal(asset.headers.get("cache-control"), "no-store", route);
+    assert.equal(asset.headers.get("cache-control"), "no-cache", route);
   }
   const page = await (await fetch(url("/"))).text();
   assert.match(page, /href="\/assets\/styles\.css"/);
   assert.match(page, /src="\/assets\/app\.js"/);
-  for (const heading of ["Статус системы", "Конфигурация", "Граф переходов", "Подготовить изменение"]) {
+  for (const heading of ["System status", "Configuration", "Flow graph", "Prepare change"]) {
     assert.match(page, new RegExp(heading));
   }
   for (const route of ["/assets/../index.html", "/assets/%2e%2e/index.html"]) {
