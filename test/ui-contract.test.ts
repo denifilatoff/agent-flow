@@ -65,24 +65,43 @@ test("uses exact observation, lock, and bounded session evidence", () => {
 });
 
 test("preserves wizard input across refresh and invalidates stale previews", () => {
+  const dashboardRenderer = script.slice(script.indexOf("function renderDashboard"), script.indexOf("function metric"));
+  const refreshInvalidation = script.slice(script.indexOf("function invalidateDraftOnRefresh"), script.indexOf("function validateDraft"));
   assert.match(script, /wizardConfigured/);
   assert.match(script, /invalidateDraft/);
+  assert.match(dashboardRenderer, /invalidateDraftOnRefresh\(\)/);
+  assert.match(refreshInvalidation, /wizardStep > 1/);
+  assert.match(refreshInvalidation, /invalidateDraft\(\)/);
   assert.equal(script.match(/fieldSelect\.addEventListener\("change"/g)?.length, 1);
   assert.match(script, /rawValue !== "" && valueInput\.checkValidity\(\)/);
   assert.match(script, /inputValid \? Number\(rawValue\) : Number\.NaN/);
 });
 
 test("exposes interactive graph nodes, tabs, and refresh controls accessibly", () => {
+  for (const [screen, tabIndex] of [["status", "0"], ["configuration", "-1"], ["flow", "-1"], ["draft", "-1"]]) {
+    assert.match(html, new RegExp(`<button(?=[^>]*id="tab-${screen}")(?=[^>]*aria-controls="panel-${screen}")(?=[^>]*tabindex="${tabIndex}")`));
+    assert.match(html, new RegExp(`<section(?=[^>]*id="panel-${screen}")(?=[^>]*aria-labelledby="tab-${screen}")`));
+  }
+  const viewRenderer = script.slice(script.indexOf("function showView"), script.indexOf("function setMenuCollapsed"));
+  assert.match(viewRenderer, /tab\.tabIndex = selected \? 0 : -1/);
+  assert.match(script, /ArrowRight/);
+  assert.match(script, /ArrowLeft/);
+  assert.match(script, /Home/);
+  assert.match(script, /End/);
+  assert.match(script, /destination\.focus\(\)/);
   assert.doesNotMatch(html, /<svg[^>]+role="img"/);
   assert.match(script, /button\.setAttribute\("role", "tab"\)/);
   assert.match(script, /aria-controls/);
   assert.match(script, /button\.tabIndex = key === "events" \? 0 : -1/);
   assert.match(script, /content\.setAttribute\("role", "tabpanel"\)/);
   assert.match(script, /content\.setAttribute\("aria-labelledby"/);
-  assert.match(script, /ArrowRight/);
-  assert.match(script, /ArrowLeft/);
   assert.match(css, /\.auto-refresh label \{[^}]*min-height:\s*44px/);
   assert.match(css, /\.refresh-interval \{[^}]*min-height:\s*44px/);
+});
+
+test("labels the RuntimeConfig output path in Russian", () => {
+  assert.match(html, /Файл: <code>\/etc\/agent-flow\/runtime\.yaml<\/code>/);
+  assert.doesNotMatch(html, /Target:/);
 });
 
 test("builds every flow node and one validated RuntimeConfig field", () => {

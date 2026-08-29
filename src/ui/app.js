@@ -47,7 +47,11 @@
   function showView(view, save = true) {
     if (!screens.some((screen) => screen.dataset.screen === view)) view = "status";
     for (const screen of screens) screen.hidden = screen.dataset.screen !== view;
-    for (const tab of tabs) tab.setAttribute("aria-selected", String(tab.dataset.view === view));
+    for (const tab of tabs) {
+      const selected = tab.dataset.view === view;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    }
     if (save) safeSet(storageKeys.view, view);
   }
 
@@ -59,9 +63,27 @@
     if (save) safeSet(storageKeys.menu, String(collapsed));
   }
 
-  for (const tab of tabs) tab.addEventListener("click", () => showView(tab.dataset.view));
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => showView(tab.dataset.view));
+    tab.addEventListener("keydown", (event) => {
+      const current = tabs.indexOf(tab);
+      let index;
+      if (event.key === "ArrowRight") index = (current + 1) % tabs.length;
+      else if (event.key === "ArrowLeft") index = (current - 1 + tabs.length) % tabs.length;
+      else if (event.key === "Home") index = 0;
+      else if (event.key === "End") index = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      showView(tabs[index].dataset.view);
+      tabs[index].focus();
+    });
+  }
   for (const button of document.querySelectorAll("[data-open-view]")) {
-    button.addEventListener("click", () => showView(button.dataset.openView));
+    button.addEventListener("click", () => {
+      const destination = tabs.find((tab) => tab.dataset.view === button.dataset.openView);
+      showView(button.dataset.openView);
+      destination.focus();
+    });
   }
   menuToggle.addEventListener("click", () => setMenuCollapsed(!shell.classList.contains("menu-collapsed")));
   showView(safeGet(storageKeys.view) || "status", false);
@@ -133,7 +155,10 @@
     renderConfiguration(snapshot);
     renderGraph(snapshot.flow, snapshot.configuration.revision);
     if (!wizardConfigured) configureWizard(snapshot);
-    else setWizardEnabled(true, "");
+    else {
+      invalidateDraftOnRefresh();
+      setWizardEnabled(true, "");
+    }
   }
 
   function metric(label, value, foot, attention = false) {
@@ -609,6 +634,10 @@
     document.getElementById("yaml-output").value = "";
     document.getElementById("copy-status").textContent = "";
     draftError.textContent = "";
+  }
+
+  function invalidateDraftOnRefresh() {
+    if (wizardStep > 1) invalidateDraft();
   }
 
   function validateDraft() {

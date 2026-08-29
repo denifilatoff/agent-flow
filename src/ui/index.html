@@ -18,10 +18,10 @@
           <div class="brand-meta">панель оператора<br>только чтение</div>
         </div>
         <nav class="nav" aria-label="Разделы" role="tablist">
-          <button class="nav-button" type="button" role="tab" aria-selected="true" data-view="status"><span class="nav-index">01</span><span>Статус</span></button>
-          <button class="nav-button" type="button" role="tab" aria-selected="false" data-view="configuration"><span class="nav-index">02</span><span>Конфигурация</span></button>
-          <button class="nav-button" type="button" role="tab" aria-selected="false" data-view="flow"><span class="nav-index">03</span><span>Граф переходов</span></button>
-          <button class="nav-button" type="button" role="tab" aria-selected="false" data-view="draft"><span class="nav-index">04</span><span>Подготовить изменение</span></button>
+          <button class="nav-button" id="tab-status" type="button" role="tab" aria-selected="true" aria-controls="panel-status" tabindex="0" data-view="status"><span class="nav-index">01</span><span>Статус</span></button>
+          <button class="nav-button" id="tab-configuration" type="button" role="tab" aria-selected="false" aria-controls="panel-configuration" tabindex="-1" data-view="configuration"><span class="nav-index">02</span><span>Конфигурация</span></button>
+          <button class="nav-button" id="tab-flow" type="button" role="tab" aria-selected="false" aria-controls="panel-flow" tabindex="-1" data-view="flow"><span class="nav-index">03</span><span>Граф переходов</span></button>
+          <button class="nav-button" id="tab-draft" type="button" role="tab" aria-selected="false" aria-controls="panel-draft" tabindex="-1" data-view="draft"><span class="nav-index">04</span><span>Подготовить изменение</span></button>
         </nav>
         <div class="sidebar-foot"><strong>GitHub / GitLab</strong>состояние из provider</div>
       </aside>
@@ -37,7 +37,7 @@
           </div>
         </div>
 
-        <section class="screen" role="tabpanel" data-screen="status">
+        <section class="screen" id="panel-status" role="tabpanel" aria-labelledby="tab-status" data-screen="status">
           <header class="screen-head"><div><h1>Статус системы</h1><p>Текущее состояние controller, наблюдения provider и диагностические сессии.</p></div><span class="tag" id="snapshot-time">Загрузка…</span></header>
           <div class="metrics" id="status-metrics" aria-live="polite"><p class="loading">Статус загружается…</p></div>
           <div class="layout-two">
@@ -55,7 +55,7 @@
           <article class="panel section-gap"><div class="panel-head"><h2>Блокировки выполнения</h2><span class="panel-meta">per-ticket lock</span></div><div class="panel-body" id="locks-panel"><p class="loading">Блокировки загружаются…</p></div></article>
         </section>
 
-        <section class="screen" role="tabpanel" data-screen="configuration" hidden>
+        <section class="screen" id="panel-configuration" role="tabpanel" aria-labelledby="tab-configuration" data-screen="configuration" hidden>
           <header class="screen-head"><div><h1>Конфигурация</h1><p>Effective RuntimeConfig и pinned Stack, Flow и AgentCatalog. Только чтение.</p></div><button class="button" type="button" data-open-view="draft">Подготовить изменение</button></header>
           <div class="source-block" id="configuration-source"><p class="loading">Источник конфигурации загружается…</p></div>
           <div class="config-grid" id="configuration-grid"><p class="loading">Конфигурация загружается…</p></div>
@@ -63,7 +63,7 @@
           <article class="panel section-gap"><div class="panel-head"><h2>Каталог агентов</h2><span class="panel-meta">catalog + execution bindings</span></div><div id="agents"><p class="loading">Агенты загружаются…</p></div></article>
         </section>
 
-        <section class="screen" role="tabpanel" data-screen="flow" hidden>
+        <section class="screen" id="panel-flow" role="tabpanel" aria-labelledby="tab-flow" data-screen="flow" hidden>
           <header class="screen-head"><div><h1>Граф переходов</h1><p>Все state и transitions из pinned Flow. Выберите state для подробностей.</p></div><span class="tag" id="flow-revision">Загрузка…</span></header>
           <div class="graph-layout">
             <article class="panel graph-panel"><div class="graph-toolbar"><span>agent / human gate / provider wait / paused / final</span><span class="panel-meta">Enter или Space выбирает state</span></div><div class="graph-scroll"><svg class="flow-svg" id="flow-graph" viewBox="0 0 1080 640" aria-labelledby="flow-graph-title"><title id="flow-graph-title">Граф состояний Agent Flow</title></svg></div></article>
@@ -71,9 +71,9 @@
           </div>
         </section>
 
-        <section class="screen" role="tabpanel" data-screen="draft" hidden>
+        <section class="screen" id="panel-draft" role="tabpanel" aria-labelledby="tab-draft" data-screen="draft" hidden>
           <header class="screen-head"><div><h1>Подготовить изменение</h1><p>Мастер создаёт YAML для одного числового поля RuntimeConfig и ничего не записывает.</p></div></header>
-          <div class="notice"><strong>Target: <code>/etc/agent-flow/runtime.yaml</code></strong><span>Скопируйте YAML в отдельную ветку и примените через обычный review-процесс.</span></div>
+          <div class="notice"><strong>Файл: <code>/etc/agent-flow/runtime.yaml</code></strong><span>Скопируйте YAML в отдельную ветку и примените через обычный review-процесс.</span></div>
           <article class="panel wizard">
             <aside class="wizard-steps" aria-label="Шаги мастера"><div class="wizard-step active" data-step-label="1"><b>1</b>Параметр</div><div class="wizard-step" data-step-label="2"><b>2</b>Проверка</div><div class="wizard-step" data-step-label="3"><b>3</b>YAML</div></aside>
             <form class="wizard-content" id="config-wizard">
