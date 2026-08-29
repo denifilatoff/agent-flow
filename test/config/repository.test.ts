@@ -14,6 +14,7 @@ import {
   prepareConfigurationRepository,
   configurationGitAuthentication,
   resolveRevision,
+  stagePinnedPackage,
 } from "../../src/config/repository.ts";
 
 const exec = promisify(execFile);
@@ -127,6 +128,30 @@ test("restores a mutated materialization after its pinned commit is pruned from 
   const restored = await loadPinnedConfig(prepared.repository, data, pinned.revision);
   assert.equal(restored.revision, pinned.revision);
   assert.equal(await readFile(catalogPath, "utf8"), expectedCatalog);
+});
+
+test("stages an exact private agent package after the shared tree is mutated", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  const pinned = await loadPinnedConfig(repo.path, data);
+  const sharedManifest = join(pinned.root, "agent-packages/developer/apm.yml");
+  const expected = await readFile(sharedManifest, "utf8");
+  await repo.replaceHistory();
+  await assert.rejects(resolveRevision(repo.path, pinned.revision));
+  await writeFile(sharedManifest, "name: spoofed\n");
+
+  const packageDirectories = await Promise.all(["first", "second"].map((attempt) => stagePinnedPackage(
+    pinned.root,
+    pinned.revision,
+    "agent-packages/developer",
+    join(data, `${attempt}-private-attempt-package`),
+  )));
+
+  for (const packageDirectory of packageDirectories) {
+    assert.equal(await readFile(join(packageDirectory, "apm.yml"), "utf8"), expected);
+  }
+  assert.equal(await readFile(sharedManifest, "utf8"), "name: spoofed\n");
 });
 
 test("rejects a marker-only materialization for a pruned revision", async (t) => {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { validateBundleDocument, type ConfigBundle } from "../config/load.ts";
 import type {
@@ -30,7 +30,11 @@ export interface AttemptRunnerDependencies {
   provider: ProviderAdapter;
   providerConfig: { apiUrl: string; repositories: string[] };
   providerCredential: ProviderCredential;
-  loadPinned(revision: string): Promise<ConfigBundle>;
+  preparePinnedAgent(
+    revision: string,
+    agentId: string,
+    destination: string,
+  ): Promise<{ bundle: ConfigBundle; packageDirectory: string }>;
   execution(agentId: string): Promise<{ runtimeDigest: string; executionSnapshot: ExecutionSnapshot }>;
   attemptStarted?(): void;
   attemptFinished?(): void;
@@ -219,16 +223,6 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       if (running.cancelled) return;
 
       try {
-        const pinned = await dependencies.loadPinned(control.configRevision);
-        const pinnedState = selectedState(pinned, control);
-        if (!pinnedState) {
-          throw new AttemptError("CONFIGURATION_INVALID", "attempt state is missing from pinned configuration", false);
-        }
-        const verifiedConfig = validateRequest(
-          { ...request, bundle: pinned, state: pinnedState },
-          dependencies,
-          config.executionSnapshot,
-        );
         const workspace = await dependencies.workspaceManager.prepareWorkspace(
           request.snapshot.repository,
           request.ref,
@@ -243,9 +237,23 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           context,
         );
         assertCurrent(running, series, attempt);
+        const prepared = await dependencies.preparePinnedAgent(
+          control.configRevision,
+          request.agentId,
+          join(session.root, "pinned-package"),
+        );
+        const pinnedState = selectedState(prepared.bundle, control);
+        if (!pinnedState) {
+          throw new AttemptError("CONFIGURATION_INVALID", "attempt state is missing from pinned configuration", false);
+        }
+        validateRequest(
+          { ...request, bundle: prepared.bundle, state: pinnedState },
+          dependencies,
+          config.executionSnapshot,
+        );
         const compiled = await compileAgent(
           request.agentId,
-          verifiedConfig.packageDirectory,
+          prepared.packageDirectory,
           config.executionSnapshot.harness,
           session.harnessSessionDirectory,
         );

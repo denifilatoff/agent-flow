@@ -240,7 +240,7 @@ interface TreeEntry {
   path: string;
 }
 
-function treeEntries(output: Buffer): TreeEntry[] {
+function treeEntries(output: Buffer, requiredRoots = ROOTS): TreeEntry[] {
   const entries = output
     .toString("utf8")
     .split("\0")
@@ -254,10 +254,45 @@ function treeEntries(output: Buffer): TreeEntry[] {
       }
       return { mode, type, path };
     });
-  if (!ROOTS.every((root) => entries.some((entry) => entry.path.startsWith(root)))) {
+  if (!requiredRoots.every((root) => entries.some((entry) => entry.path.startsWith(root)))) {
     throw new Error("Git tree is missing a required configuration root");
   }
   return entries;
+}
+
+export async function stagePinnedPackage(
+  materializedRoot: string,
+  revision: string,
+  packagePath: string,
+  destination: string,
+): Promise<string> {
+  if (!SHA.test(revision) || !packagePath.startsWith("agent-packages/") || !isSafePath(packagePath)) {
+    throw new Error("pinned agent package identity is invalid");
+  }
+  const repository = resolve(materializedRoot, ".source.git");
+  const normalized = revision.toLowerCase();
+  if (await resolveRevision(repository, normalized) !== normalized) {
+    throw new Error("pinned agent package revision does not match");
+  }
+  const prefix = `${packagePath}/`;
+  const entries = treeEntries(
+    await git(repository, ["ls-tree", "-r", "-z", "--full-tree", normalized, "--", packagePath]),
+    [prefix],
+  );
+  const output = resolve(destination);
+  await mkdir(output);
+  try {
+    for (const entry of entries) {
+      const target = resolve(output, entry.path.slice(prefix.length));
+      if (!isInside(output, target)) throw new Error(`unsafe Git tree entry ${entry.path}`);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, await git(repository, ["show", `${normalized}:${entry.path}`]), { flag: "wx" });
+    }
+    return output;
+  } catch (error) {
+    await rm(output, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export async function resolveRevision(repository: string, requested?: string): Promise<string> {

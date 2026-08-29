@@ -394,7 +394,10 @@ async function assertRunnerAccepts(request: AttemptRequest, provider: ProviderAd
     provider,
     providerConfig: { apiUrl: PROVIDER_CREDENTIAL.apiUrl, repositories: [request.ref.repository] },
     providerCredential: PROVIDER_CREDENTIAL,
-    loadPinned: async () => request.bundle,
+    preparePinnedAgent: async () => ({
+      bundle: request.bundle,
+      packageDirectory: "/config/agent-packages/developer",
+    }),
     execution,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: request.ref.repository,
@@ -619,7 +622,7 @@ test("reconciler owns terminal cancellation for an actual running attempt", asyn
     provider,
     providerConfig: { apiUrl: PROVIDER_CREDENTIAL.apiUrl, repositories: [TICKET.repository] },
     providerCredential: PROVIDER_CREDENTIAL,
-    loadPinned: async () => BUNDLE,
+    preparePinnedAgent: async () => ({ bundle: BUNDLE, packageDirectory: "/config/agent-packages/architect" }),
     execution,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: TICKET.repository,
@@ -674,7 +677,7 @@ test("terminal cancellation overrides an in-flight success from the same attempt
     dataDirectory: "/data", provider,
     providerConfig: { apiUrl: PROVIDER_CREDENTIAL.apiUrl, repositories: [TICKET.repository] },
     providerCredential: PROVIDER_CREDENTIAL,
-    loadPinned: async () => BUNDLE,
+    preparePinnedAgent: async () => ({ bundle: BUNDLE, packageDirectory: "/config/agent-packages/architect" }),
     execution,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: TICKET.repository,

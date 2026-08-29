@@ -114,7 +114,7 @@ function fixture(options: {
   ids?: string[]; compileError?: Error; delay?: (milliseconds: number) => Promise<void>;
   providerCredential?: ProviderCredential; onSettled?: (ref: AttemptRequest["ref"]) => void;
   execution?: AttemptRunnerDependencies["execution"];
-  loadPinned?: AttemptRunnerDependencies["loadPinned"];
+  preparePinnedAgent?: AttemptRunnerDependencies["preparePinnedAgent"];
   packageDirectory?: string;
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
@@ -155,10 +155,11 @@ function fixture(options: {
       delaySeconds: (configuredRequest.bundle as ReturnType<typeof bundle>).testDelaySeconds ?? 7,
       timeoutSeconds: 90,
     } })),
-    loadPinned: options.loadPinned ?? (async (revision) => {
-      events.push("config:verify");
+    preparePinnedAgent: options.preparePinnedAgent ?? (async (revision, agentId) => {
+      events.push("config:stage");
       assert.equal(revision, REVISION);
-      return configuredRequest.bundle;
+      assert.equal(agentId, "developer");
+      return { bundle: configuredRequest.bundle, packageDirectory: "/config/agent-packages/developer" };
     }),
     workspaceManager: { async prepareWorkspace() { events.push("workspace:prepare"); return {
       baseClone: "/data/repositories/repo", worktree: "/data/worktrees/flow", repository: "owner/repo",
@@ -195,8 +196,8 @@ async function waitIdle(subject: Fixture): Promise<void> {
 test("persists and reads back started before a background launch", async () => {
   const subject = fixture(); await subject.runner.start(subject.request);
   assert.equal(subject.runner.isRunning(FLOW), true);
-  assert.deepEqual(subject.events.slice(0, 7), ["control:update-started", "control:readback", "config:verify",
-    "workspace:prepare", "session:create", "apm:compile", "harness:spawn"]);
+  assert.deepEqual(subject.events.slice(0, 7), ["control:update-started", "control:readback", "workspace:prepare",
+    "session:create", "config:stage", "apm:compile", "harness:spawn"]);
   assert.equal(subject.controls[0]!.attemptSeries?.consumed, 1);
   assert.equal(subject.controls[0]!.attemptSeries?.runtimeDigest, "d".repeat(64));
   assert.equal(subject.controls[0]!.attemptSeries?.executionSnapshot?.model, "test-model");
@@ -232,15 +233,17 @@ test("persists and reads back started before a background launch", async () => {
   assert.deepEqual(subject.controls.at(-1)?.latestReceipt, receipt(ATTEMPT_1));
 });
 
-test("re-verifies the pinned revision before compiling each retry", async () => {
+test("stages a private pinned package before compiling each retry", async () => {
   const verified = { ...bundle(), root: "/verified" };
-  let loads = 0;
+  let stages = 0;
   const subject = fixture({
     results: [{ exitCode: 17, signal: null, timedOut: false }, OK],
-    loadPinned: async (revision) => {
-      loads += 1;
+    preparePinnedAgent: async (revision, agentId, destination) => {
+      stages += 1;
       assert.equal(revision, REVISION);
-      return verified;
+      assert.equal(agentId, "developer");
+      assert.match(destination, /\/pinned-package$/);
+      return { bundle: verified, packageDirectory: "/verified/agent-packages/developer" };
     },
     packageDirectory: "/verified/agent-packages/developer",
   });
@@ -248,7 +251,7 @@ test("re-verifies the pinned revision before compiling each retry", async () => 
   await subject.runner.start(subject.request);
   await waitIdle(subject);
 
-  assert.equal(loads, 2);
+  assert.equal(stages, 2);
   assert.equal(subject.events.filter((event) => event === "apm:compile").length, 2);
 });
 
