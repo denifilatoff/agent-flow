@@ -103,7 +103,7 @@ test("uses an exact cached revision when the configuration remote is unavailable
   assert.equal(cached.repository, prepared.repository);
 });
 
-test("loads a verified materialization after its pinned commit is pruned from the mirror", async (t) => {
+test("restores a mutated materialization after its pinned commit is pruned from the mirror", async (t) => {
   const repo = await TestRepository.create();
   const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
   t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
@@ -120,8 +120,13 @@ test("loads a verified materialization after its pinned commit is pruned from th
   const recovered = await loadPinnedConfig(prepared.repository, data, pinned.revision);
   assert.equal(recovered.revision, pinned.revision);
   assert.equal(recovered.flow.metadata.id, pinned.flow.metadata.id);
-  await writeFile(join(data, "config", pinned.revision, "config/agents.yaml"), "spoofed: true\n");
-  await assert.rejects(loadPinnedConfig(prepared.repository, data, pinned.revision));
+  const catalogPath = join(data, "config", pinned.revision, "config/agents.yaml");
+  const expectedCatalog = await readFile(catalogPath, "utf8");
+  await writeFile(catalogPath, "spoofed: true\n");
+
+  const restored = await loadPinnedConfig(prepared.repository, data, pinned.revision);
+  assert.equal(restored.revision, pinned.revision);
+  assert.equal(await readFile(catalogPath, "utf8"), expectedCatalog);
 });
 
 test("rejects a marker-only materialization for a pruned revision", async (t) => {
@@ -136,7 +141,7 @@ test("rejects a marker-only materialization for a pruned revision", async (t) =>
   await assert.rejects(loadPinnedConfig(repo.path, data, sha), /revision|materialization/i);
 });
 
-test("rejects a materialization rewritten through a Git replacement ref", async (t) => {
+test("restores a materialization rewritten through a Git replacement ref", async (t) => {
   const repo = await TestRepository.create();
   const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
   t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
@@ -145,11 +150,15 @@ test("rejects a materialization rewritten through a Git replacement ref", async 
   const replacement = await repo.head();
   const materialized = join(data, "config", pinned.revision);
   const objectStore = join(materialized, ".source.git");
+  const flowPath = join(materialized, "config/flows/development.yaml");
+  const expectedFlow = await readFile(flowPath, "utf8");
   await exec("git", ["-C", objectStore, "fetch", repo.path, replacement]);
   await exec("git", ["-C", objectStore, "replace", pinned.revision, replacement]);
-  await cp(join(repo.path, "config/flows/development.yaml"), join(materialized, "config/flows/development.yaml"));
+  await cp(join(repo.path, "config/flows/development.yaml"), flowPath);
 
-  await assert.rejects(loadPinnedConfig(repo.path, data, pinned.revision));
+  const restored = await loadPinnedConfig(repo.path, data, pinned.revision);
+  assert.equal(restored.revision, pinned.revision);
+  assert.equal(await readFile(flowPath, "utf8"), expectedFlow);
 });
 
 test("rejects a loose Git object whose bytes do not match its object ID", async (t) => {

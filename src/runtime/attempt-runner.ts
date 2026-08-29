@@ -30,6 +30,7 @@ export interface AttemptRunnerDependencies {
   provider: ProviderAdapter;
   providerConfig: { apiUrl: string; repositories: string[] };
   providerCredential: ProviderCredential;
+  loadPinned(revision: string): Promise<ConfigBundle>;
   execution(agentId: string): Promise<{ runtimeDigest: string; executionSnapshot: ExecutionSnapshot }>;
   attemptStarted?(): void;
   attemptFinished?(): void;
@@ -218,6 +219,16 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       if (running.cancelled) return;
 
       try {
+        const pinned = await dependencies.loadPinned(control.configRevision);
+        const pinnedState = selectedState(pinned, control);
+        if (!pinnedState) {
+          throw new AttemptError("CONFIGURATION_INVALID", "attempt state is missing from pinned configuration", false);
+        }
+        const verifiedConfig = validateRequest(
+          { ...request, bundle: pinned, state: pinnedState },
+          dependencies,
+          config.executionSnapshot,
+        );
         const workspace = await dependencies.workspaceManager.prepareWorkspace(
           request.snapshot.repository,
           request.ref,
@@ -234,7 +245,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         assertCurrent(running, series, attempt);
         const compiled = await compileAgent(
           request.agentId,
-          config.packageDirectory,
+          verifiedConfig.packageDirectory,
           config.executionSnapshot.harness,
           session.harnessSessionDirectory,
         );

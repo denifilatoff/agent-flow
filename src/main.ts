@@ -143,8 +143,8 @@ export function createProductionDependencies(
     apiUrl: configured.provider.apiUrl,
   }));
 
-  const load = async (revision?: string): Promise<ConfigBundle> => {
-    const cached = revision ? pinned.get(revision.toLowerCase()) : undefined;
+  const load = async (revision?: string, verify = false): Promise<ConfigBundle> => {
+    const cached = !verify && revision ? pinned.get(revision.toLowerCase()) : undefined;
     if (cached) return cached;
     prepared ??= prepareConfigurationRepository(
       configSource,
@@ -211,7 +211,7 @@ function composeController(
   bundle: ConfigBundle,
   providers: Providers,
   harnesses: Harnesses,
-  loadPinned: (revision?: string) => Promise<ConfigBundle>,
+  loadPinned: (revision?: string, verify?: boolean) => Promise<ConfigBundle>,
   runtime: RuntimeManager,
   credential: import("./harness/types.ts").ProviderCredential,
   overrides: ProductionOverrides,
@@ -234,6 +234,7 @@ function composeController(
       provider,
       providerConfig: configured.provider,
       providerCredential: credential,
+      loadPinned: (revision) => loadPinned(revision, true),
       execution: (agentId) => runtime.execution(agentId),
       attemptStarted: () => runtime.attemptStarted(),
       attemptFinished: () => runtime.attemptFinished(),

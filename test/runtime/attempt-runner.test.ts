@@ -114,6 +114,8 @@ function fixture(options: {
   ids?: string[]; compileError?: Error; delay?: (milliseconds: number) => Promise<void>;
   providerCredential?: ProviderCredential; onSettled?: (ref: AttemptRequest["ref"]) => void;
   execution?: AttemptRunnerDependencies["execution"];
+  loadPinned?: AttemptRunnerDependencies["loadPinned"];
+  packageDirectory?: string;
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
   const prompts: string[] = [];
@@ -153,6 +155,11 @@ function fixture(options: {
       delaySeconds: (configuredRequest.bundle as ReturnType<typeof bundle>).testDelaySeconds ?? 7,
       timeoutSeconds: 90,
     } })),
+    loadPinned: options.loadPinned ?? (async (revision) => {
+      events.push("config:verify");
+      assert.equal(revision, REVISION);
+      return configuredRequest.bundle;
+    }),
     workspaceManager: { async prepareWorkspace() { events.push("workspace:prepare"); return {
       baseClone: "/data/repositories/repo", worktree: "/data/worktrees/flow", repository: "owner/repo",
       ticketNumber: 7, flowInstanceId: FLOW,
@@ -165,7 +172,7 @@ function fixture(options: {
         harnessSessionDirectory: `/data/sessions/${attemptId}/harness-session`,
       }; },
     async compileAgent(agentId, packageDirectory, target) { events.push("apm:compile");
-      assert.equal(packageDirectory, "/config/agent-packages/developer");
+      assert.equal(packageDirectory, options.packageDirectory ?? "/config/agent-packages/developer");
       if (options.compileError) throw options.compileError;
       return { agentId, target, instructions: "instructions", runtimeDirectory: "/runtime" }; },
     async verifyDecision(path, expected, _provider, cancelled, validate) { events.push("decision:verify");
@@ -188,8 +195,8 @@ async function waitIdle(subject: Fixture): Promise<void> {
 test("persists and reads back started before a background launch", async () => {
   const subject = fixture(); await subject.runner.start(subject.request);
   assert.equal(subject.runner.isRunning(FLOW), true);
-  assert.deepEqual(subject.events.slice(0, 6), ["control:update-started", "control:readback", "workspace:prepare",
-    "session:create", "apm:compile", "harness:spawn"]);
+  assert.deepEqual(subject.events.slice(0, 7), ["control:update-started", "control:readback", "config:verify",
+    "workspace:prepare", "session:create", "apm:compile", "harness:spawn"]);
   assert.equal(subject.controls[0]!.attemptSeries?.consumed, 1);
   assert.equal(subject.controls[0]!.attemptSeries?.runtimeDigest, "d".repeat(64));
   assert.equal(subject.controls[0]!.attemptSeries?.executionSnapshot?.model, "test-model");
@@ -223,6 +230,26 @@ test("persists and reads back started before a background launch", async () => {
     pinnedChangeRequest: subject.request.snapshot.changeRequest,
   });
   assert.deepEqual(subject.controls.at(-1)?.latestReceipt, receipt(ATTEMPT_1));
+});
+
+test("re-verifies the pinned revision before compiling each retry", async () => {
+  const verified = { ...bundle(), root: "/verified" };
+  let loads = 0;
+  const subject = fixture({
+    results: [{ exitCode: 17, signal: null, timedOut: false }, OK],
+    loadPinned: async (revision) => {
+      loads += 1;
+      assert.equal(revision, REVISION);
+      return verified;
+    },
+    packageDirectory: "/verified/agent-packages/developer",
+  });
+
+  await subject.runner.start(subject.request);
+  await waitIdle(subject);
+
+  assert.equal(loads, 2);
+  assert.equal(subject.events.filter((event) => event === "apm:compile").length, 2);
 });
 
 test("wakes the ticket after a background attempt settles", async () => {

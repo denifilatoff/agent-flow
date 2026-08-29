@@ -284,6 +284,15 @@ export async function materializeRevision(repository: string, revision: string, 
     if (!(error instanceof Error) || !/ENOENT/.test(String((error as NodeJS.ErrnoException).code))) throw error;
   }
 
+  return createMaterialization(repository, sha, configRoot, target);
+}
+
+async function createMaterialization(
+  repository: string,
+  sha: string,
+  configRoot: string,
+  target: string,
+): Promise<string> {
   const entries = treeEntries(await git(repository, ["ls-tree", "-r", "-z", "--full-tree", sha, "--", "config", "schemas/v1", "agent-packages"]));
   const temporary = await mkdtemp(resolve(configRoot, `.${sha}.`));
 
@@ -310,6 +319,36 @@ export async function materializeRevision(repository: string, revision: string, 
   return target;
 }
 
+async function restoreMaterialization(target: string, sha: string, configRoot: string): Promise<string> {
+  const entry = await lstat(target);
+  if (!entry.isDirectory() || entry.isSymbolicLink()) {
+    throw new Error(`materialization directory ${target} is incomplete`);
+  }
+  const retainedRepository = resolve(target, ".source.git");
+  try {
+    if (await resolveRevision(retainedRepository, sha) !== sha) {
+      throw new Error("revision mismatch");
+    }
+  } catch {
+    throw new Error(`materialization directory ${target} is incomplete`);
+  }
+
+  const repair = await mkdtemp(resolve(configRoot, `.${sha}.repair.`));
+  const stale = resolve(repair, "stale");
+  await rename(target, stale);
+  try {
+    const restored = await createMaterialization(resolve(stale, ".source.git"), sha, configRoot, target);
+    await rm(repair, { recursive: true, force: true });
+    return restored;
+  } catch (error) {
+    try {
+      await rename(stale, target);
+    } catch {}
+    await rm(repair, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 export async function loadPinnedConfig(
   repository: string,
   dataDirectory: string,
@@ -330,6 +369,12 @@ export async function loadPinnedConfig(
       const materialized = resolve(configRoot, normalized);
       if (await completeDirectory(materialized, normalized)) {
         return loadConfigBundle(materialized, stackPath, normalized);
+      }
+      try {
+        const restored = await restoreMaterialization(materialized, normalized, configRoot);
+        return loadConfigBundle(restored, stackPath, normalized);
+      } catch (error) {
+        if (!isNodeError(error, "ENOENT")) throw error;
       }
     }
   }
