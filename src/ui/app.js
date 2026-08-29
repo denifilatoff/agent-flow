@@ -534,7 +534,7 @@
       const next = nodes[(nodes.indexOf(node) + offset + nodes.length) % nodes.length];
       event.preventDefault();
       next.focus();
-      next.click();
+      next.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     return node;
   }

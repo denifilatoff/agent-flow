@@ -30,6 +30,7 @@ test("keeps the approved visual and responsive constraints", () => {
   assert.match(css, /--radius:\s*2px/);
   assert.match(css, /min-width:\s*320px/);
   assert.match(css, /overflow-x:\s*(?:hidden|clip)/);
+  assert.match(css, /#flow-revision\s*\{[^}]*max-width:\s*100%[^}]*overflow-wrap:\s*anywhere/);
   assert.match(css, /:focus-visible/);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
 });
@@ -78,6 +79,7 @@ test("preserves wizard input across refresh and invalidates stale previews", () 
 });
 
 test("exposes interactive graph nodes, tabs, and refresh controls accessibly", () => {
+  const graphKeyboard = script.slice(script.indexOf("function graphNode"), script.indexOf("function selectNode"));
   for (const [screen, tabIndex] of [["status", "0"], ["configuration", "-1"], ["flow", "-1"], ["draft", "-1"]]) {
     assert.match(html, new RegExp(`<button(?=[^>]*id="tab-${screen}")(?=[^>]*aria-controls="panel-${screen}")(?=[^>]*tabindex="${tabIndex}")`));
     assert.match(html, new RegExp(`<section(?=[^>]*id="panel-${screen}")(?=[^>]*aria-labelledby="tab-${screen}")`));
@@ -86,6 +88,8 @@ test("exposes interactive graph nodes, tabs, and refresh controls accessibly", (
   assert.match(viewRenderer, /tab\.tabIndex = selected \? 0 : -1/);
   assert.match(script, /ArrowRight/);
   assert.match(script, /ArrowLeft/);
+  assert.match(graphKeyboard, /next\.dispatchEvent\(new MouseEvent\("click"/);
+  assert.doesNotMatch(graphKeyboard, /next\.click\(\)/);
   assert.match(script, /Home/);
   assert.match(script, /End/);
   assert.match(script, /destination\.focus\(\)/);

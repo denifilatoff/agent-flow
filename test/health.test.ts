@@ -40,7 +40,7 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
     const asset = await fetch(url(route));
     assert.equal(asset.status, 200, route);
     assert.equal(asset.headers.get("content-type"), contentType, route);
-    assert.equal(asset.headers.get("cache-control"), "public, max-age=3600", route);
+    assert.equal(asset.headers.get("cache-control"), "no-store", route);
   }
   const page = await (await fetch(url("/"))).text();
   assert.match(page, /href="\/assets\/styles\.css"/);
