@@ -797,6 +797,21 @@ test("registers the exact cached harness credential once at first load", async (
   }
 });
 
+test("rejects harness credential sources larger than 65536 bytes", async (t) => {
+  for (const target of ["codex", "claude"] as const) {
+    const fixture = await runFixture(target);
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    await writeFile(fixture.authFile, "x".repeat(65_537), { mode: 0o600 });
+    const processes = processFixture();
+    const adapter = target === "codex"
+      ? createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies)
+      : createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies);
+
+    await assert.rejects(adapter.preflight(), HarnessPreflightError, target);
+    assert.equal(processes.calls.length, 0, target);
+  }
+});
+
 test("classifies missing or failed authentication as sanitized non-retryable preflight errors", async (t) => {
   const fixture = await runFixture("claude");
   t.after(() => rm(fixture.root, { recursive: true, force: true }));

@@ -29,7 +29,8 @@ export type SessionDiscovery =
 
 export type SessionFileResult =
   | { status: 200; body: { available: true; content: string; truncated: boolean } }
-  | { status: 400 | 404; body: { available: false; reason: "invalid session path" | "session file unavailable" } };
+  | { status: 400 | 404 | 413; body: { available: false; reason:
+    "invalid session path" | "session file unavailable" | "session file too large" } };
 
 export async function createDashboardSnapshot(runtime: RuntimeManager, ready: ReadyDependencies) {
   const effective = runtime.effective();
@@ -170,6 +171,7 @@ export async function readDashboardSessionFile(
     if (!isContained(sessions, descriptorPath) || descriptorPath !== candidate) {
       throw new Error("session descriptor does not match the requested file");
     }
+    if (metadata.size > FILE_LIMIT) return sessionTooLarge();
     const buffer = Buffer.alloc(FILE_LIMIT + 1);
     let length = 0;
     while (length < buffer.length) {
@@ -177,15 +179,16 @@ export async function readDashboardSessionFile(
       if (bytesRead === 0) break;
       length += bytesRead;
     }
-    const raw = buffer.subarray(0, Math.min(length, FILE_LIMIT)).toString("utf8");
+    if (length > FILE_LIMIT) return sessionTooLarge();
+    const raw = buffer.subarray(0, length).toString("utf8");
     const redacted = file.endsWith(".json") ? redactJsonContent(raw, redact) : redact(raw);
+    const body = { available: true as const, content: redacted, truncated: false };
+    if (Buffer.byteLength(redacted) > FILE_LIMIT || Buffer.byteLength(`${JSON.stringify(body)}\n`) > FILE_LIMIT) {
+      return sessionTooLarge();
+    }
     return {
       status: 200,
-      body: {
-        available: true,
-        content: limitUtf8(redacted, FILE_LIMIT),
-        truncated: length > FILE_LIMIT || metadata.size > FILE_LIMIT || Buffer.byteLength(redacted) > FILE_LIMIT,
-      },
+      body,
     };
   } catch {
     return { status: 404, body: { available: false, reason: "session file unavailable" } };
@@ -208,11 +211,13 @@ async function discoverSessionFiles(sessions: string, root: string): Promise<Ses
 }
 
 async function nextSessionDirent(directory: Dir, scan: { remaining: number; truncated: boolean }): Promise<Dirent | null> {
-  if (scan.remaining === 0) return null;
+  if (scan.remaining === 0) {
+    if (!scan.truncated && await directory.read() !== null) scan.truncated = true;
+    return null;
+  }
   const entry = await directory.read();
   if (entry === null) return null;
   scan.remaining -= 1;
-  if (scan.remaining === 0) scan.truncated = true;
   return entry;
 }
 
@@ -250,11 +255,8 @@ function mapJsonStrings(value: unknown, redact: SecretRedactor): unknown {
   return value;
 }
 
-function limitUtf8(value: string, limit: number): string {
-  if (Buffer.byteLength(value) <= limit) return value;
-  let result = Buffer.from(value).subarray(0, limit).toString("utf8");
-  while (Buffer.byteLength(result) > limit) result = result.slice(0, -1);
-  return result;
+function sessionTooLarge(): SessionFileResult {
+  return { status: 413, body: { available: false, reason: "session file too large" } };
 }
 
 function isContained(root: string, path: string): boolean {

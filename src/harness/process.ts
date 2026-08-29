@@ -29,6 +29,7 @@ import type { HarnessResult, ProviderCredential } from "./types.ts";
 
 const MAX_PROMPT_BYTES = 1_048_576;
 const MAX_ENVIRONMENT_VALUE_BYTES = 4_096;
+const MAX_CREDENTIAL_BYTES = 65_536;
 const SAFE_ENVIRONMENT_NAME = /^[A-Z][A-Z0-9_]*$/;
 const POST_EXIT_DRAIN_MS = 1_000;
 const SIGNAL_FAILURE_SETTLE_MS = 1_000;
@@ -182,7 +183,17 @@ export async function createHarnessHome(_session: AttemptSession, target: Harnes
 export async function readRegularFile(source: string, label: string): Promise<Buffer> {
   const sourceHandle = await openRegularSource(source, label);
   try {
-    return await sourceHandle.readFile();
+    const metadata = await sourceHandle.stat();
+    if (metadata.size > MAX_CREDENTIAL_BYTES) throw new Error(`${label} exceeds the maximum size`);
+    const buffer = Buffer.alloc(MAX_CREDENTIAL_BYTES + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await sourceHandle.read(buffer, length, buffer.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > MAX_CREDENTIAL_BYTES) throw new Error(`${label} exceeds the maximum size`);
+    return buffer.subarray(0, length);
   } finally {
     await sourceHandle.close();
   }

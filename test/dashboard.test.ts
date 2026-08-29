@@ -1,5 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, open, readFile, realpath, rename, rm, symlink, unlink, utimes, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  unlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -56,7 +69,7 @@ test("projects the real runtime and pinned configuration without paths to secret
   }
 });
 
-test("stops session discovery after 100 entries and one truncation probe while advertising only safe files", async (t) => {
+test("stops session discovery after its global budget while advertising only safe files", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-sessions-"));
   const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-outside-"));
   t.after(async () => {
@@ -93,15 +106,30 @@ test("stops session discovery after 100 entries and one truncation probe while a
   assert.equal(result.entries.find(({ attemptUuid }) => attemptUuid.endsWith("000000000000"))?.files.includes("decision.json"), false);
   assert.equal(JSON.stringify(result).includes("provider-token=secret"), false);
 
-  await rm(join(sessions, FLOW, "00000000-0000-4000-8000-000000000100"), { recursive: true });
-  await rm(join(sessions, FLOW, "00000000-0000-4000-8000-000000000101"), { recursive: true });
-  const exactLimit = await discoverSessions(data);
-  assert.equal(exactLimit.available, true);
-  assert.equal(exactLimit.truncated, true);
-  assert.ok(exactLimit.entries.length <= 100);
 });
 
-test("reads and redacts only allowlisted session files with a one MiB bound", async (t) => {
+test("distinguishes exactly 100 attempts from a truncated 101-attempt scan", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-exact-limit-"));
+  t.after(() => rm(data, { recursive: true, force: true }));
+  const flow = join(data, "sessions", FLOW);
+  await mkdir(flow, { recursive: true });
+  for (let index = 0; index < 100; index += 1) {
+    await mkdir(join(flow, `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`));
+  }
+
+  const exact = await discoverSessions(data);
+  assert.equal(exact.available, true);
+  assert.equal(exact.truncated, false);
+  assert.equal(exact.entries.length, 100);
+
+  await mkdir(join(flow, "00000000-0000-4000-8000-000000000100"));
+  const over = await discoverSessions(data);
+  assert.equal(over.available, true);
+  assert.equal(over.truncated, true);
+  assert.equal(over.entries.length, 100);
+});
+
+test("reads and redacts only complete allowlisted session files within one MiB", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-read-"));
   const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-read-outside-"));
   t.after(async () => {
@@ -120,7 +148,7 @@ test("reads and redacts only allowlisted session files with a one MiB bound", as
     Buffer.from(secret).toString("hex"),
   ].join("\n"));
   await writeFile(join(attempt, "decision.json"), JSON.stringify({ event: "done", token: secret }));
-  await writeFile(join(attempt, "context.json"), JSON.stringify({ prompt: secret, filler: "x".repeat(1_048_577) }));
+  await writeFile(join(attempt, "context.json"), `{\"prompt\":\"${secret}`);
   await writeFile(join(attempt, "other.txt"), secret);
   await symlink(join(outside, "context.json"), join(attempt, "linked.json"));
 
@@ -139,11 +167,61 @@ test("reads and redacts only allowlisted session files with a one MiB bound", as
     assert.equal(result.body.content.includes(secret), false, file);
     assert.ok(Buffer.byteLength(result.body.content) <= 1_048_576, file);
     if (file === "decision.json") assert.deepEqual(JSON.parse(result.body.content), { event: "done", token: "[REDACTED]" });
-    if (file === "context.json") assert.equal(result.body.truncated, true);
+    if (file === "context.json") assert.equal(result.body.content, `{\"prompt\":\"[REDACTED]`);
+    assert.equal(result.body.truncated, false);
   }
   assert.equal((await readDashboardSessionFile(data, FLOW, ATTEMPT, "other.txt", redactor.redact)).status, 400);
   assert.equal((await readDashboardSessionFile(data, "NOT-A-UUID", ATTEMPT, "context.json", redactor.redact)).status, 400);
   assert.equal((await readDashboardSessionFile(data, FLOW, ATTEMPT, "%63ontext.json", redactor.redact)).status, 400);
+});
+
+test("rejects oversized session content before redaction without returning a partial body", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-oversize-"));
+  t.after(() => rm(data, { recursive: true, force: true }));
+  const attempt = join(data, "sessions", FLOW, ATTEMPT);
+  await mkdir(attempt, { recursive: true });
+  const secret = "secret-straddles-boundary";
+  const redactor = createStartupRedactor();
+  redactor.register(secret);
+
+  await writeFile(join(attempt, "harness.log"), "x".repeat(1_048_576 - 8));
+  await writeFile(join(attempt, "context.json"), JSON.stringify({ secret, filler: "x".repeat(1_048_576) }));
+
+  for (const file of ["harness.log", "context.json"] as const) {
+    let grew = false;
+    const result = await readDashboardSessionFile(
+      data, FLOW, ATTEMPT, file, redactor.redact, undefined, async (_fd, path) => {
+        if (file === "harness.log" && !grew) {
+          grew = true;
+          await appendFile(path, secret);
+        }
+        return path;
+      },
+    );
+    assert.deepEqual(result, {
+      status: 413,
+      body: { available: false, reason: "session file too large" },
+    });
+    assert.equal(JSON.stringify(result).includes(secret), false);
+    assert.equal("content" in result.body, false);
+  }
+});
+
+test("rejects a redacted JSON representation that grows beyond one MiB", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-redacted-limit-"));
+  t.after(() => rm(data, { recursive: true, force: true }));
+  const attempt = join(data, "sessions", FLOW, ATTEMPT);
+  await mkdir(attempt, { recursive: true });
+  await writeFile(join(attempt, "decision.json"), JSON.stringify(Array.from({ length: 175_000 }, () => 0)));
+
+  const result = await readDashboardSessionFile(
+    data, FLOW, ATTEMPT, "decision.json", (value) => value, undefined, async (_fd, path) => path,
+  );
+
+  assert.deepEqual(result, {
+    status: 413,
+    body: { available: false, reason: "session file too large" },
+  });
 });
 
 test("fails closed for symlinks, descriptor mismatches, and unavailable descriptor verification", async (t) => {
