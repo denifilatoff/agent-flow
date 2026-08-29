@@ -36,6 +36,8 @@ test("keeps the approved visual and responsive constraints", () => {
 
 test("persists refresh settings and exposes safe diagnostic readers", () => {
   for (const seconds of [15, 30, 60, 300]) assert.match(html, new RegExp(`value="${seconds}"`));
+  assert.match(html, /value="30" selected/);
+  assert.doesNotMatch(html, /value="300" selected/);
   assert.match(script, /agent-flow-auto-refresh/);
   assert.match(script, /agent-flow-refresh-interval/);
   assert.match(script, /flowInstanceId/);
@@ -47,6 +49,40 @@ test("persists refresh settings and exposes safe diagnostic readers", () => {
   assert.match(script, /Поток событий не сохраняется/);
   assert.match(script, /textContent/);
   assert.doesNotMatch(script, /innerHTML/);
+});
+
+test("uses exact observation, lock, and bounded session evidence", () => {
+  const lockRenderer = script.slice(script.indexOf("function renderLocks"), script.indexOf("function renderConfiguration"));
+  const missingSession = script.slice(script.indexOf("function sessionMissingMessage"), script.indexOf("async function renderSessionTab"));
+  assert.match(lockRenderer, /controller\.locks/);
+  assert.doesNotMatch(lockRenderer, /activeWork/);
+  assert.match(script, /ticket\.stateKind/);
+  assert.match(script, /ticket\.configRevision/);
+  assert.doesNotMatch(script, /flow\.spec\.states\[ticket\.stateId\]/);
+  assert.match(missingSession, /if \(!discovery\.available\).*Список сессий недоступен/);
+  assert.match(missingSession, /if \(discovery\.truncated\).*ограниченном snapshot/);
+  assert.match(missingSession, /return "Диагностическая сессия для flowInstanceId не найдена\."/);
+});
+
+test("preserves wizard input across refresh and invalidates stale previews", () => {
+  assert.match(script, /wizardConfigured/);
+  assert.match(script, /invalidateDraft/);
+  assert.equal(script.match(/fieldSelect\.addEventListener\("change"/g)?.length, 1);
+  assert.match(script, /rawValue !== "" && valueInput\.checkValidity\(\)/);
+  assert.match(script, /inputValid \? Number\(rawValue\) : Number\.NaN/);
+});
+
+test("exposes interactive graph nodes, tabs, and refresh controls accessibly", () => {
+  assert.doesNotMatch(html, /<svg[^>]+role="img"/);
+  assert.match(script, /button\.setAttribute\("role", "tab"\)/);
+  assert.match(script, /aria-controls/);
+  assert.match(script, /button\.tabIndex = key === "events" \? 0 : -1/);
+  assert.match(script, /content\.setAttribute\("role", "tabpanel"\)/);
+  assert.match(script, /content\.setAttribute\("aria-labelledby"/);
+  assert.match(script, /ArrowRight/);
+  assert.match(script, /ArrowLeft/);
+  assert.match(css, /\.auto-refresh label \{[^}]*min-height:\s*44px/);
+  assert.match(css, /\.refresh-interval \{[^}]*min-height:\s*44px/);
 });
 
 test("builds every flow node and one validated RuntimeConfig field", () => {

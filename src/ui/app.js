@@ -18,6 +18,8 @@
   let dashboard = null;
   let remaining = Number(refreshInterval.value);
   let loading = false;
+  let wizardConfigured = false;
+  let sessionReaderCount = 0;
 
   function safeGet(key) {
     try { return localStorage.getItem(key); } catch { return null; }
@@ -107,7 +109,7 @@
       dashboard = snapshot;
       renderDashboard(snapshot);
     } catch (error) {
-      renderUnavailable(error instanceof Error ? error.message : "dashboard unavailable");
+      renderUnavailable(error instanceof Error ? error.message : "панель недоступна");
     } finally {
       loading = false;
     }
@@ -130,7 +132,8 @@
     renderStatus(snapshot);
     renderConfiguration(snapshot);
     renderGraph(snapshot.flow, snapshot.configuration.revision);
-    configureWizard(snapshot);
+    if (!wizardConfigured) configureWizard(snapshot);
+    else setWizardEnabled(true, "");
   }
 
   function metric(label, value, foot, attention = false) {
@@ -141,20 +144,17 @@
 
   function renderStatus(snapshot) {
     const controller = snapshot.controller;
-    const waiting = controller.tickets.filter((ticket) => {
-      const kind = snapshot.flow.spec.states[ticket.stateId]?.kind;
-      return kind === "human-gate" || kind === "provider-wait" || kind === "paused";
-    });
+    const waiting = controller.tickets.filter((ticket) => ["human-gate", "provider-wait", "paused"].includes(ticket.stateKind));
     replace("status-metrics",
       metric("Controller", controller.lifecycle, snapshot.status.restartRequired ? "требуется restart" : "runtime активен", controller.lifecycle === "failed" || snapshot.status.restartRequired),
-      metric("Репозитории", controller.repositories.length, "configured repositories"),
+      metric("Репозитории", controller.repositories.length, "настроенные репозитории"),
       metric("Активная работа", controller.activeWork.length, `${controller.queue.active} scheduler active`),
       metric("Очередь", controller.queue.queued, `concurrency ${controller.queue.concurrency}`),
-      metric("Внешнее ожидание", waiting.length, "human / provider", waiting.length > 0),
+      metric("Внешнее ожидание", waiting.length, "человек / provider", waiting.length > 0),
     );
     renderRepositories(snapshot);
     renderQueue(snapshot);
-    renderWaiting(snapshot, waiting);
+    renderWaiting(waiting);
     renderErrors(snapshot);
     renderJournal(snapshot);
     renderLocks(snapshot);
@@ -173,9 +173,12 @@
     head.append(row);
     const body = element("tbody");
     for (const repository of repositories) {
-      const observations = snapshot.controller.tickets.filter((ticket) => ticket.provider === repository.provider && ticket.repository === repository.repository).length;
+      const observations = snapshot.controller.tickets.filter((ticket) => ticket.provider === repository.provider && ticket.repository === repository.repository);
+      const counts = new Map();
+      for (const ticket of observations) counts.set(ticket.stateKind || "не классифицировано", (counts.get(ticket.stateKind || "не классифицировано") || 0) + 1);
+      const countText = [...counts].map(([kind, count]) => `${kind}: ${count}`).join(" · ") || "нет";
       const item = element("tr");
-      item.append(element("td", "mono", repository.provider), element("td", "mono", repository.repository), element("td", "", observations), element("td", "mono", formatDate(repository.nextWindowStartedAt, "Cursor ещё не установлен")));
+      item.append(element("td", "mono", repository.provider), element("td", "mono", repository.repository), element("td", "mono", countText), element("td", "mono", formatDate(repository.nextWindowStartedAt, "Cursor ещё не установлен")));
       body.append(item);
     }
     table.append(head, body);
@@ -188,27 +191,27 @@
     const rows = element("div", "row-list");
     rows.append(dataRow("scheduler", `${queue.active} active · ${queue.queued} queued · ${queue.concurrency} concurrency`));
     rows.append(dataRow("active attempts", snapshot.status.activeAttempts));
-    rows.append(dataRow("configured rate cap", `${polling.maxCallsPerMinute} calls/min`));
-    rows.append(dataRow("configured reserve", `${polling.quotaReservePercent}%`));
-    rows.append(dataRow("observed provider quota", "Недоступно: snapshot не содержит quota telemetry"));
+    rows.append(dataRow("настроенный rate cap", `${polling.maxCallsPerMinute} calls/min`));
+    rows.append(dataRow("настроенный резерв", `${polling.quotaReservePercent}%`));
+    rows.append(dataRow("наблюдаемая provider quota", "Недоступно: snapshot не содержит quota telemetry"));
     const bar = element("div", "rate-bar");
     bar.append(element("div", "rate-fill"));
     rows.append(bar);
     const line = element("div", "rate-line");
-    line.append(element("span", "", "configured guard"), element("span", "", "observed usage unavailable"));
+    line.append(element("span", "", "настроенное ограничение"), element("span", "", "наблюдаемое использование недоступно"));
     rows.append(line);
     replace("queue-panel", rows);
   }
 
-  function renderWaiting(snapshot, waiting) {
+  function renderWaiting(waiting) {
     if (!waiting.length) {
       replace("waiting-panel", empty("Human gate, provider wait и paused observations отсутствуют."));
       return;
     }
     const list = element("div", "row-list");
     for (const ticket of waiting) {
-      const kind = snapshot.flow.spec.states[ticket.stateId]?.kind || "state недоступен";
-      list.append(dataRow(ticketIdentity(ticket), `${ticket.stateId || "state недоступен"} · ${kind}`));
+      const revision = ticket.configRevision || "configRevision недоступна";
+      list.append(dataRow(ticketIdentity(ticket), `${ticket.stateId || "state недоступен"} · ${ticket.stateKind || "kind недоступен"} · ${revision}`));
     }
     replace("waiting-panel", list);
   }
@@ -243,23 +246,23 @@
     entries.sort((left, right) => String(right.session?.modifiedAt || right.ticket?.observedAt || "").localeCompare(String(left.session?.modifiedAt || left.ticket?.observedAt || "")));
     const journal = document.getElementById("journal");
     if (!entries.length) {
-      journal.replaceChildren(empty(snapshot.sessions.available ? "Наблюдений и диагностических сессий нет." : snapshot.sessions.reason));
+      journal.replaceChildren(empty(snapshot.sessions.available ? "Наблюдений и диагностических сессий нет." : "Список сессий недоступен."));
       return;
     }
-    journal.replaceChildren(...entries.map(journalCard));
+    journal.replaceChildren(...entries.map((entry) => journalCard(entry, snapshot.sessions)));
     filterJournal();
   }
 
-  function journalCard(entry) {
+  function journalCard(entry, discovery) {
     const { ticket, session } = entry;
     const card = element("details", "event-card");
-    const identity = ticket ? ticketIdentity(ticket) : "Ticket identity недоступен";
+    const identity = ticket ? ticketIdentity(ticket) : "Идентификатор ticket недоступен";
     card.dataset.search = ticket ? `${ticket.provider} ${ticket.repository} ${ticket.number}`.toLowerCase() : "";
     const summary = element("summary");
     summary.append(
       eventField("Наблюдение", formatDate(session?.modifiedAt || ticket?.observedAt, "Время недоступно")),
       eventField("Работа агента", "Недоступно"),
-      eventField("Переход", ticket?.stateId ? `История не хранится · current: ${ticket.stateId}` : "История не хранится"),
+      eventField("Переход", ticket?.stateId ? `История не хранится · current: ${ticket.stateId} · pinned: ${ticket.configRevision || "configRevision недоступна"}` : "История не хранится"),
       eventField("Ticket", ticket ? `#${ticket.number}` : "Недоступно"),
       eventField("Репозиторий", ticket ? `${ticket.provider}:${ticket.repository}` : identity),
     );
@@ -271,6 +274,9 @@
       const tabs = element("div", "session-tabs");
       tabs.setAttribute("role", "tablist");
       const content = element("div", "session-content");
+      const readerId = `session-reader-${++sessionReaderCount}`;
+      content.id = `${readerId}-panel`;
+      content.setAttribute("role", "tabpanel");
       const definitions = [
         ["events", "События", null],
         ["harness", "harness.log", "harness.log"],
@@ -280,28 +286,54 @@
       for (const [key, label, file] of definitions) {
         const button = element("button", "session-tab", label);
         button.type = "button";
+        button.id = `${readerId}-${key}`;
         button.dataset.sessionTab = key;
+        button.setAttribute("role", "tab");
+        button.setAttribute("aria-controls", content.id);
         button.setAttribute("aria-selected", String(key === "events"));
+        button.tabIndex = key === "events" ? 0 : -1;
         button.addEventListener("click", () => void renderSessionTab(session, tabs, content, key, file));
+        button.addEventListener("keydown", (event) => {
+          if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+          const buttons = [...tabs.querySelectorAll('[role="tab"]')];
+          const offset = event.key === "ArrowRight" ? 1 : -1;
+          const next = buttons[(buttons.indexOf(button) + offset + buttons.length) % buttons.length];
+          event.preventDefault();
+          next.focus();
+          next.click();
+        });
         tabs.append(button);
       }
+      content.setAttribute("aria-labelledby", `${readerId}-events`);
       reader.append(head, tabs, content);
       card.append(reader);
       card.addEventListener("toggle", () => {
         if (card.open && !content.hasChildNodes()) void renderSessionTab(session, tabs, content, "events", null);
       });
     } else {
-      card.append(empty(ticket?.flowInstanceId ? "Диагностическая сессия для flowInstanceId не найдена." : "flowInstanceId ещё не наблюдался; сессия недоступна."));
+      card.append(empty(sessionMissingMessage(ticket, discovery)));
     }
     return card;
   }
 
+  function sessionMissingMessage(ticket, discovery) {
+    if (!discovery.available) return "Список сессий недоступен; наличие session для flowInstanceId неизвестно.";
+    if (!ticket?.flowInstanceId) return "flowInstanceId ещё не наблюдался; сессия недоступна.";
+    if (discovery.truncated) return "Наличие session неизвестно: flowInstanceId не представлен в ограниченном snapshot.";
+    return "Диагностическая сессия для flowInstanceId не найдена.";
+  }
+
   async function renderSessionTab(session, tabs, content, key, file) {
-    for (const button of tabs.querySelectorAll("[data-session-tab]")) button.setAttribute("aria-selected", String(button.dataset.sessionTab === key));
+    for (const button of tabs.querySelectorAll("[data-session-tab]")) {
+      const selected = button.dataset.sessionTab === key;
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+      if (selected) content.setAttribute("aria-labelledby", button.id);
+    }
     const pre = element("pre");
     content.replaceChildren(pre);
     if (!file) {
-      pre.textContent = "Поток событий не сохраняется; вкладка доступна только как явное состояние unavailable.";
+      pre.textContent = "Поток событий не сохраняется; вкладка явно недоступна.";
       return;
     }
     if (!session.files.includes(file)) {
@@ -328,14 +360,17 @@
   document.getElementById("journal-search").addEventListener("input", filterJournal);
 
   function renderLocks(snapshot) {
-    if (!snapshot.controller.activeWork.length) {
+    if (!snapshot.controller.locks.length) {
       replace("locks-panel", empty("Активных per-ticket locks нет. На human gate блокировка освобождается."));
       return;
     }
     const list = element("div", "row-list");
-    for (const ref of snapshot.controller.activeWork) {
+    for (const ref of snapshot.controller.locks) {
       const observation = snapshot.controller.tickets.find((ticket) => ticket.provider === ref.provider && ticket.repository === ref.repository && ticket.number === ref.number);
-      list.append(dataRow(`${ref.provider}:${ref.repository}#${ref.number}`, observation?.stateId ? `holder: ${observation.stateId}` : "holder state недоступен"));
+      const evidence = observation
+        ? `${observation.stateId || "state ещё не наблюдался"} · ${observation.configRevision || "configRevision недоступна"}`
+        : "наблюдение ещё не завершено";
+      list.append(dataRow(`${ref.provider}:${ref.repository}#${ref.number}`, evidence));
     }
     replace("locks-panel", list);
   }
@@ -345,7 +380,7 @@
     const sourceMain = element("div");
     sourceMain.append(element("small", "", "Источник конфигурации"), element("code", "", `${snapshot.configuration.repository} · ${snapshot.configuration.stackPath}`));
     const revision = element("div", "revision");
-    revision.append(element("span", "", "pinned revision"), document.createElement("br"), element("strong", "", snapshot.configuration.revision), document.createElement("br"), element("span", "", "read-only"));
+    revision.append(element("span", "", "pinned revision"), document.createElement("br"), element("strong", "", snapshot.configuration.revision), document.createElement("br"), element("span", "", "только чтение"));
     source.replaceChildren(sourceMain, revision);
 
     const runtime = snapshot.runtime;
@@ -380,11 +415,11 @@
     resources.push(resource(snapshot.runtime.provider.type, snapshot.preflight.status, [
       `API: ${snapshot.runtime.provider.apiUrl}`,
       `repositories: ${snapshot.runtime.provider.repositories.join(", ")}`,
-      "credential path: не возвращается dashboard API",
+      "путь к credential: не возвращается dashboard API",
     ]));
     for (const harness of snapshot.runtime.execution.harnesses) {
       const users = Object.entries(snapshot.runtime.execution.agents).filter(([, execution]) => execution.harness === harness).map(([agent]) => agent);
-      resources.push(resource(harness, snapshot.preflight.harnesses.includes(harness) ? "ready" : "unavailable", [`agents: ${users.join(", ") || "нет"}`, "secret path: не возвращается dashboard API"]));
+      resources.push(resource(harness, snapshot.preflight.harnesses.includes(harness) ? "готов" : "недоступен", [`agents: ${users.join(", ") || "нет"}`, "путь к secret: не возвращается dashboard API"]));
     }
     replace("resources", ...resources);
   }
@@ -463,17 +498,28 @@
   }
 
   function graphNode(id, state, position, select) {
-    const node = svg("g", { class: "flow-node", transform: `translate(${position.x} ${position.y})`, tabindex: "0", role: "button", "data-node": id, "data-kind": state.kind, "aria-label": `State ${id}, ${state.kind}` });
+    const node = svg("g", { class: "flow-node", transform: `translate(${position.x} ${position.y})`, tabindex: "0", role: "button", "aria-pressed": "false", "data-node": id, "data-kind": state.kind, "aria-label": `State ${id}, ${state.kind}` });
     node.append(svg("rect", { width: "150", height: "66" }), svg("text", { x: "14", y: "27" }, id), svg("text", { class: "sub", x: "14", y: "46" }, `${state.kind}${state.agent ? ` · ${state.agent}` : ""}`));
     node.addEventListener("click", select);
     node.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); }
+      if (!["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"].includes(event.key)) return;
+      const nodes = [...document.querySelectorAll(".flow-node")];
+      const offset = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1;
+      const next = nodes[(nodes.indexOf(node) + offset + nodes.length) % nodes.length];
+      event.preventDefault();
+      next.focus();
+      next.click();
     });
     return node;
   }
 
   function selectNode(flow, id) {
-    for (const node of document.querySelectorAll(".flow-node")) node.classList.toggle("active", node.dataset.node === id);
+    for (const node of document.querySelectorAll(".flow-node")) {
+      const selected = node.dataset.node === id;
+      node.classList.toggle("active", selected);
+      node.setAttribute("aria-pressed", String(selected));
+    }
     const state = flow.spec.states[id];
     document.getElementById("node-kind").textContent = state.kind;
     const inspector = document.getElementById("node-inspector");
@@ -516,14 +562,16 @@
   const draftError = document.getElementById("draft-error");
   let wizardStep = 1;
 
-  groupSelect.addEventListener("change", updateDraftFields);
-  fieldSelect.addEventListener("change", updateDraftValue);
-  agentSelect.addEventListener("change", updateDraftValue);
+  groupSelect.addEventListener("change", () => { invalidateDraft(); updateDraftFields(); });
+  fieldSelect.addEventListener("change", () => { invalidateDraft(); updateDraftValue(); });
+  agentSelect.addEventListener("change", () => { invalidateDraft(); updateDraftValue(); });
+  valueInput.addEventListener("input", invalidateDraft);
 
   function configureWizard(snapshot) {
     agentSelect.replaceChildren(...Object.keys(snapshot.runtime.execution.agents).map((agent) => option(agent, agent)));
     setWizardEnabled(true, "");
     updateDraftFields();
+    wizardConfigured = true;
   }
 
   function setWizardEnabled(enabled, message) {
@@ -552,10 +600,24 @@
     draftError.textContent = "";
   }
 
+  function invalidateDraft() {
+    if (wizardStep !== 1) {
+      wizardStep = 1;
+      renderWizard();
+    }
+    replace("change-summary");
+    document.getElementById("yaml-output").value = "";
+    document.getElementById("copy-status").textContent = "";
+    draftError.textContent = "";
+  }
+
   function validateDraft() {
     const definition = fields[groupSelect.value][fieldSelect.value];
-    const value = Number(valueInput.value);
-    const valid = Number.isFinite(value)
+    const rawValue = valueInput.value.trim();
+    const inputValid = rawValue !== "" && valueInput.checkValidity();
+    const value = inputValid ? Number(rawValue) : Number.NaN;
+    const valid = inputValid
+      && Number.isFinite(value)
       && (definition.exclusiveMin ? value > definition.min : value >= definition.min)
       && (definition.max === undefined || value <= definition.max)
       && (!definition.integer || Number.isInteger(value));
@@ -578,7 +640,10 @@
   }
 
   document.getElementById("wizard-next").addEventListener("click", () => {
-    if (wizardStep === 1 && !validateDraft()) return;
+    if (wizardStep === 1 && !validateDraft()) {
+      valueInput.reportValidity();
+      return;
+    }
     buildDraft();
     wizardStep = Math.min(3, wizardStep + 1);
     renderWizard();

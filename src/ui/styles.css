@@ -42,9 +42,9 @@ button { cursor: pointer; }
 .main { min-width: 0; padding: 24px 32px 56px; background: var(--soft); }
 .topbar { display: flex; justify-content: flex-end; min-height: 48px; margin-bottom: 24px; }
 .auto-refresh { display: flex; align-items: center; min-height: 44px; border: 1px solid var(--border); border-radius: 2px; background: var(--surface); }
-.auto-refresh label { min-height: 42px; display: flex; align-items: center; gap: 8px; padding: 0 10px; font-size: 11px; }
+.auto-refresh label { min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 10px; font-size: 11px; }
 .auto-refresh input { width: 16px; height: 16px; margin: 0; accent-color: var(--fg); }
-.refresh-interval { min-height: 42px; padding: 0 8px; border: 0; border-left: 1px solid var(--border); border-radius: 2px; background: var(--surface); font: 11px var(--mono); }
+.refresh-interval { min-height: 44px; padding: 0 8px; border: 0; border-left: 1px solid var(--border); border-radius: 2px; background: var(--surface); font: 11px var(--mono); }
 .auto-refresh-countdown { min-width: 80px; padding: 0 10px; color: var(--muted); font: 10px var(--mono); text-align: right; }
 .screen { max-width: 1480px; margin: 0 auto; }
 .screen-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
