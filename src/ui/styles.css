@@ -163,6 +163,9 @@ tbody tr:last-child td { border-bottom: 0; }
   .layout-two, .graph-layout, .config-grid { grid-template-columns: 1fr; }
   .node-inspector { min-height: 220px; }
 }
+@media (max-width: 900px) {
+  .event-log { grid-template-columns: 1fr; }
+}
 @media (max-width: 700px) {
   .app-shell, .app-shell.menu-collapsed { display: block; }
   .sidebar { position: static; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--border); }

@@ -32,6 +32,7 @@ test("keeps the approved visual and responsive constraints", () => {
   assert.match(css, /min-width:\s*320px/);
   assert.match(css, /overflow-x:\s*(?:hidden|clip)/);
   assert.match(css, /\.event-card summary\s*\{[^}]*grid-template-columns:\s*88px 80px minmax\(0, 1fr\) 64px minmax\(0, \.8fr\)/);
+  assert.match(css, /@media\s*\(max-width:\s*900px\)\s*\{\s*\.event-log\s*\{\s*grid-template-columns:\s*1fr/);
   assert.match(css, /#flow-revision\s*\{[^}]*max-width:\s*100%[^}]*overflow-wrap:\s*anywhere/);
   assert.match(css, /:focus-visible/);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
