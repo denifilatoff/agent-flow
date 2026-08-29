@@ -20,7 +20,7 @@ test("ships the four-screen read-only dashboard contract", () => {
   assert.match(css, /grid-template-columns:\s*232px minmax\(0, 1fr\)/);
   assert.match(css, /grid-template-columns:\s*48px minmax\(0, 1fr\)/);
   assert.doesNotMatch(html, /Refresh snapshot|demo/i);
-  assert.doesNotMatch(`${html}\n${script}`, /[А-Яа-яЁё]/);
+  assert.doesNotMatch(`${html}\n${css}\n${script}`, /\p{Script=Cyrillic}/u);
 });
 
 test("keeps the approved visual and responsive constraints", () => {
