@@ -790,28 +790,36 @@ test("finishes crash-window cleanup instead of reactivating the original label e
   assert.deepEqual(launcher.requests, []);
 });
 
-test("reports terminal state evidence from its pinned configuration", async () => {
-  const provider = new FakeProvider();
-  provider.snapshot.activation = { present: false, eventId: null, actor: null, occurredAt: null };
-  installControl(provider, controlState({ configRevision: OLD_SHA, stateId: "done" }));
-  const pinned = structuredClone(BUNDLE);
-  pinned.revision = OLD_SHA;
-  const deps = dependencies(provider);
-  deps.config.loadCurrent = async () => { throw new Error("current configuration must not classify old state"); };
-  deps.config.loadPinned = async (revision) => {
-    assert.equal(revision, OLD_SHA);
-    return pinned;
-  };
+test("keeps terminal history independent from unavailable pinned revisions", async (t) => {
+  await t.test("terminal control", async () => {
+    const provider = new FakeProvider();
+    provider.snapshot.activation = { present: false, eventId: null, actor: null, occurredAt: null };
+    installControl(provider, controlState({ configRevision: OLD_SHA, stateId: "done" }));
+    const current = structuredClone(BUNDLE);
+    current.flow.spec.states.done = { kind: "paused" };
+    const deps = dependencies(provider);
+    deps.config.loadCurrent = async () => current;
+    deps.config.loadPinned = async () => { throw new Error("old revision unavailable"); };
 
-  const outcome = await reconcileTicket(deps, TICKET);
+    const outcome = await reconcileTicket(deps, TICKET);
 
-  assert.deepEqual(outcome, {
-    flowInstanceId: FLOW_1,
-    stateId: "done",
-    configRevision: OLD_SHA,
-    stateKind: "final",
-    changed: false,
-    started: false,
+    assert.deepEqual(outcome, {
+      flowInstanceId: FLOW_1,
+      stateId: "done",
+      configRevision: OLD_SHA,
+      stateKind: "final",
+      changed: false,
+      started: false,
+    });
+  });
+
+  await t.test("unfinished control", async () => {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({ configRevision: OLD_SHA }));
+    const deps = dependencies(provider);
+    deps.config.loadPinned = async () => { throw new Error("old revision unavailable"); };
+
+    await assert.rejects(reconcileTicket(deps, TICKET), /pinned configuration load failed/);
   });
 });
 

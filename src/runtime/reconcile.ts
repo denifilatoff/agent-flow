@@ -112,7 +112,7 @@ export async function reconcileTicket(
           true,
         );
       }
-      return outcome(latest?.parsed.state ?? null, latest?.bundle ?? null, false, false);
+      return outcome(latest?.parsed.state ?? null, latest?.bundle ?? null, false, false, latest?.terminal);
     }
     return activate(dependencies, snapshot, loaded);
   }
@@ -184,14 +184,14 @@ async function activate(
   const occurredAt = snapshot.activation.occurredAt;
   const previous = history.at(-1);
   if (!actor || !eventId || !occurredAt) {
-    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, false, false);
+    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, false, false, previous?.terminal);
   }
   const permission = await providerCall(
     "provider permission read failed",
     () => dependencies.provider.permission(snapshot.ref.repository, actor),
   );
   if (!AUTHORIZED.has(permission)) {
-    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, false, false);
+    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, false, false, previous?.terminal);
   }
 
   const bundle = await configCall("current configuration load failed", () => dependencies.config.loadCurrent());
@@ -293,6 +293,11 @@ async function loadControls(
   const bundles = new Map<string, ConfigBundle>();
   const result: LoadedControl[] = [];
   for (const item of parsed) {
+    if (item.state.stateId === "done" || item.state.stateId === "cancelled") {
+      const bundle = await configCall("current configuration load failed", () => config.loadCurrent());
+      result.push({ parsed: item, bundle, terminal: true });
+      continue;
+    }
     let bundle = bundles.get(item.state.configRevision);
     if (!bundle) {
       bundle = await configCall(
@@ -613,11 +618,12 @@ function outcome(
   bundle: ConfigBundle | null,
   changed: boolean,
   started: boolean,
+  terminal = false,
 ): ReconcileOutcome {
-  if (control && bundle?.revision !== control.configRevision) {
+  if (control && !terminal && bundle?.revision !== control.configRevision) {
     throw new Error("control configuration does not match its pinned bundle");
   }
-  const stateKind = control ? bundle?.flow.spec.states[control.stateId]?.kind : null;
+  const stateKind = control ? terminal ? "final" : bundle?.flow.spec.states[control.stateId]?.kind : null;
   if (control && !stateKind) throw new Error("control state does not exist in pinned flow");
   return {
     flowInstanceId: control?.flowInstanceId ?? null,
