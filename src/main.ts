@@ -88,6 +88,7 @@ export async function main(
   let operatorPassword: string;
   try {
     operatorPassword = await dependencies.readSecretFile(http.authFile);
+    if (Buffer.byteLength(operatorPassword) > 4_096) throw new Error("operator password is too large");
     preflightDependencies = dependencies.createPreflightDependencies(runtime);
     preflightDependencies.registerStartupSecret(operatorPassword);
   } catch {

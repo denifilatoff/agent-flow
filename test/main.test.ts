@@ -121,3 +121,21 @@ test("fails before binding when the operator password cannot be read", async () 
   ]);
   assert.equal(calls.join("\n").includes("password-value"), false);
 });
+
+test("fails before binding when the operator password cannot fit in HTTP headers", async () => {
+  let bound = false;
+  const dependencies = {
+    async createRuntime() { return {
+      effective: () => ({ runtime: { http: { address: "0.0.0.0", port: 8080, authFile: "/operator-password" } } } as RuntimeConfig),
+    } as RuntimeManager; },
+    async readSecretFile() { return "x".repeat(4_097); },
+    createPreflightDependencies() { throw new Error("must not create dependencies"); },
+    createHealthServer() { bound = true; throw new Error("must not bind"); },
+    async runPreflight() { throw new Error("must not run"); },
+    signals: new EventEmitter(),
+    reportError(message: string) { assert.equal(message, "agent-flow startup failed: operator authentication load failed"); },
+  };
+
+  assert.equal(await main({}, dependencies as never), 1);
+  assert.equal(bound, false);
+});

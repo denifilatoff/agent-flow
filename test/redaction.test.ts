@@ -28,8 +28,18 @@ test("redacts startup secrets and their common literal encodings", () => {
       assert.equal(redactor.redact(`before:${encoded}:after`), "before:[REDACTED]:after", encoded);
     }
   }
-  assert.equal(redactor.redact("short=id"), "short=id");
+  assert.equal(redactor.redact("short=id"), "short=[REDACTED]");
+  const mixedPercent = encodeURIComponent(access).replace(/%([0-9A-F])([0-9A-F])/g, (_value, first, second) =>
+    `%${first.toLowerCase()}${second}`);
+  assert.equal(redactor.redact(`before:${mixedPercent}:after`), "before:[REDACTED]:after");
   assert.equal(JSON.stringify(redactor).includes(provider), false);
+});
+
+test("redacts the longest mixed-case percent encoding before overlapping literals", () => {
+  const redactor = createStartupRedactor();
+  redactor.register(Buffer.from(JSON.stringify({ token: "abc/def+ghi", suffix: "def" })));
+
+  assert.equal(redactor.redact("abc%2fdef%2Bghi"), "[REDACTED]");
 });
 
 test("rejects excessive source strings without leaving partial coverage", () => {

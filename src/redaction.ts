@@ -12,6 +12,8 @@ const MAX_LITERAL_BYTES = 4_194_304;
 export function createStartupRedactor(): StartupRedactor {
   const literals = new Set<string>();
   let ordered: string[] = [];
+  const percentPatterns = new Map<string, RegExp>();
+  let orderedPercentPatterns: RegExp[] = [];
   let sourceStrings = 0;
   let literalBytes = 0;
 
@@ -40,6 +42,7 @@ export function createStartupRedactor(): StartupRedactor {
 
   const redact: SecretRedactor = (value) => {
     let result = value;
+    for (const pattern of orderedPercentPatterns) result = result.replace(pattern, "[REDACTED]");
     for (const literal of ordered) {
       result = result.split(literal).join("[REDACTED]");
     }
@@ -62,28 +65,50 @@ export function createStartupRedactor(): StartupRedactor {
           // Opaque credential files are still covered by their exact bytes and literal encodings.
         }
         if (validJson) visitStrings(parsed, (candidate) => {
-          sources.push({ value: candidate, redact: candidate.trim().length >= 4 });
+          sources.push({ value: candidate, redact: candidate.length > 0 });
           if (sourceStrings + sources.length > MAX_SOURCE_STRINGS) throw redactionLimitError();
         });
       }
       if (sourceStrings + sources.length > MAX_SOURCE_STRINGS) throw redactionLimitError();
 
       const additions = new Set<string>();
+      const patternAdditions = new Map<string, RegExp>();
       for (const source of sources) {
         if (!source.redact) continue;
         for (const literal of variants(source.value)) if (literal && !literals.has(literal)) additions.add(literal);
+        for (const encoded of [encodeURIComponent(source.value), new URLSearchParams({ value: source.value }).toString().slice(6)]) {
+          const pattern = mixedPercentPattern(encoded);
+          if (pattern && !percentPatterns.has(pattern.source)) patternAdditions.set(pattern.source, pattern);
+        }
       }
-      const addedBytes = [...additions].reduce((total, literal) => total + Buffer.byteLength(literal), 0);
-      if (literals.size + additions.size > MAX_LITERALS || literalBytes + addedBytes > MAX_LITERAL_BYTES) {
+      const addedBytes = [...additions].reduce((total, literal) => total + Buffer.byteLength(literal), 0)
+        + [...patternAdditions.keys()].reduce((total, pattern) => total + Buffer.byteLength(pattern), 0);
+      if (literals.size + percentPatterns.size + additions.size + patternAdditions.size > MAX_LITERALS
+        || literalBytes + addedBytes > MAX_LITERAL_BYTES) {
         throw redactionLimitError();
       }
       sourceStrings += sources.length;
       literalBytes += addedBytes;
       for (const literal of additions) literals.add(literal);
+      for (const [source, pattern] of patternAdditions) percentPatterns.set(source, pattern);
       ordered = [...literals].sort((left, right) => right.length - left.length);
+      orderedPercentPatterns = [...percentPatterns.values()].sort((left, right) => right.source.length - left.source.length);
     },
     redact,
   };
+}
+
+function mixedPercentPattern(value: string): RegExp | undefined {
+  if (!/%[0-9A-F]{2}/.test(value)) return undefined;
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(
+    /%([0-9A-F])([0-9A-F])/g,
+    (_escape, first: string, second: string) => `%${hexPattern(first)}${hexPattern(second)}`,
+  );
+  return new RegExp(escaped, "g");
+}
+
+function hexPattern(value: string): string {
+  return /[A-F]/.test(value) ? `[${value}${value.toLowerCase()}]` : value;
 }
 
 function lowerPercentHex(value: string): string {

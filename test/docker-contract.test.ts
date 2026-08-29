@@ -41,7 +41,7 @@ test("locks the runtime image, tools, and controller service", async () => {
   assert.deepEqual(Object.keys(compose.services ?? {}), ["controller"]);
   const controller = compose.services!.controller!;
   assert.equal(controller.init, true);
-  assert.deepEqual(controller.ports, ["8080:8080"]);
+  assert.deepEqual(controller.ports, ["127.0.0.1:${AGENT_FLOW_HTTP_PORT:-8080}:8080"]);
   assert.equal(controller.environment, undefined);
   assert.match(JSON.stringify(controller.healthcheck), /health\/ready/);
   assert.doesNotMatch(JSON.stringify(controller), /docker\.sock/);

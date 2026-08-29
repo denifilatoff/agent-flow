@@ -28,7 +28,10 @@ test("requires fixed operator Basic authentication for every non-health route", 
     markNotReady() {},
     bindReady() {},
     dashboard: async () => null,
-    sessionFile: async () => null,
+    sessionFile: async () => ({
+      status: 200 as const,
+      body: { available: true as const, content: "x".repeat(1_048_576), truncated: false },
+    }),
     snapshot: () => ({
       configurationRepository: "/config",
       configurationRevision: "a".repeat(40),
@@ -85,6 +88,11 @@ test("requires fixed operator Basic authentication for every non-health route", 
   assert.equal((await fetch(url("/api/status"), {
     headers: { authorization: OPERATOR_AUTHORIZATION },
   })).status, 200);
+  const oversized = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/context.json`), {
+    headers: { authorization: OPERATOR_AUTHORIZATION },
+  });
+  assert.equal(oversized.status, 413);
+  assert.deepEqual(await oversized.json(), { available: false, reason: "session file too large" });
   assert.equal((await fetch(url("/api/status"), {
     headers: { authorization: `Basic ${Buffer.from("operator:replacement-password").toString("base64")}` },
   })).status, 401);

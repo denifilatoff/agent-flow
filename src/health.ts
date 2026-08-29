@@ -194,18 +194,10 @@ function writeText(
 }
 
 function writeSessionJson(response: import("node:http").ServerResponse, status: number, body: unknown): void {
-  let payload = `${JSON.stringify(body)}\n`;
-  const file = body as { available?: boolean; content?: string; truncated?: boolean };
-  if (status === 200 && typeof file.content === "string" && Buffer.byteLength(payload) > 1_048_576) {
-    let lower = 0;
-    let upper = file.content.length;
-    while (lower < upper) {
-      const middle = Math.ceil((lower + upper) / 2);
-      const candidate = `${JSON.stringify({ ...file, content: file.content.slice(0, middle), truncated: true })}\n`;
-      if (Buffer.byteLength(candidate) <= 1_048_576) lower = middle;
-      else upper = middle - 1;
-    }
-    payload = `${JSON.stringify({ ...file, content: file.content.slice(0, lower), truncated: true })}\n`;
+  const payload = `${JSON.stringify(body)}\n`;
+  if (status === 200 && Buffer.byteLength(payload) > 1_048_576) {
+    writeJson(response, 413, { available: false, reason: "session file too large" });
+    return;
   }
   writeJsonPayload(response, status, payload);
 }

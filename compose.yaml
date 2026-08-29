@@ -4,7 +4,7 @@ services:
     build:
       context: .
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${AGENT_FLOW_HTTP_PORT:-8080}:8080"
     volumes:
       - ${AGENT_FLOW_RUNTIME_PATH:-./config/runtime.example.yaml}:/etc/agent-flow/runtime.yaml:ro
       - ${AGENT_FLOW_PROVIDER_TOKEN_PATH:?set AGENT_FLOW_PROVIDER_TOKEN_PATH}:/run/secrets/agent-flow/provider-token:ro
