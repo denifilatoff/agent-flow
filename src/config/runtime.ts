@@ -29,6 +29,7 @@ const restartFields = [
   ["configuration.repository"], ["configuration.revision"], ["configuration.stack"],
   ["provider.type"], ["provider.apiUrl"], ["provider.repositories"], ["provider.tokenFile"],
   ["execution.harnesses"], ["runtime.dataDirectory"], ["runtime.http.address"], ["runtime.http.port"],
+  ["runtime.http.authFile"],
 ] as const;
 
 export class RuntimeManager {

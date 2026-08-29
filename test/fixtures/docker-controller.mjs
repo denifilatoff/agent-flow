@@ -1,5 +1,5 @@
 import { createHealthServer } from "/app/dist/health.js";
-import { RuntimeManager } from "/app/dist/config/runtime.js";
+import { RuntimeManager, readSecretFile } from "/app/dist/config/runtime.js";
 import { createProductionDependencies, main } from "/app/dist/main.js";
 import { runPreflight } from "/app/dist/preflight.js";
 
@@ -18,6 +18,7 @@ const exitCode = await main(process.env, {
     return createProductionDependencies(runtime, rateLimiterClock);
   },
   runPreflight,
+  readSecretFile,
   signals: process,
   reportError: (message) => console.error(message),
 });

@@ -9,6 +9,7 @@ const requiredMounts = [
   { source: "${AGENT_FLOW_PROVIDER_TOKEN_PATH:?set AGENT_FLOW_PROVIDER_TOKEN_PATH}", target: "/run/secrets/agent-flow/provider-token", readOnly: true },
   { source: "${AGENT_FLOW_CODEX_AUTH_PATH:?set AGENT_FLOW_CODEX_AUTH_PATH}", target: "/run/secrets/agent-flow/codex-auth", readOnly: true },
   { source: "${AGENT_FLOW_CLAUDE_AUTH_PATH:?set AGENT_FLOW_CLAUDE_AUTH_PATH}", target: "/run/secrets/agent-flow/claude-auth", readOnly: true },
+  { source: "${AGENT_FLOW_OPERATOR_PASSWORD_PATH:?set AGENT_FLOW_OPERATOR_PASSWORD_PATH}", target: "/run/secrets/agent-flow/operator-password", readOnly: true },
   { source: "${AGENT_FLOW_DATA_PATH:-./.agent-flow-data}", target: "/var/lib/agent-flow", readOnly: false },
 ];
 

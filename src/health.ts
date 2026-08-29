@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 
@@ -64,7 +65,13 @@ export function createOperationalStatus(
   };
 }
 
-export function createHealthServer(address: string, port: number, status: OperationalStatus): Server {
+export function createHealthServer(
+  address: string,
+  port: number,
+  status: OperationalStatus,
+  operatorPassword: string,
+): Server {
+  const expectedAuthorization = Buffer.from(`operator:${operatorPassword}`);
   const server = createServer((request, response) => void route(request, response));
   server.listen(port, address);
   return server;
@@ -72,6 +79,16 @@ export function createHealthServer(address: string, port: number, status: Operat
   async function route(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) {
     const rawPathname = request.url?.split("?", 1)[0] ?? "/";
     const apiRequest = rawPathname === "/api" || rawPathname.startsWith("/api/");
+    const publicHealth = rawPathname === "/health/live" || rawPathname === "/health/ready";
+    if (!publicHealth && !authorized(request.headers.authorization, expectedAuthorization)) {
+      response.writeHead(401, {
+        "cache-control": "no-store",
+        "content-type": "text/plain; charset=utf-8",
+        "www-authenticate": 'Basic realm="agent-flow", charset="UTF-8"',
+      });
+      response.end("401\n");
+      return;
+    }
     let pathname: string;
     try {
       pathname = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -129,6 +146,18 @@ export function createHealthServer(address: string, port: number, status: Operat
         : 404;
     writeText(response, code, apiRequest);
   }
+}
+
+function authorized(header: string | undefined, expected: Buffer): boolean {
+  if (!header || header.length > 87_400) return false;
+  const match = /^Basic ((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?)$/i.exec(header);
+  if (!match?.[1]) return false;
+  const credentials = Buffer.from(match[1], "base64");
+  if (credentials.length > 65_545 || credentials.toString("base64") !== match[1]) return false;
+  const comparable = Buffer.alloc(expected.length);
+  credentials.copy(comparable, 0, 0, expected.length);
+  const equal = timingSafeEqual(comparable, expected);
+  return credentials.length === expected.length && equal;
 }
 
 function sessionPath(rawPathname: string): { flowUuid: string; attemptUuid: string; file: string } | null {

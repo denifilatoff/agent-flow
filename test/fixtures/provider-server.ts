@@ -170,7 +170,11 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   await createTools(bin);
   await createAuth(home);
   const tokenFile = join(root, "provider-token");
-  await writeFile(tokenFile, "fixture\n", { mode: 0o600 });
+  const operatorAuthFile = join(root, "operator-password");
+  await Promise.all([
+    writeFile(tokenFile, "fixture\n", { mode: 0o600 }),
+    writeFile(operatorAuthFile, "operator-password-314159\n", { mode: 0o600 }),
+  ]);
   const runtimePath = await createConfiguration(
     provider,
     configRepository,
@@ -182,6 +186,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     tokenFile,
     join(home, ".codex/auth.json"),
     join(home, ".claude/.credentials.json"),
+    operatorAuthFile,
   );
 
   environmentChanged = true;
@@ -851,6 +856,7 @@ async function createConfiguration(
   tokenFile = join(dirname(repository), "provider-token"),
   codexAuthFile = join(dirname(repository), "auth/.codex/auth.json"),
   claudeAuthFile = join(dirname(repository), "auth/.claude/.credentials.json"),
+  operatorAuthFile = join(dirname(repository), "operator-password"),
   pollingIntervalSeconds = 60,
 ): Promise<string> {
   await mkdir(join(repository, "config/flows"), { recursive: true });
@@ -893,7 +899,7 @@ async function createConfiguration(
     runtime: {
       concurrency: 2,
       dataDirectory: runtimeDataDirectory,
-      http: { address: "0.0.0.0", port: healthPort },
+      http: { address: "0.0.0.0", port: healthPort, authFile: operatorAuthFile },
     },
   }), { mode: 0o600 });
   return runtimePath;
@@ -925,19 +931,24 @@ async function runDockerFixture(root: string, port: number, healthPort: number):
   await createDockerTools(bin);
   await createAuth(auth);
   const token = join(canonicalRoot, "provider-token");
-  await writeFile(token, "fixture\n", { mode: 0o644 });
+  const operatorAuth = join(canonicalRoot, "operator-password");
+  await Promise.all([
+    writeFile(token, "fixture\n", { mode: 0o644 }),
+    writeFile(operatorAuth, "operator-password-314159\n", { mode: 0o644 }),
+  ]);
   const runtime = await createConfiguration(
     "github", repository, data, state.apiUrl, 8080, "/config", "/var/lib/agent-flow",
     "/run/secrets/agent-flow/provider-token",
     "/run/secrets/agent-flow/codex-auth",
     "/run/secrets/agent-flow/claude-auth",
+    "/run/secrets/agent-flow/operator-password",
     0.05,
   );
   await Promise.all([
     chmod(join(auth, ".codex/auth.json"), 0o644),
     chmod(join(auth, ".claude/.credentials.json"), 0o644),
   ]);
-  await writeFile(join(canonicalRoot, "compose.e2e.yaml"), `services:\n  controller:\n    restart: "no"\n    command: ["node", "/fixture-source/docker-controller.mjs"]\n    environment:\n      NODE_EXTRA_CA_CERTS: /fixture/fixture.crt\n      PATH: /fixture-bin:/opt/tools/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n      HOME: /home/agent\n    ports: !override\n      - "${healthPort}:8080"\n    volumes: !override\n      - ${runtime}:/etc/agent-flow/runtime.yaml:ro\n      - ${token}:/run/secrets/agent-flow/provider-token:ro\n      - ${join(auth, ".codex/auth.json")}:/run/secrets/agent-flow/codex-auth:ro\n      - ${join(auth, ".claude/.credentials.json")}:/run/secrets/agent-flow/claude-auth:ro\n      - ${repository}:/config:ro\n      - ${data}:/var/lib/agent-flow\n      - ${certificate}:/fixture/fixture.crt:ro\n      - ${bin}:/fixture-bin:ro\n      - ${resolve(ROOT, "test/fixtures")}:/fixture-source:ro\n`);
+  await writeFile(join(canonicalRoot, "compose.e2e.yaml"), `services:\n  controller:\n    restart: "no"\n    command: ["node", "/fixture-source/docker-controller.mjs"]\n    environment:\n      NODE_EXTRA_CA_CERTS: /fixture/fixture.crt\n      PATH: /fixture-bin:/opt/tools/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n      HOME: /home/agent\n    ports: !override\n      - "${healthPort}:8080"\n    volumes: !override\n      - ${runtime}:/etc/agent-flow/runtime.yaml:ro\n      - ${token}:/run/secrets/agent-flow/provider-token:ro\n      - ${join(auth, ".codex/auth.json")}:/run/secrets/agent-flow/codex-auth:ro\n      - ${join(auth, ".claude/.credentials.json")}:/run/secrets/agent-flow/claude-auth:ro\n      - ${operatorAuth}:/run/secrets/agent-flow/operator-password:ro\n      - ${repository}:/config:ro\n      - ${data}:/var/lib/agent-flow\n      - ${certificate}:/fixture/fixture.crt:ro\n      - ${bin}:/fixture-bin:ro\n      - ${resolve(ROOT, "test/fixtures")}:/fixture-source:ro\n`);
   const server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
     void state.handle(request, response).catch((error: unknown) => json(response, 500, {
       error: error instanceof Error ? error.message : "fixture failed",

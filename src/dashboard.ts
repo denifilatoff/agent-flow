@@ -55,7 +55,10 @@ export async function createDashboardSnapshot(runtime: RuntimeManager, ready: Re
         harnesses: Object.keys(effective.execution.harnesses).sort(),
       },
       polling: { ...effective.polling },
-      runtime: { concurrency: effective.runtime.concurrency, http: { ...effective.runtime.http } },
+      runtime: {
+        concurrency: effective.runtime.concurrency,
+        http: { address: effective.runtime.http.address, port: effective.runtime.http.port },
+      },
     },
     configuration: {
       repository: effective.configuration.repository,

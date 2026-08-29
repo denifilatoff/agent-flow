@@ -33,11 +33,25 @@ test("normalizes mappings for a stable digest without reading secret files", asy
   const root = await mkdtemp(join(tmpdir(), "agent-flow-runtime-secret-"));
   try {
     const token = join(root, "token");
+    const operatorPassword = join(root, "operator-password");
     await writeFile(token, "first-secret\n");
-    const configured = { ...runtime, provider: { ...runtime.provider, tokenFile: token } };
+    await writeFile(operatorPassword, "first-password\n");
+    const configured = {
+      ...runtime,
+      provider: { ...runtime.provider, tokenFile: token },
+      runtime: { ...runtime.runtime, http: { ...runtime.runtime.http, authFile: operatorPassword } },
+    };
     const before = runtimeDigest(configured);
     await writeFile(token, "second-secret\n");
+    await writeFile(operatorPassword, "second-password\n");
     assert.equal(runtimeDigest(configured), before);
+    assert.notEqual(runtimeDigest({
+      ...configured,
+      runtime: {
+        ...configured.runtime,
+        http: { ...configured.runtime.http, authFile: join(root, "replacement-password") },
+      },
+    }), before);
     assert.doesNotMatch(before, /secret/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -53,6 +67,15 @@ test("rejects secret values and relative runtime paths", async () => {
   assert.throws(() => validateDocument("RuntimeConfig", {
     ...runtime,
     provider: { ...runtime.provider, tokenFile: "token" },
+  }));
+  assert.throws(() => validateDocument("RuntimeConfig", {
+    ...runtime,
+    runtime: { ...runtime.runtime, http: { ...runtime.runtime.http, authFile: "operator-password" } },
+  }));
+  const { authFile: _authFile, ...httpWithoutAuth } = runtime.runtime.http;
+  assert.throws(() => validateDocument("RuntimeConfig", {
+    ...runtime,
+    runtime: { ...runtime.runtime, http: httpWithoutAuth },
   }));
   assert.equal((await readFile("config/runtime.example.yaml", "utf8")).includes("token:"), false);
 });
@@ -167,6 +190,14 @@ test("accepts reloadable generations and drains on restart-only or invalid repla
     assert.equal(manager.mayStartWork(), false);
     manager.attemptFinished();
     assert.equal(manager.status().safeToRestart, true);
+
+    await writeFile(path, initial.replace(
+      "/run/secrets/agent-flow/operator-password",
+      "/run/secrets/agent-flow/replacement-operator-password",
+    ));
+    await manager.reload();
+    assert.equal(manager.effective().runtime.http.authFile, "/run/secrets/agent-flow/operator-password");
+    assert.deepEqual(manager.status().changedRestartFields, ["runtime.http.authFile"]);
 
     await writeFile(path, "not: valid\n");
     await manager.reload();

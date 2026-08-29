@@ -25,7 +25,11 @@ const runtimeConfig: RuntimeConfig = {
     harnesses: { claude: { authFile: "/secrets/claude" }, codex: { authFile: "/secrets/codex" } },
   },
   polling: { intervalSeconds: 300, maxCallsPerMinute: 20, quotaReservePercent: 25 },
-  runtime: { concurrency: 2, dataDirectory: "/data", http: { address: "127.0.0.1", port: 8080 } },
+  runtime: {
+    concurrency: 2,
+    dataDirectory: "/data",
+    http: { address: "127.0.0.1", port: 8080, authFile: "/secrets/operator-password" },
+  },
 };
 
 function provider(calls: string[]): ProviderAdapter {

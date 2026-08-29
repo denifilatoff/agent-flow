@@ -51,16 +51,22 @@ interface SignalSource {
 export interface MainDependencies {
   createHealthServer: typeof createHealthServer;
   createRuntime(): Promise<RuntimeManager>;
-  createPreflightDependencies(runtime: RuntimeManager): PreflightDependencies;
+  createPreflightDependencies(runtime: RuntimeManager): StartupPreflightDependencies;
+  readSecretFile(path: string): Promise<string>;
   runPreflight(dependencies: PreflightDependencies): Promise<ReadyDependencies>;
   signals: SignalSource;
   reportError(message: string): void;
+}
+
+export interface StartupPreflightDependencies extends PreflightDependencies {
+  registerStartupSecret(value: string | Buffer): void;
 }
 
 const DEFAULT_MAIN_DEPENDENCIES: MainDependencies = {
   createHealthServer,
   createRuntime: () => RuntimeManager.create(),
   createPreflightDependencies: createProductionDependencies,
+  readSecretFile,
   runPreflight,
   signals: process,
   reportError: (message) => console.error(message),
@@ -78,8 +84,18 @@ export async function main(
     return 1;
   }
   const http = runtime.effective().runtime.http;
+  let preflightDependencies: StartupPreflightDependencies;
+  let operatorPassword: string;
+  try {
+    operatorPassword = await dependencies.readSecretFile(http.authFile);
+    preflightDependencies = dependencies.createPreflightDependencies(runtime);
+    preflightDependencies.registerStartupSecret(operatorPassword);
+  } catch {
+    dependencies.reportError("agent-flow startup failed: operator authentication load failed");
+    return 1;
+  }
   const readiness = createOperationalStatus(runtime);
-  const server = dependencies.createHealthServer(http.address, http.port, readiness);
+  const server = dependencies.createHealthServer(http.address, http.port, readiness, operatorPassword);
   try {
     await listening(server);
   } catch {
@@ -95,7 +111,7 @@ export async function main(
   let ready: ReadyDependencies | undefined;
   try {
     try {
-      ready = await dependencies.runPreflight(dependencies.createPreflightDependencies(runtime));
+      ready = await dependencies.runPreflight(preflightDependencies);
     } catch (error) {
       dependencies.reportError(`agent-flow startup failed: ${boundedMessage(error)}`);
       exitCode = 1;
@@ -218,6 +234,7 @@ export function createProductionDependencies(
       return composeController(bundle, providers, harnesses, load, runtime, loadedCredential, overrides);
     },
     redactSessionContent: startupRedactor.redact,
+    registerStartupSecret: startupRedactor.register,
     runtime,
   };
 }

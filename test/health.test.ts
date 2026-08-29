@@ -7,7 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { loadConfigBundle } from "../src/config/load.ts";
-import { RuntimeManager } from "../src/config/runtime.ts";
+import { RuntimeManager, readSecretFile } from "../src/config/runtime.ts";
 import { createHealthServer, createOperationalStatus } from "../src/health.ts";
 import type { ReadyDependencies } from "../src/preflight.ts";
 import { createStartupRedactor } from "../src/redaction.ts";
@@ -15,6 +15,87 @@ import type { Controller } from "../src/runtime/controller.ts";
 
 const FLOW = "11111111-1111-4111-8111-111111111111";
 const ATTEMPT = "22222222-2222-4222-8222-222222222222";
+const OPERATOR_PASSWORD = "operator-password-314159";
+const OPERATOR_AUTHORIZATION = `Basic ${Buffer.from(`operator:${OPERATOR_PASSWORD}`).toString("base64")}`;
+
+test("requires fixed operator Basic authentication for every non-health route", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-http-auth-"));
+  const authFile = join(root, "operator-password");
+  await writeFile(authFile, `${OPERATOR_PASSWORD}\n`, { mode: 0o600 });
+  const status = {
+    isReady: () => true,
+    markReady() {},
+    markNotReady() {},
+    bindReady() {},
+    dashboard: async () => null,
+    sessionFile: async () => null,
+    snapshot: () => ({
+      configurationRepository: "/config",
+      configurationRevision: "a".repeat(40),
+      runtimeDigest: "b".repeat(64),
+      validationErrors: [],
+      restartRequired: false,
+      restartReason: null,
+      changedRestartFields: [],
+      activeAttempts: 0,
+      safeToRestart: false,
+    }),
+  } satisfies OperationalStatus;
+  const server = createHealthServer("127.0.0.1", 0, status, await readSecretFile(authFile));
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  t.after(async () => {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await rm(root, { recursive: true, force: true });
+  });
+  await writeFile(authFile, "replacement-password\n", { mode: 0o600 });
+  const port = (server.address() as AddressInfo).port;
+  const url = (route: string) => `http://127.0.0.1:${port}${route}`;
+
+  assert.equal((await fetch(url("/health/live"))).status, 200);
+  assert.equal((await fetch(url("/health/ready"))).status, 200);
+
+  for (const [route, method] of [
+    ["/", "GET"],
+    ["/assets/styles.css", "GET"],
+    ["/api/status", "GET"],
+    ["/api/dashboard", "GET"],
+    [`/api/sessions/${FLOW}/${ATTEMPT}/context.json`, "GET"],
+    ["/unknown", "GET"],
+    ["/api/status", "POST"],
+  ] as const) {
+    const response = await fetch(url(route), { method });
+    assert.equal(response.status, 401, `${method} ${route}`);
+    assert.equal(response.headers.get("www-authenticate"), 'Basic realm="agent-flow", charset="UTF-8"');
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const body = await response.text();
+    assert.doesNotMatch(body, /operator-password|\/config/);
+  }
+
+  for (const authorization of [
+    "Bearer ignored",
+    "Basic",
+    "Basic !!!",
+    `Basic ${Buffer.from("operator:wrong-password").toString("base64")}`,
+    `Basic ${Buffer.from(`other:${OPERATOR_PASSWORD}`).toString("base64")}`,
+  ]) {
+    const response = await fetch(url("/api/status"), { headers: { authorization } });
+    assert.equal(response.status, 401, authorization);
+  }
+
+  assert.equal((await fetch(url("/api/status"), {
+    headers: { authorization: OPERATOR_AUTHORIZATION },
+  })).status, 200);
+  assert.equal((await fetch(url("/api/status"), {
+    headers: { authorization: `Basic ${Buffer.from("operator:replacement-password").toString("base64")}` },
+  })).status, 401);
+  assert.equal((await fetch(url("/api/status"), {
+    method: "POST",
+    headers: { authorization: OPERATOR_AUTHORIZATION },
+  })).status, 405);
+  assert.equal((await fetch(url("/unknown"), {
+    headers: { authorization: OPERATOR_AUTHORIZATION },
+  })).status, 404);
+});
 
 test("serves liveness, runtime-aware readiness, and read-only redacted status", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agent-flow-health-"));
@@ -23,7 +104,7 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   await writeFile(path, initial);
   const runtime = await RuntimeManager.create(path);
   const status = createOperationalStatus(runtime, async (_fd, expectedPath) => expectedPath);
-  const server = createHealthServer("127.0.0.1", 0, status);
+  const server = createHealthServer("127.0.0.1", 0, status, OPERATOR_PASSWORD);
   await new Promise<void>((resolve) => server.once("listening", resolve));
   t.after(async () => {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -31,6 +112,10 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   });
   const port = (server.address() as AddressInfo).port;
   const url = (route: string) => `http://127.0.0.1:${port}${route}`;
+  const fetch = (input: string | URL, init: RequestInit = {}) => globalThis.fetch(input, {
+    ...init,
+    headers: { ...Object.fromEntries(new Headers(init.headers)), authorization: OPERATOR_AUTHORIZATION },
+  });
 
   for (const [route, contentType] of [
     ["/", "text/html; charset=utf-8"],
@@ -50,7 +135,7 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
     assert.match(page, new RegExp(heading));
   }
   for (const route of ["/assets/../index.html", "/assets/%2e%2e/index.html"]) {
-    assert.equal((await rawGet(port, route)).status, 404, route);
+    assert.equal((await rawGet(port, route, OPERATOR_AUTHORIZATION)).status, 404, route);
   }
 
   assert.equal((await fetch(url("/health/live"))).status, 200);
@@ -130,7 +215,7 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
     `/api/sessions/${FLOW}/${ATTEMPT}/%63ontext.json`,
     `/api/sessions/${FLOW}/${ATTEMPT}/../context.json`,
     `/api/sessions/${FLOW}/%2e%2e/context.json`,
-  ]) assert.notEqual((await rawGet(port, route)).status, 200, route);
+  ]) assert.notEqual((await rawGet(port, route, OPERATOR_AUTHORIZATION)).status, 200, route);
 
   await writeFile(path, initial.replace(
     "https://github.com/example/agent-stack.git",
@@ -170,9 +255,9 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   assert.equal((await fetch(url("/other"))).status, 404);
 });
 
-function rawGet(port: number, path: string): Promise<{ status: number }> {
+function rawGet(port: number, path: string, authorization?: string): Promise<{ status: number }> {
   return new Promise((resolve, reject) => {
-    const request = httpRequest({ host: "127.0.0.1", port, path }, (response) => {
+    const request = httpRequest({ host: "127.0.0.1", port, path, headers: { authorization } }, (response) => {
       response.resume();
       response.once("end", () => resolve({ status: response.statusCode ?? 0 }));
     });

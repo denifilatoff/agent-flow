@@ -64,7 +64,7 @@ export interface RuntimeConfig {
     harnesses: Partial<Record<HarnessTarget, { authFile: string }>>;
   };
   polling: { intervalSeconds: number; maxCallsPerMinute: number; quotaReservePercent: number };
-  runtime: { concurrency: number; dataDirectory: string; http: { address: string; port: number } };
+  runtime: { concurrency: number; dataDirectory: string; http: { address: string; port: number; authFile: string } };
 }
 
 export interface ExecutionSnapshot {

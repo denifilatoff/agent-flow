@@ -55,3 +55,4 @@ runtime:
   http:
     address: 0.0.0.0
     port: 8080
+    authFile: /run/secrets/agent-flow/operator-password

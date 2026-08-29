@@ -17,9 +17,11 @@ async function fixture(apiUrl: string): Promise<{
   const root = await mkdtemp(join(tmpdir(), "agent-flow-production-credential-"));
   const tokenFile = join(root, "provider-token");
   const authFile = join(root, "codex-auth");
+  const operatorAuthFile = join(root, "operator-password");
   const runtimeFile = join(root, "runtime.yaml");
   await writeFile(tokenFile, "mounted-provider-token\n", { mode: 0o600 });
   await writeFile(authFile, "{}\n", { mode: 0o600 });
+  await writeFile(operatorAuthFile, "operator-password-314159\n", { mode: 0o600 });
   const execution = {
     harness: "codex" as const, model: "fixture-model", reasoning: "high" as const,
     maxAttempts: 2, delaySeconds: 0, timeoutSeconds: 60,
@@ -34,7 +36,11 @@ async function fixture(apiUrl: string): Promise<{
       harnesses: { codex: { authFile } },
     },
     polling: { intervalSeconds: 300, maxCallsPerMinute: 20, quotaReservePercent: 25 },
-    runtime: { concurrency: 2, dataDirectory: join(root, "data"), http: { address: "127.0.0.1", port: 8080 } },
+    runtime: {
+      concurrency: 2,
+      dataDirectory: join(root, "data"),
+      http: { address: "127.0.0.1", port: 8080, authFile: operatorAuthFile },
+    },
   };
   await writeFile(runtimeFile, stringify(config), { mode: 0o600 });
   const runtime = await RuntimeManager.create(runtimeFile);
@@ -53,6 +59,16 @@ test("reads the mounted provider secret once and exposes only the fixed public G
   assert.equal(JSON.stringify(production.runtime.status()).includes("mounted-provider-token"), false);
   assert.equal(production.redactSessionContent("mounted-provider-token"), "[REDACTED]");
   assert.equal(production.redactSessionContent("replacement-token"), "replacement-token");
+});
+
+test("registers the startup operator password in the shared session redactor", async (t) => {
+  const { root, production } = await fixture("https://api.github.com");
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  production.registerStartupSecret("operator-password-314159");
+
+  assert.equal(production.redactSessionContent("password=operator-password-314159"), "password=[REDACTED]");
+  assert.equal(JSON.stringify(production).includes("operator-password-314159"), false);
 });
 
 test("uses the fixed enterprise GitHub environment without leaking ambient credentials", async (t) => {

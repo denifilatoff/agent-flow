@@ -31,6 +31,7 @@ export AGENT_FLOW_RUNTIME_PATH="$root/runtime.yaml"
 export AGENT_FLOW_PROVIDER_TOKEN_PATH="$root/provider-token"
 export AGENT_FLOW_CODEX_AUTH_PATH="$root/auth/.codex/auth.json"
 export AGENT_FLOW_CLAUDE_AUTH_PATH="$root/auth/.claude/.credentials.json"
+export AGENT_FLOW_OPERATOR_PASSWORD_PATH="$root/operator-password"
 
 docker compose -p "$project" -f compose.yaml -f "$root/compose.e2e.yaml" build controller
 docker compose -p "$project" -f compose.yaml -f "$root/compose.e2e.yaml" up -d controller
@@ -47,7 +48,22 @@ until curl --fail --silent "http://127.0.0.1:$health_port/health/live" >/dev/nul
 done
 
 node -e '
-const response = await fetch(`http://127.0.0.1:${process.argv[1]}/api/status`);
+const endpoint = `http://127.0.0.1:${process.argv[1]}/api/status`;
+for (const headers of [undefined, {
+  authorization: `Basic ${Buffer.from("operator:wrong-password").toString("base64")}`,
+}]) {
+  const rejected = await fetch(endpoint, { headers });
+  if (rejected.status !== 401) throw new Error(`unauthorized status endpoint returned ${rejected.status}`);
+  if (rejected.headers.get("www-authenticate") !== `Basic realm="agent-flow", charset="UTF-8"`) {
+    throw new Error("unauthorized status endpoint omitted the Basic challenge");
+  }
+  if (rejected.headers.get("cache-control") !== "no-store") {
+    throw new Error("unauthorized status endpoint is cacheable");
+  }
+}
+const response = await fetch(endpoint, {
+  headers: { authorization: `Basic ${Buffer.from("operator:operator-password-314159").toString("base64")}` },
+});
 if (!response.ok) throw new Error(`status endpoint returned ${response.status}`);
 const status = await response.json();
 if (!/^[0-9a-f]{40}$/.test(status.configurationRevision)) throw new Error("status revision is invalid");
