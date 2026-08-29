@@ -350,6 +350,8 @@
   }
 
   async function renderSessionTab(session, sessionTabs, content, key, file) {
+    const requestId = String(Number(content.dataset.requestId || 0) + 1);
+    content.dataset.requestId = requestId;
     for (const button of sessionTabs.querySelectorAll("[data-session-tab]")) {
       const selected = button.dataset.sessionTab === key;
       button.setAttribute("aria-selected", String(selected));
@@ -371,10 +373,12 @@
       const path = `/api/sessions/${encodeURIComponent(session.flowUuid)}/${encodeURIComponent(session.attemptUuid)}/${file}`;
       const response = await fetch(path, { headers: { accept: "application/json" } });
       const result = await response.json();
+      if (content.dataset.requestId !== requestId) return;
       pre.textContent = response.ok && result.available === true
         ? `${result.content}${result.truncated ? "\n\n[Content truncated by the server]" : ""}`
         : `${file}: ${result.reason || `HTTP ${response.status}`}`;
     } catch {
+      if (content.dataset.requestId !== requestId) return;
       pre.textContent = `${file}: unavailable.`;
     }
   }
