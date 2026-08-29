@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import { readFile } from "node:fs/promises";
 
 import type { RuntimeManager } from "./config/runtime.ts";
 import {
@@ -68,22 +69,34 @@ export function createHealthServer(address: string, port: number, status: Operat
   return server;
 
   async function route(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse) {
-    if (request.method !== "GET") {
-      response.writeHead(405, { allow: "GET", "content-type": "text/plain; charset=utf-8" });
-      response.end("405\n");
-      return;
-    }
-    if (request.url === "/api/status") {
-      response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      response.end(`${JSON.stringify(status.snapshot())}\n`);
-      return;
-    }
+    const rawPathname = request.url?.split("?", 1)[0] ?? "/";
+    const apiRequest = rawPathname === "/api" || rawPathname.startsWith("/api/");
     let pathname: string;
     try {
       pathname = new URL(request.url ?? "/", "http://localhost").pathname;
     } catch {
-      response.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
-      response.end("400\n");
+      writeText(response, 400, apiRequest);
+      return;
+    }
+    if (request.method !== "GET") {
+      writeText(response, 405, apiRequest, { allow: "GET" });
+      return;
+    }
+    if (pathname === "/api/status") {
+      writeJson(response, 200, status.snapshot());
+      return;
+    }
+    const asset = staticAsset(rawPathname);
+    if (asset) {
+      try {
+        response.writeHead(200, {
+          "cache-control": "public, max-age=3600",
+          "content-type": asset.contentType,
+        });
+        response.end(await readFile(new URL(asset.file, import.meta.url)));
+      } catch {
+        writeText(response, 404);
+      }
       return;
     }
     if (pathname === "/api/dashboard") {
@@ -113,9 +126,17 @@ export function createHealthServer(address: string, port: number, status: Operat
       : pathname === "/health/ready"
         ? status.isReady() ? 200 : 503
         : 404;
-    response.writeHead(code, { "content-type": "text/plain; charset=utf-8" });
-    response.end(`${code}\n`);
+    writeText(response, code, apiRequest);
   }
+}
+
+function staticAsset(pathname: string): { file: string; contentType: string } | undefined {
+  return {
+    "/": { file: "./ui/index.html", contentType: "text/html; charset=utf-8" },
+    "/index.html": { file: "./ui/index.html", contentType: "text/html; charset=utf-8" },
+    "/assets/styles.css": { file: "./ui/styles.css", contentType: "text/css; charset=utf-8" },
+    "/assets/app.js": { file: "./ui/app.js", contentType: "text/javascript; charset=utf-8" },
+  }[pathname];
 }
 
 function sessionPath(pathname: string): { flowUuid: string; attemptUuid: string; file: string } | null {
@@ -130,6 +151,20 @@ function sessionPath(pathname: string): { flowUuid: string; attemptUuid: string;
 
 function writeJson(response: import("node:http").ServerResponse, status: number, body: unknown): void {
   writeJsonPayload(response, status, `${JSON.stringify(body)}\n`);
+}
+
+function writeText(
+  response: import("node:http").ServerResponse,
+  status: number,
+  noStore = false,
+  headers: Record<string, string> = {},
+): void {
+  response.writeHead(status, {
+    ...headers,
+    ...(noStore ? { "cache-control": "no-store" } : {}),
+    "content-type": "text/plain; charset=utf-8",
+  });
+  response.end(`${status}\n`);
 }
 
 function writeSessionJson(response: import("node:http").ServerResponse, status: number, body: unknown): void {

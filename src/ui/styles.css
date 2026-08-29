@@ -1,0 +1,37 @@
+:root {
+  color: #27272a;
+  background: #fafafa;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+main {
+  max-width: 960px;
+  margin: auto;
+  padding: 24px;
+}
+
+header,
+nav {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+section {
+  margin-top: 24px;
+  padding: 24px;
+  border: 1px solid #969696;
+  border-radius: 2px;
+  background: #fff;
+}
+
+:focus-visible {
+  outline: 3px solid #ff5a00;
+  outline-offset: 2px;
+}

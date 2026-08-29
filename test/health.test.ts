@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,6 +30,27 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   });
   const port = (server.address() as AddressInfo).port;
   const url = (route: string) => `http://127.0.0.1:${port}${route}`;
+
+  for (const [route, contentType] of [
+    ["/", "text/html; charset=utf-8"],
+    ["/index.html", "text/html; charset=utf-8"],
+    ["/assets/styles.css", "text/css; charset=utf-8"],
+    ["/assets/app.js", "text/javascript; charset=utf-8"],
+  ]) {
+    const asset = await fetch(url(route));
+    assert.equal(asset.status, 200, route);
+    assert.equal(asset.headers.get("content-type"), contentType, route);
+    assert.equal(asset.headers.get("cache-control"), "public, max-age=3600", route);
+  }
+  const page = await (await fetch(url("/"))).text();
+  assert.match(page, /href="\/assets\/styles\.css"/);
+  assert.match(page, /src="\/assets\/app\.js"/);
+  for (const heading of ["Статус системы", "Конфигурация", "Граф переходов", "Подготовить изменение"]) {
+    assert.match(page, new RegExp(heading));
+  }
+  for (const route of ["/assets/../index.html", "/assets/%2e%2e/index.html"]) {
+    assert.equal((await rawGet(port, route)).status, 404, route);
+  }
 
   assert.equal((await fetch(url("/health/live"))).status, 200);
   assert.equal((await fetch(url("/health/ready"))).status, 503);
@@ -73,13 +95,33 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   assert.equal((await fetch(url("/health/live"))).status, 200);
   assert.equal((await fetch(url("/health/ready"))).status, 503);
   const snapshot = await (await fetch(url("/api/status"))).json() as Record<string, unknown>;
+  assert.equal((await fetch(url("/api/status"))).headers.get("cache-control"), "no-store");
   assert.equal(snapshot.configurationRevision, "0123456789abcdef0123456789abcdef01234567");
   assert.equal(snapshot.restartRequired, true);
   assert.deepEqual(snapshot.changedRestartFields, ["runtime.http.port"]);
   assert.equal(JSON.stringify(snapshot).includes("tokenFile"), false);
   assert.equal(JSON.stringify(snapshot).includes("authFile"), false);
 
-  assert.equal((await fetch(url("/api/status"), { method: "POST" })).status, 405);
-  assert.equal((await fetch(url("/api/dashboard"), { method: "POST" })).status, 405);
+  for (const [route, method, statusCode] of [
+    ["/api/status", "POST", 405],
+    ["/api/dashboard", "POST", 405],
+    ["/api/unknown", "GET", 404],
+  ] as const) {
+    const api = await fetch(url(route), { method });
+    assert.equal(api.status, statusCode, route);
+    assert.equal(api.headers.get("cache-control"), "no-store", route);
+  }
+  assert.equal((await fetch(url("/assets/styles.css"), { method: "POST" })).status, 405);
   assert.equal((await fetch(url("/other"))).status, 404);
 });
+
+function rawGet(port: number, path: string): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({ host: "127.0.0.1", port, path }, (response) => {
+      response.resume();
+      response.once("end", () => resolve({ status: response.statusCode ?? 0 }));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+}

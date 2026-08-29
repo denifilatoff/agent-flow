@@ -15,6 +15,9 @@ const requiredMounts = [
 test("locks the runtime image, tools, and controller service", async () => {
   const dockerfile = uncomment(await readFile("Dockerfile", "utf8"));
   assertDockerfileContract(dockerfile);
+  const applicationPackage = JSON.parse(await readFile("package.json", "utf8")) as { scripts?: Record<string, string> };
+  assert.equal(applicationPackage.scripts?.build, "tsc && rm -rf dist/ui && cp -R src/ui dist/ui");
+  assert.match(dockerfile, /^COPY --from=build --chown=agent:agent \/app\/dist \.\/dist$/m);
 
   const toolsLock = JSON.parse(await readFile("docker/tools/package-lock.json", "utf8")) as {
     packages: Record<string, { version?: string }>;
