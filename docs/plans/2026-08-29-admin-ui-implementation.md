@@ -79,7 +79,7 @@ frontend framework or new package is required.
 - Test: `test/runtime/controller.test.ts`
 
 - [x] Add failing tests for the dashboard schema, redaction, 11-state flow, unavailable-before-preflight response, and
-  bounded metadata-only session discovery.
+  bounded session discovery.
 - [x] Bind the successful preflight bundle and controller to operational status.
 - [x] Include the observed flow instance, state, and observation time for active tickets so human gates and provider
   waits are rendered from controller evidence rather than inferred from stale session files.
@@ -130,6 +130,26 @@ frontend framework or new package is required.
   `/proc/self/fd`, with a one MiB response cap and fail-closed behavior.
 - [x] Keep discovery at 101 visited directory entries plus three fixed safe-file checks per advertised session.
 
+### Task 2c: Authenticate operator access without exposing another credential
+
+**Files:**
+
+- Modify: `schemas/v1/runtime-config.schema.json`
+- Modify: `src/config/runtime.ts`
+- Modify: `src/health.ts`
+- Modify: `src/main.ts`
+- Modify: `compose.yaml`
+- Test: `test/health.test.ts`
+- Test: `test/main.test.ts`
+- Test: `test/e2e/docker-mac.sh`
+
+- [x] Require an absolute `runtime.http.authFile`, mount it read-only, and snapshot its single bounded value before the
+  server binds.
+- [x] Leave liveness and readiness public while requiring fixed-user HTTP Basic authentication for every other route.
+- [x] Register the startup password in the shared session redactor and keep its value and path out of API projections.
+- [x] Treat an authentication-path change as restart-only, reject missing, invalid, or oversized credentials before
+  listening, and publish the default Compose port on host loopback only.
+
 ## Checkpoint 2: Production static application
 
 ### Task 3: Serve the application from the controller image
@@ -176,7 +196,7 @@ frontend framework or new package is required.
 - [x] Verify all four screens in the in-app browser at desktop and mobile widths.
 - [x] Exercise navigation persistence, menu persistence, automatic refresh, search, graph keyboard selection,
   validation, YAML generation, and clipboard fallback.
-- [ ] Verify the bounded redacted session tabs in the running Linux container and in-app browser.
+- [x] Verify the bounded redacted session tabs in the running Linux container and in-app browser.
 - [x] Compare desktop screenshots with the approved mockup and correct material spacing, typography, color, overflow,
   focus, and responsive differences.
 - [x] Build the Docker image and prove health, status, dashboard, page, and asset routes from the container.
