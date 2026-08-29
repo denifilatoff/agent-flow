@@ -154,6 +154,33 @@ test("stages an exact private agent package after the shared tree is mutated", a
   assert.equal(await readFile(sharedManifest, "utf8"), "name: spoofed\n");
 });
 
+test("rejects a private package when a retained loose blob has spoofed bytes", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  const pinned = await loadPinnedConfig(repo.path, data);
+  const objectStore = join(pinned.root, ".source.git");
+  const path = "agent-packages/developer/apm.yml";
+  const objectId = (await exec("git", ["--no-replace-objects", "-C", objectStore, "rev-parse", `${pinned.revision}:${path}`])).stdout.trim();
+  const spoofed = Buffer.from("name: spoofed\n");
+  const loose = join(objectStore, "objects", objectId.slice(0, 2), objectId.slice(2));
+  await mkdir(join(objectStore, "objects", objectId.slice(0, 2)), { recursive: true });
+  await rm(loose, { force: true });
+  await writeFile(loose, deflateSync(Buffer.concat([
+    Buffer.from(`blob ${spoofed.length}\0`),
+    spoofed,
+  ])));
+  const destination = join(data, "corrupt-private-attempt-package");
+
+  await assert.rejects(stagePinnedPackage(
+    pinned.root,
+    pinned.revision,
+    "agent-packages/developer",
+    destination,
+  ));
+  await assert.rejects(access(destination));
+});
+
 test("rejects a marker-only materialization for a pruned revision", async (t) => {
   const repo = await TestRepository.create();
   const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));

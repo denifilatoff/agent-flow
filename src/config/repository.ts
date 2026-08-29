@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -236,6 +237,7 @@ async function listMaterializedFiles(root: string, path: string): Promise<string
 
 interface TreeEntry {
   mode: string;
+  objectId: string;
   type: string;
   path: string;
 }
@@ -246,13 +248,13 @@ function treeEntries(output: Buffer, requiredRoots = ROOTS): TreeEntry[] {
     .split("\0")
     .filter(Boolean)
     .map((record) => {
-      const match = /^(\d+) (\w+) [0-9a-f]{40}\t(.+)$/.exec(record);
+      const match = /^(\d+) (\w+) ([0-9a-f]{40})\t(.+)$/.exec(record);
       if (!match) throw new Error("invalid Git tree entry");
-      const [, mode, type, path] = match;
+      const [, mode, type, objectId, path] = match;
       if (mode === "120000" || type !== "blob" || !isSafePath(path)) {
         throw new Error(`unsafe Git tree entry ${path}`);
       }
-      return { mode, type, path };
+      return { mode, objectId, type, path };
     });
   if (!requiredRoots.every((root) => entries.some((entry) => entry.path.startsWith(root)))) {
     throw new Error("Git tree is missing a required configuration root");
@@ -274,11 +276,17 @@ export async function stagePinnedPackage(
   if (await resolveRevision(repository, normalized) !== normalized) {
     throw new Error("pinned agent package revision does not match");
   }
+  const verifyObjects = () => git(repository, [
+    "-c", "fsck.skipList=/dev/null",
+    "fsck", "--strict", "--full", "--no-dangling", "--no-reflogs", normalized,
+  ]);
+  await verifyObjects();
   const prefix = `${packagePath}/`;
   const entries = treeEntries(
     await git(repository, ["ls-tree", "-r", "-z", "--full-tree", normalized, "--", packagePath]),
     [prefix],
   );
+  await verifyObjects();
   const output = resolve(destination);
   await mkdir(output);
   try {
@@ -286,7 +294,13 @@ export async function stagePinnedPackage(
       const target = resolve(output, entry.path.slice(prefix.length));
       if (!isInside(output, target)) throw new Error(`unsafe Git tree entry ${entry.path}`);
       await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, await git(repository, ["show", `${normalized}:${entry.path}`]), { flag: "wx" });
+      const content = await git(repository, ["show", `${normalized}:${entry.path}`]);
+      const objectId = createHash("sha1")
+        .update(`blob ${content.length}\0`)
+        .update(content)
+        .digest("hex");
+      if (objectId !== entry.objectId) throw new Error(`pinned Git blob ${entry.path} failed verification`);
+      await writeFile(target, content, { flag: "wx" });
     }
     return output;
   } catch (error) {
