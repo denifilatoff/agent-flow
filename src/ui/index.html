@@ -8,32 +8,88 @@
     <script src="/assets/app.js" defer></script>
   </head>
   <body>
-    <main>
-      <header>
-        <p>Agent Flow</p>
-        <nav aria-label="Разделы">
-          <a href="#status">Статус</a>
-          <a href="#configuration">Конфигурация</a>
-          <a href="#flow">Граф переходов</a>
-          <a href="#draft">Подготовить изменение</a>
+    <div class="app-shell" id="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-head">
+            <div class="brand-mark"><span class="brand-square" aria-hidden="true"></span><span>Agent Flow</span></div>
+            <button class="menu-toggle" id="menu-toggle" type="button" aria-expanded="true" aria-label="Свернуть меню">←</button>
+          </div>
+          <div class="brand-meta">operator console<br>read-only</div>
+        </div>
+        <nav class="nav" aria-label="Разделы" role="tablist">
+          <button class="nav-button" type="button" role="tab" aria-selected="true" data-view="status"><span class="nav-index">01</span><span>Статус</span></button>
+          <button class="nav-button" type="button" role="tab" aria-selected="false" data-view="configuration"><span class="nav-index">02</span><span>Конфигурация</span></button>
+          <button class="nav-button" type="button" role="tab" aria-selected="false" data-view="flow"><span class="nav-index">03</span><span>Граф переходов</span></button>
+          <button class="nav-button" type="button" role="tab" aria-selected="false" data-view="draft"><span class="nav-index">04</span><span>Подготовить изменение</span></button>
         </nav>
-      </header>
-      <section id="status">
-        <h1>Статус системы</h1>
-        <p>Данные ещё не загружены.</p>
-      </section>
-      <section id="configuration">
-        <h1>Конфигурация</h1>
-        <p>Данные ещё не загружены.</p>
-      </section>
-      <section id="flow">
-        <h1>Граф переходов</h1>
-        <p>Данные ещё не загружены.</p>
-      </section>
-      <section id="draft">
-        <h1>Подготовить изменение</h1>
-        <p>Данные ещё не загружены.</p>
-      </section>
-    </main>
+        <div class="sidebar-foot"><strong>GitHub / GitLab</strong>provider-backed state</div>
+      </aside>
+
+      <main class="main">
+        <div class="topbar">
+          <div class="auto-refresh">
+            <label><input id="auto-refresh-toggle" type="checkbox">Автообновление</label>
+            <select class="refresh-interval" id="refresh-interval" aria-label="Интервал автообновления">
+              <option value="15">15 с</option><option value="30">30 с</option><option value="60">60 с</option><option value="300" selected>300 с</option>
+            </select>
+            <span class="auto-refresh-countdown" id="auto-refresh-countdown">выкл.</span>
+          </div>
+        </div>
+
+        <section class="screen" role="tabpanel" data-screen="status">
+          <header class="screen-head"><div><h1>Статус системы</h1><p>Текущая проекция controller, provider observations и диагностических сессий.</p></div><span class="tag" id="snapshot-time">Загрузка…</span></header>
+          <div class="metrics" id="status-metrics" aria-live="polite"><p class="loading">Статус загружается…</p></div>
+          <div class="layout-two">
+            <article class="panel"><div class="panel-head"><h2>Подключённые репозитории</h2><span class="panel-meta">provider / cursor</span></div><div class="table-wrap" id="repositories-table"><p class="loading">Репозитории загружаются…</p></div></article>
+            <article class="panel"><div class="panel-head"><h2>Очередь и rate limit</h2><span class="panel-meta">текущий snapshot</span></div><div class="panel-body" id="queue-panel"><p class="loading">Очередь загружается…</p></div></article>
+          </div>
+          <div class="layout-two section-gap">
+            <article class="panel"><div class="panel-head"><h2>Ожидают внешнего действия</h2><span class="panel-meta">human gate / provider wait</span></div><div class="panel-body" id="waiting-panel"><p class="loading">Наблюдения загружаются…</p></div></article>
+            <article class="panel"><div class="panel-head"><h2>Ошибки</h2><span class="panel-meta">bounded runtime errors</span></div><div class="panel-body" id="errors-panel"><p class="loading">Ошибки загружаются…</p></div></article>
+          </div>
+          <article class="panel section-gap">
+            <div class="panel-head journal-head"><div><h2>Журнал наблюдений</h2><span class="panel-meta">session join by flowInstanceId</span></div><label class="search"><span class="sr-only">Поиск по provider, репозиторию или тикету</span><input class="input" id="journal-search" type="search" placeholder="provider / repository / ticket"></label></div>
+            <div class="event-log" id="journal"><p class="loading">Журнал загружается…</p></div>
+          </article>
+          <article class="panel section-gap"><div class="panel-head"><h2>Блокировки выполнения</h2><span class="panel-meta">per-ticket lock</span></div><div class="panel-body" id="locks-panel"><p class="loading">Блокировки загружаются…</p></div></article>
+        </section>
+
+        <section class="screen" role="tabpanel" data-screen="configuration" hidden>
+          <header class="screen-head"><div><h1>Конфигурация</h1><p>Effective RuntimeConfig и pinned Stack, Flow и AgentCatalog. Только чтение.</p></div><button class="button" type="button" data-open-view="draft">Подготовить изменение</button></header>
+          <div class="source-block" id="configuration-source"><p class="loading">Источник конфигурации загружается…</p></div>
+          <div class="config-grid" id="configuration-grid"><p class="loading">Конфигурация загружается…</p></div>
+          <article class="panel section-gap"><div class="panel-head"><h2>Provider и preflight</h2><span class="panel-meta">без secret paths</span></div><div class="resource-grid panel-body" id="resources"><p class="loading">Preflight загружается…</p></div></article>
+          <article class="panel section-gap"><div class="panel-head"><h2>Каталог агентов</h2><span class="panel-meta">catalog + execution bindings</span></div><div id="agents"><p class="loading">Агенты загружаются…</p></div></article>
+        </section>
+
+        <section class="screen" role="tabpanel" data-screen="flow" hidden>
+          <header class="screen-head"><div><h1>Граф переходов</h1><p>Все state и transitions из pinned Flow. Выберите state для подробностей.</p></div><span class="tag" id="flow-revision">Загрузка…</span></header>
+          <div class="graph-layout">
+            <article class="panel graph-panel"><div class="graph-toolbar"><span>agent / human gate / provider wait / paused / final</span><span class="panel-meta">Enter или Space выбирает state</span></div><div class="graph-scroll"><svg class="flow-svg" id="flow-graph" viewBox="0 0 1080 640" role="img" aria-labelledby="flow-graph-title"><title id="flow-graph-title">Граф состояний Agent Flow</title></svg></div></article>
+            <aside class="panel node-inspector"><div class="panel-head"><h2>State</h2><span class="tag" id="node-kind">Загрузка…</span></div><div class="panel-body" id="node-inspector"><p class="loading">State загружается…</p></div></aside>
+          </div>
+        </section>
+
+        <section class="screen" role="tabpanel" data-screen="draft" hidden>
+          <header class="screen-head"><div><h1>Подготовить изменение</h1><p>Мастер создаёт YAML для одного числового поля RuntimeConfig и ничего не записывает.</p></div></header>
+          <div class="notice"><strong>Target: <code>/etc/agent-flow/runtime.yaml</code></strong><span>Скопируйте YAML в отдельную ветку и примените через обычный review-процесс.</span></div>
+          <article class="panel wizard">
+            <aside class="wizard-steps" aria-label="Шаги мастера"><div class="wizard-step active" data-step-label="1"><b>1</b>Параметр</div><div class="wizard-step" data-step-label="2"><b>2</b>Проверка</div><div class="wizard-step" data-step-label="3"><b>3</b>YAML</div></aside>
+            <form class="wizard-content" id="config-wizard">
+              <div class="wizard-pane" data-step="1"><h2>Что изменить</h2><div class="form-grid">
+                <label class="field">Группа<select class="select" id="draft-group"><option value="polling">Polling</option><option value="runtime">Runtime</option><option value="agent">Агент</option></select></label>
+                <label class="field">Параметр<select class="select" id="draft-field"></select></label>
+                <label class="field" id="agent-field" hidden>Агент<select class="select" id="draft-agent"></select></label>
+                <label class="field">Новое значение<input class="input" id="draft-value" type="number" required><span class="field-help" id="draft-bounds"></span></label>
+              </div><p class="form-error" id="draft-error" role="alert"></p></div>
+              <div class="wizard-pane" data-step="2" hidden><h2>Проверка изменения</h2><dl class="change-summary" id="change-summary"></dl></div>
+              <div class="wizard-pane" data-step="3" hidden><h2>Готовый YAML</h2><label class="sr-only" for="yaml-output">YAML</label><textarea class="textarea" id="yaml-output" readonly spellcheck="false"></textarea><div class="copy-status" id="copy-status" role="status"></div></div>
+              <div class="wizard-actions"><button class="button" id="wizard-back" type="button" hidden>Назад</button><button class="button primary" id="wizard-next" type="button">Продолжить</button><button class="button primary" id="wizard-copy" type="button" hidden>Скопировать YAML</button></div>
+            </form>
+          </article>
+        </section>
+      </main>
+    </div>
   </body>
 </html>
