@@ -43,19 +43,17 @@ test("persists refresh settings and exposes safe diagnostic readers", () => {
   assert.match(script, /agent-flow-auto-refresh/);
   assert.match(script, /agent-flow-refresh-interval/);
   assert.match(script, /flowInstanceId/);
-  assert.match(script, /encodeURIComponent/);
-  assert.match(script, /harness\.log/);
-  assert.match(script, /decision\.json/);
-  assert.match(script, /context\.json/);
-  assert.match(`${html}\n${script}`, /Events/);
-  assert.match(script, /The event stream is not stored/);
+  assert.doesNotMatch(script, /\/api\/sessions/);
+  assert.doesNotMatch(script, /harness\.log/);
+  assert.doesNotMatch(script, /decision\.json|context\.json/);
+  assert.match(script, /Session content is available only on the controller filesystem/);
   assert.match(script, /textContent/);
   assert.doesNotMatch(script, /innerHTML/);
 });
 
 test("uses exact observation, lock, and bounded session evidence", () => {
   const lockRenderer = script.slice(script.indexOf("function renderLocks"), script.indexOf("function renderConfiguration"));
-  const missingSession = script.slice(script.indexOf("function sessionMissingMessage"), script.indexOf("async function renderSessionTab"));
+  const missingSession = script.slice(script.indexOf("function sessionMissingMessage"), script.indexOf("function filterJournal"));
   assert.match(lockRenderer, /controller\.locks/);
   assert.doesNotMatch(lockRenderer, /activeWork/);
   assert.match(script, /ticket\.stateKind/);
@@ -95,11 +93,6 @@ test("exposes interactive graph nodes, tabs, and refresh controls accessibly", (
   assert.match(script, /End/);
   assert.match(script, /destination\.focus\(\)/);
   assert.doesNotMatch(html, /<svg[^>]+role="img"/);
-  assert.match(script, /button\.setAttribute\("role", "tab"\)/);
-  assert.match(script, /aria-controls/);
-  assert.match(script, /button\.tabIndex = key === "events" \? 0 : -1/);
-  assert.match(script, /content\.setAttribute\("role", "tabpanel"\)/);
-  assert.match(script, /content\.setAttribute\("aria-labelledby"/);
   assert.match(css, /\.auto-refresh label \{[^}]*min-height:\s*44px/);
   assert.match(css, /\.refresh-interval \{[^}]*min-height:\s*44px/);
 });

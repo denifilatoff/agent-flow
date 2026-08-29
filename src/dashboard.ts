@@ -1,33 +1,22 @@
-import { constants } from "node:fs";
-import { lstat, open, opendir, realpath } from "node:fs/promises";
-import type { FileHandle } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstat, opendir, realpath } from "node:fs/promises";
+import type { Dir, Dirent } from "node:fs";
+import { join, resolve } from "node:path";
 
 import type { RuntimeManager } from "./config/runtime.ts";
 import type { ReadyDependencies } from "./preflight.ts";
-import { assertCanonicalUuid, assertSafeDirectory, assertSafeFile } from "./runtime/filesystem.ts";
+import { assertCanonicalUuid, assertSafeDirectory } from "./runtime/filesystem.ts";
 
 const SESSION_LIMIT = 100;
-const FILE_LIMIT = 1_048_576;
-const SESSION_FILES = ["context.json", "decision.json"] as const;
-type SessionFile = typeof SESSION_FILES[number];
-type SessionFileOpener = (path: string, flags: number) => Promise<FileHandle>;
-export type DescriptorPathResolver = (fd: number, expectedPath: string) => Promise<string>;
-
+const SESSION_SCAN_LIMIT = SESSION_LIMIT + 1;
 export interface DashboardSession {
   flowUuid: string;
   attemptUuid: string;
   modifiedAt: string;
-  files: SessionFile[];
 }
 
 export type SessionDiscovery =
   | { available: true; entries: DashboardSession[]; truncated: boolean }
   | { available: false; entries: []; reason: "sessions unavailable" };
-
-export type SessionFileResult =
-  | { status: 200; body: { available: true; content: string; truncated: boolean } }
-  | { status: 400 | 404; body: { available: false; reason: "invalid session path" | "session file unavailable" } };
 
 export async function createDashboardSnapshot(runtime: RuntimeManager, ready: ReadyDependencies) {
   const effective = runtime.effective();
@@ -83,40 +72,43 @@ export async function discoverSessions(dataDirectory: string): Promise<SessionDi
     return { available: false, entries: [], reason: "sessions unavailable" };
   }
   const entries: DashboardSession[] = [];
-  let truncated = false;
-  flowScan: for await (const flow of flows) {
-    if (!flow.isDirectory() || !isCanonicalUuid(flow.name)) continue;
-    let flowRoot: string;
-    try {
-      flowRoot = await assertSafeDirectory(sessions, join(sessions, flow.name), "flow session directory");
-    } catch {
-      continue;
-    }
-    let attempts;
-    try {
-      attempts = await opendir(flowRoot);
-    } catch {
-      continue;
-    }
-    for await (const attempt of attempts) {
-      if (!attempt.isDirectory() || !isCanonicalUuid(attempt.name)) continue;
+  const scan = { remaining: SESSION_SCAN_LIMIT, truncated: false };
+  try {
+    let flow: Dirent | null;
+    while ((flow = await nextSessionDirent(flows, scan)) !== null) {
+      if (!flow.isDirectory() || !isCanonicalUuid(flow.name)) continue;
+      let flowRoot: string;
       try {
-        const root = await assertSafeDirectory(sessions, join(flowRoot, attempt.name), "attempt session directory");
-        if (entries.length === SESSION_LIMIT) {
-          truncated = true;
-          break flowScan;
-        }
-        const metadata = await lstat(root);
-        const files: SessionFile[] = [];
-        for (const file of SESSION_FILES) {
-          const info = await lstat(join(root, file)).catch(() => null);
-          if (info?.isFile() && !info.isSymbolicLink()) files.push(file);
-        }
-        entries.push({ flowUuid: flow.name, attemptUuid: attempt.name, modifiedAt: metadata.mtime.toISOString(), files });
+        flowRoot = await assertSafeDirectory(sessions, join(sessions, flow.name), "flow session directory");
       } catch {
-        // A concurrent removal or unsafe entry makes only that diagnostic session unavailable.
+        continue;
+      }
+      let attempts: Dir;
+      try {
+        attempts = await opendir(flowRoot);
+      } catch {
+        continue;
+      }
+      try {
+        let attempt: Dirent | null;
+        while ((attempt = await nextSessionDirent(attempts, scan)) !== null) {
+          if (!attempt.isDirectory() || !isCanonicalUuid(attempt.name)) continue;
+          try {
+            const root = await assertSafeDirectory(sessions, join(flowRoot, attempt.name), "attempt session directory");
+            const metadata = await lstat(root);
+            entries.push({ flowUuid: flow.name, attemptUuid: attempt.name, modifiedAt: metadata.mtime.toISOString() });
+          } catch {
+            // A concurrent removal or unsafe entry makes only that diagnostic session unavailable.
+          }
+        }
+      } finally {
+        await attempts.close().catch(() => undefined);
       }
     }
+  } catch {
+    return { available: false, entries: [], reason: "sessions unavailable" };
+  } finally {
+    await flows.close().catch(() => undefined);
   }
   entries.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt)
     || right.flowUuid.localeCompare(left.flowUuid)
@@ -124,61 +116,17 @@ export async function discoverSessions(dataDirectory: string): Promise<SessionDi
   return {
     available: true,
     entries,
-    truncated,
+    truncated: scan.truncated,
   };
 }
 
-export async function readDashboardSessionFile(
-  dataDirectory: string,
-  flowUuid: string,
-  attemptUuid: string,
-  file: string,
-  openFile: SessionFileOpener = (path, flags) => open(path, flags),
-  resolveDescriptorPath: DescriptorPathResolver = resolveLinuxDescriptorPath,
-): Promise<SessionFileResult> {
-  try {
-    assertCanonicalUuid(flowUuid, "flow UUID");
-    assertCanonicalUuid(attemptUuid, "attempt UUID");
-  } catch {
-    return { status: 400, body: { available: false, reason: "invalid session path" } };
-  }
-  if (!SESSION_FILES.includes(file as SessionFile)) {
-    return { status: 400, body: { available: false, reason: "invalid session path" } };
-  }
-
-  let handle;
-  try {
-    const sessions = await sessionsRoot(dataDirectory);
-    const flowRoot = await assertSafeDirectory(sessions, join(sessions, flowUuid), "flow session directory");
-    const attemptRoot = await assertSafeDirectory(sessions, join(flowRoot, attemptUuid), "attempt session directory");
-    const candidate = await assertSafeFile(sessions, join(attemptRoot, file), "session file");
-    handle = await openFile(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const metadata = await handle.stat();
-    if (!metadata.isFile()) throw new Error("session file is not regular");
-    const descriptorPath = await resolveDescriptorPath(handle.fd, candidate);
-    if (!isContained(sessions, descriptorPath) || descriptorPath !== candidate) {
-      throw new Error("session descriptor does not match the requested file");
-    }
-    const buffer = Buffer.alloc(FILE_LIMIT + 1);
-    let length = 0;
-    while (length < buffer.length) {
-      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
-      if (bytesRead === 0) break;
-      length += bytesRead;
-    }
-    return {
-      status: 200,
-      body: {
-        available: true,
-        content: buffer.subarray(0, Math.min(length, FILE_LIMIT)).toString("utf8"),
-        truncated: length > FILE_LIMIT || metadata.size > FILE_LIMIT,
-      },
-    };
-  } catch {
-    return { status: 404, body: { available: false, reason: "session file unavailable" } };
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
+async function nextSessionDirent(directory: Dir, scan: { remaining: number; truncated: boolean }): Promise<Dirent | null> {
+  if (scan.remaining === 0) return null;
+  const entry = await directory.read();
+  if (entry === null) return null;
+  scan.remaining -= 1;
+  if (scan.remaining === 0) scan.truncated = true;
+  return entry;
 }
 
 async function sessionsRoot(dataDirectory: string): Promise<string> {
@@ -196,14 +144,4 @@ function isCanonicalUuid(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-function isContained(root: string, path: string): boolean {
-  const remainder = relative(root, path);
-  return remainder === "" || (remainder !== ".." && !remainder.startsWith(`..${sep}`) && !isAbsolute(remainder));
-}
-
-async function resolveLinuxDescriptorPath(fd: number): Promise<string> {
-  if (process.platform !== "linux") throw new Error("session descriptor paths are unavailable");
-  return realpath(`/proc/self/fd/${fd}`);
 }

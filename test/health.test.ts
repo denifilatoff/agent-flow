@@ -21,7 +21,7 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   const initial = (await readFile("config/runtime.example.yaml", "utf8")).replace("/var/lib/agent-flow", root);
   await writeFile(path, initial);
   const runtime = await RuntimeManager.create(path);
-  const status = createOperationalStatus(runtime, async (_fd, expectedPath) => expectedPath);
+  const status = createOperationalStatus(runtime);
   const server = createHealthServer("127.0.0.1", 0, status);
   await new Promise<void>((resolve) => server.once("listening", resolve));
   t.after(async () => {
@@ -58,7 +58,7 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   assert.equal(unavailable.status, 503);
   assert.equal(unavailable.headers.get("cache-control"), "no-store");
   assert.deepEqual(await unavailable.json(), { available: false, reason: "preflight unavailable" });
-  assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/context.json`))).status, 503);
+  assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/context.json`))).status, 404);
 
   const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", "a".repeat(40));
   const controller: Controller = {
@@ -72,23 +72,21 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
       configurationRevision: bundle.revision },
   } satisfies ReadyDependencies);
   await mkdir(join(root, "sessions", FLOW, ATTEMPT), { recursive: true });
-  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "context.json"), "session context\n");
+  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "context.json"), "provider-token=secret\n");
   status.markReady();
   assert.equal((await fetch(url("/health/ready"))).status, 200);
   const dashboard = await fetch(url("/api/dashboard"));
   assert.equal(dashboard.status, 200);
   assert.equal(dashboard.headers.get("cache-control"), "no-store");
-  assert.equal((await dashboard.json() as { available: boolean }).available, true);
-  const session = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/context.json`));
-  assert.equal(session.status, 200);
-  assert.equal(session.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await session.json(), { available: true, content: "session context\n", truncated: false });
-  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "harness.log"), "provider-token=secret\n");
-  const rawLog = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/harness.log`));
-  const rawLogBody = await rawLog.text();
-  assert.equal(rawLog.status, 400);
-  assert.equal(rawLogBody.includes("provider-token=secret"), false);
-  assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/other.txt`))).status, 400);
+  const dashboardBody = await dashboard.text();
+  assert.equal((JSON.parse(dashboardBody) as { available: boolean }).available, true);
+  assert.equal(dashboardBody.includes("provider-token=secret"), false);
+  for (const file of ["context.json", "decision.json", "harness.log", "other.txt"]) {
+    const session = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/${file}`));
+    assert.equal(session.status, 404);
+    assert.equal(session.headers.get("cache-control"), "no-store");
+    assert.equal((await session.text()).includes("provider-token=secret"), false);
+  }
 
   await writeFile(path, initial.replace("port: 8080", "port: 8081"));
   await runtime.reload();

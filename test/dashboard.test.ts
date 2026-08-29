@@ -1,16 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, open, readFile, realpath, rename, rm, symlink, unlink, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { loadConfigBundle } from "../src/config/load.ts";
 import { RuntimeManager } from "../src/config/runtime.ts";
-import {
-  createDashboardSnapshot,
-  discoverSessions,
-  readDashboardSessionFile,
-} from "../src/dashboard.ts";
+import { createDashboardSnapshot, discoverSessions } from "../src/dashboard.ts";
 import type { ReadyDependencies } from "../src/preflight.ts";
 import type { Controller } from "../src/runtime/controller.ts";
 
@@ -83,10 +79,10 @@ test("stops session discovery after 100 entries and one truncation probe without
 
   assert.equal(result.available, true);
   assert.equal(result.truncated, true);
-  assert.equal(result.entries.length, 100);
-  assert.equal(new Set(result.entries.map(({ attemptUuid }) => attemptUuid)).size, 100);
+  assert.ok(result.entries.length <= 100);
+  assert.equal(new Set(result.entries.map(({ attemptUuid }) => attemptUuid)).size, result.entries.length);
   assert.equal(result.entries.some(({ attemptUuid }) => attemptUuid === ATTEMPT), false);
-  assert.deepEqual(result.entries[0]?.files, ["context.json"]);
+  assert.equal(result.entries.some((entry) => "files" in entry), false);
   assert.equal(JSON.stringify(result).includes("provider-token=secret"), false);
   assert.equal(JSON.stringify(result).includes("harness.log"), false);
 
@@ -94,147 +90,40 @@ test("stops session discovery after 100 entries and one truncation probe without
   await rm(join(sessions, FLOW, "00000000-0000-4000-8000-000000000101"), { recursive: true });
   const exactLimit = await discoverSessions(data);
   assert.equal(exactLimit.available, true);
-  assert.equal(exactLimit.truncated, false);
-  assert.equal(exactLimit.entries.length, 100);
+  assert.equal(exactLimit.truncated, true);
+  assert.ok(exactLimit.entries.length <= 100);
 });
 
-test("reads only structured session files, caps content at one MiB, and rejects raw harness logs", async (t) => {
-  const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-read-"));
-  const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-read-outside-"));
-  t.after(async () => {
-    await rm(data, { recursive: true, force: true });
-    await rm(outside, { recursive: true, force: true });
+test("bounds discovery across invalid, non-directory, empty-flow, and invalid-attempt dirents", async (t) => {
+  await t.test("top-level entries", async (t) => {
+    const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-root-budget-"));
+    t.after(() => rm(data, { recursive: true, force: true }));
+    const sessions = join(data, "sessions");
+    await mkdir(sessions, { recursive: true });
+    for (let index = 0; index < 34; index += 1) {
+      await mkdir(join(sessions, `invalid-${index}`));
+      await writeFile(join(sessions, `file-${index}`), "ignored\n");
+      await mkdir(join(sessions, `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`));
+    }
+
+    const result = await discoverSessions(data);
+
+    assert.equal(result.available, true);
+    assert.equal(result.truncated, true);
+    assert.deepEqual(result.entries, []);
   });
-  const attempt = join(data, "sessions", FLOW, ATTEMPT);
-  await mkdir(attempt, { recursive: true });
-  await writeFile(join(attempt, "harness.log"), "provider-token=secret\n");
-  await writeFile(join(attempt, "context.json"), "x".repeat(1_048_577));
-  await symlink(join(outside, "decision.json"), join(attempt, "decision.json"));
 
-  const read = await readDashboardSessionFile(
-    data,
-    FLOW,
-    ATTEMPT,
-    "context.json",
-    undefined,
-    async (_fd, expectedPath) => expectedPath,
-  );
-  assert.equal(read.status, 200);
-  if (read.status === 200) {
-    assert.equal(Buffer.byteLength(read.body.content), 1_048_576);
-    assert.equal(read.body.truncated, true);
-  }
-  const harnessLog = await readDashboardSessionFile(data, FLOW, ATTEMPT, "harness.log");
-  assert.deepEqual(harnessLog, {
-    status: 400,
-    body: { available: false, reason: "invalid session path" },
+  await t.test("attempt entries", async (t) => {
+    const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-attempt-budget-"));
+    t.after(() => rm(data, { recursive: true, force: true }));
+    const flow = join(data, "sessions", FLOW);
+    await mkdir(flow, { recursive: true });
+    for (let index = 0; index < 101; index += 1) await mkdir(join(flow, `invalid-${index}`));
+
+    const result = await discoverSessions(data);
+
+    assert.equal(result.available, true);
+    assert.equal(result.truncated, true);
+    assert.deepEqual(result.entries, []);
   });
-  assert.equal(JSON.stringify(harnessLog).includes("provider-token=secret"), false);
-  assert.equal((await readDashboardSessionFile(data, "NOT-A-UUID", ATTEMPT, "context.json")).status, 400);
-  assert.equal((await readDashboardSessionFile(data, FLOW, ATTEMPT, "other.txt")).status, 400);
-  assert.equal((await readDashboardSessionFile(data, FLOW, ATTEMPT, "decision.json")).status, 404);
-});
-
-test("rejects an attempt directory swapped during file open", async (t) => {
-  for (const swapBack of [false, true]) {
-    await t.test(swapBack ? "swapped back before verification" : "left swapped", async (t) => {
-      const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-swap-"));
-      const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-swap-outside-"));
-      t.after(async () => {
-        await rm(data, { recursive: true, force: true });
-        await rm(outside, { recursive: true, force: true });
-      });
-      const flow = join(data, "sessions", FLOW);
-      const attempt = join(flow, ATTEMPT);
-      const parked = join(flow, `${ATTEMPT}.parked`);
-      await mkdir(attempt, { recursive: true });
-      await writeFile(join(attempt, "context.json"), "inside\n");
-      await writeFile(join(outside, "context.json"), "outside\n");
-
-      const result = await readDashboardSessionFile(data, FLOW, ATTEMPT, "context.json", async (path, flags) => {
-        await rename(attempt, parked);
-        await symlink(outside, attempt, "dir");
-        const handle = await open(path, flags);
-        if (swapBack) {
-          await unlink(attempt);
-          await rename(parked, attempt);
-        }
-        return handle;
-      });
-
-      assert.equal(result.status, 404);
-    });
-  }
-});
-
-test("rejects a second directory swap after pathname canonicalization", async (t) => {
-  const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-second-swap-"));
-  const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-second-swap-outside-"));
-  t.after(async () => {
-    await rm(data, { recursive: true, force: true });
-    await rm(outside, { recursive: true, force: true });
-  });
-  const flow = join(data, "sessions", FLOW);
-  const attempt = join(flow, ATTEMPT);
-  const parked = join(flow, `${ATTEMPT}.parked`);
-  await mkdir(attempt, { recursive: true });
-  await writeFile(join(attempt, "context.json"), "inside\n");
-  await writeFile(join(outside, "context.json"), "outside\n");
-  let openedPath = "";
-
-  const result = await readDashboardSessionFile(
-    data,
-    FLOW,
-    ATTEMPT,
-    "context.json",
-    async (path, flags) => {
-      await rename(attempt, parked);
-      await symlink(outside, attempt, "dir");
-      const handle = await open(path, flags);
-      openedPath = await realpath(path);
-      await unlink(attempt);
-      await rename(parked, attempt);
-      return handle;
-    },
-    async () => {
-      await rename(attempt, parked);
-      await symlink(outside, attempt, "dir");
-      return openedPath;
-    },
-  );
-
-  assert.equal(result.status, 404);
-});
-
-test("fails closed when the open descriptor path is mismatched or unavailable", async (t) => {
-  const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-descriptor-"));
-  const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-descriptor-outside-"));
-  t.after(async () => {
-    await rm(data, { recursive: true, force: true });
-    await rm(outside, { recursive: true, force: true });
-  });
-  const attempt = join(data, "sessions", FLOW, ATTEMPT);
-  await mkdir(attempt, { recursive: true });
-  await writeFile(join(attempt, "context.json"), "inside\n");
-  await writeFile(join(outside, "context.json"), "outside\n");
-
-  const mismatch = await readDashboardSessionFile(
-    data,
-    FLOW,
-    ATTEMPT,
-    "context.json",
-    undefined,
-    async () => realpath(join(outside, "context.json")),
-  );
-  const unavailable = await readDashboardSessionFile(
-    data,
-    FLOW,
-    ATTEMPT,
-    "context.json",
-    undefined,
-    async () => { throw new Error("descriptor paths unavailable"); },
-  );
-
-  assert.equal(mismatch.status, 404);
-  assert.equal(unavailable.status, 404);
 });

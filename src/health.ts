@@ -2,12 +2,7 @@ import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 
 import type { RuntimeManager } from "./config/runtime.ts";
-import {
-  createDashboardSnapshot,
-  readDashboardSessionFile,
-  type DescriptorPathResolver,
-  type SessionFileResult,
-} from "./dashboard.ts";
+import { createDashboardSnapshot } from "./dashboard.ts";
 import type { ReadyDependencies } from "./preflight.ts";
 
 export interface OperationalStatus {
@@ -16,7 +11,6 @@ export interface OperationalStatus {
   markNotReady(): void;
   bindReady(ready: ReadyDependencies): void;
   dashboard(): ReturnType<typeof createDashboardSnapshot> | Promise<null>;
-  sessionFile(flowUuid: string, attemptUuid: string, file: string): Promise<SessionFileResult | null>;
   snapshot(): {
     configurationRepository: string;
     configurationRevision: string;
@@ -30,10 +24,7 @@ export interface OperationalStatus {
   };
 }
 
-export function createOperationalStatus(
-  runtime: RuntimeManager,
-  resolveDescriptorPath?: DescriptorPathResolver,
-): OperationalStatus {
+export function createOperationalStatus(runtime: RuntimeManager): OperationalStatus {
   let startupReady = false;
   let ready: ReadyDependencies | undefined;
   return {
@@ -42,16 +33,6 @@ export function createOperationalStatus(
     markNotReady: () => { startupReady = false; },
     bindReady: (value) => { ready = value; },
     dashboard: () => ready ? createDashboardSnapshot(runtime, ready) : Promise.resolve(null),
-    sessionFile: (flowUuid, attemptUuid, file) => ready
-      ? readDashboardSessionFile(
-        runtime.effective().runtime.dataDirectory,
-        flowUuid,
-        attemptUuid,
-        file,
-        undefined,
-        resolveDescriptorPath,
-      )
-      : Promise.resolve(null),
     snapshot: () => {
       const configuration = runtime.effective().configuration;
       return {
@@ -108,19 +89,6 @@ export function createHealthServer(address: string, port: number, status: Operat
       }
       return;
     }
-    const session = sessionPath(pathname);
-    if (session) {
-      const result = await status.sessionFile(session.flowUuid, session.attemptUuid, session.file).catch(() => ({
-        status: 404 as const,
-        body: { available: false as const, reason: "session file unavailable" as const },
-      }));
-      writeSessionJson(
-        response,
-        result?.status ?? 503,
-        result?.body ?? { available: false, reason: "preflight unavailable" },
-      );
-      return;
-    }
     const code = pathname === "/health/live"
       ? 200
       : pathname === "/health/ready"
@@ -139,16 +107,6 @@ function staticAsset(pathname: string): { file: string; contentType: string } | 
   }[pathname];
 }
 
-function sessionPath(pathname: string): { flowUuid: string; attemptUuid: string; file: string } | null {
-  const parts = pathname.split("/");
-  if (parts.length !== 6 || parts[1] !== "api" || parts[2] !== "sessions") return null;
-  try {
-    return { flowUuid: decodeURIComponent(parts[3]!), attemptUuid: decodeURIComponent(parts[4]!), file: decodeURIComponent(parts[5]!) };
-  } catch {
-    return { flowUuid: "", attemptUuid: "", file: "" };
-  }
-}
-
 function writeJson(response: import("node:http").ServerResponse, status: number, body: unknown): void {
   writeJsonPayload(response, status, `${JSON.stringify(body)}\n`);
 }
@@ -165,23 +123,6 @@ function writeText(
     "content-type": "text/plain; charset=utf-8",
   });
   response.end(`${status}\n`);
-}
-
-function writeSessionJson(response: import("node:http").ServerResponse, status: number, body: unknown): void {
-  let payload = `${JSON.stringify(body)}\n`;
-  const file = body as { available?: boolean; content?: string; truncated?: boolean };
-  if (status === 200 && typeof file.content === "string" && Buffer.byteLength(payload) > 1_048_576) {
-    let lower = 0;
-    let upper = file.content.length;
-    while (lower < upper) {
-      const middle = Math.ceil((lower + upper) / 2);
-      const candidate = `${JSON.stringify({ ...file, content: file.content.slice(0, middle), truncated: true })}\n`;
-      if (Buffer.byteLength(candidate) <= 1_048_576) lower = middle;
-      else upper = middle - 1;
-    }
-    payload = `${JSON.stringify({ ...file, content: file.content.slice(0, lower), truncated: true })}\n`;
-  }
-  writeJsonPayload(response, status, payload);
 }
 
 function writeJsonPayload(response: import("node:http").ServerResponse, status: number, payload: string): void {
