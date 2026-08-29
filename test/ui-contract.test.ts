@@ -45,12 +45,14 @@ test("persists refresh settings and exposes safe diagnostic readers", () => {
   assert.match(script, /agent-flow-auto-refresh/);
   assert.match(script, /agent-flow-refresh-interval/);
   assert.match(script, /flowInstanceId/);
-  assert.doesNotMatch(script, /\/api\/sessions/);
-  assert.doesNotMatch(script, /harness\.log/);
-  assert.doesNotMatch(script, /decision\.json|context\.json/);
-  assert.match(script, /Session content is available only on the controller filesystem/);
+  assert.match(script, /\/api\/sessions/);
+  for (const label of ["Events", "harness.log", "decision.json", "context.json"]) assert.match(script, new RegExp(label.replace(".", "\\.")));
+  assert.match(script, /event stream is not stored.*unavailable/i);
+  assert.match(script, /file not present in the session snapshot/);
   assert.match(script, /textContent/);
   assert.doesNotMatch(script, /innerHTML/);
+  assert.match(script, /journal-search/);
+  assert.match(script, /filterJournal/);
 });
 
 test("uses exact observation, lock, and bounded session evidence", () => {
@@ -97,6 +99,13 @@ test("exposes interactive graph nodes, tabs, and refresh controls accessibly", (
   assert.doesNotMatch(html, /<svg[^>]+role="img"/);
   assert.match(css, /\.auto-refresh label \{[^}]*min-height:\s*44px/);
   assert.match(css, /\.refresh-interval \{[^}]*min-height:\s*44px/);
+  assert.match(script, /role", "tablist"/);
+  assert.match(script, /role", "tab"/);
+  assert.match(script, /role", "tabpanel"/);
+  assert.match(script, /aria-controls/);
+  assert.match(script, /aria-labelledby/);
+  assert.match(script, /ArrowRight/);
+  assert.match(script, /ArrowLeft/);
 });
 
 test("labels the RuntimeConfig output path in English", () => {

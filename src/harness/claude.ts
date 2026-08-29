@@ -28,11 +28,15 @@ export interface ClaudeAuthSources {
 export function createClaudeAdapter(
   auth: ClaudeAuthSources,
   dependencyOverrides: Partial<ProcessDependencies> = {},
+  registerCredential: (value: Buffer) => void = () => undefined,
 ): HarnessAdapter {
   const dependencies = processDependencies(dependencyOverrides);
   let credentialsFile: Promise<Buffer> | undefined;
   let settingsFile: Promise<Buffer> | undefined;
-  const loadCredentials = () => credentialsFile ??= readRegularFile(auth.credentialsFile, "Claude authentication file");
+  const loadCredentials = () => credentialsFile ??= readRegularFile(auth.credentialsFile, "Claude authentication file").then((value) => {
+    registerCredential(value);
+    return value;
+  });
   const loadSettings = () => auth.settingsFile
     ? settingsFile ??= readFile(auth.settingsFile)
     : undefined;

@@ -51,6 +51,8 @@ test("reads the mounted provider secret once and exposes only the fixed public G
   assert.equal((await production.providerEnvironment()).GH_TOKEN, "mounted-provider-token");
   assert.deepEqual(Object.keys(environment).sort(), ["GH_TOKEN", "PATH"]);
   assert.equal(JSON.stringify(production.runtime.status()).includes("mounted-provider-token"), false);
+  assert.equal(production.redactSessionContent("mounted-provider-token"), "[REDACTED]");
+  assert.equal(production.redactSessionContent("replacement-token"), "replacement-token");
 });
 
 test("uses the fixed enterprise GitHub environment without leaking ambient credentials", async (t) => {

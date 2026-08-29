@@ -36,6 +36,7 @@ import type { CompiledAgent } from "../../src/harness/apm.ts";
 import type { HarnessRunInput } from "../../src/harness/types.ts";
 import type { AttemptSession } from "../../src/runtime/sessions.ts";
 import type { Workspace } from "../../src/runtime/workspaces.ts";
+import { createStartupRedactor } from "../../src/redaction.ts";
 
 interface SpawnCall {
   file: string;
@@ -768,6 +769,31 @@ test("stages the startup snapshot after a mounted harness credential is replaced
 
     assert.equal(stagedCredential, startupCredential, target);
     assert.equal(stagedMode, 0o600, target);
+  }
+});
+
+test("registers the exact cached harness credential once at first load", async (t) => {
+  for (const target of ["codex", "claude"] as const) {
+    const fixture = await runFixture(target);
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const processes = processFixture();
+    const redactor = createStartupRedactor();
+    const startup = Buffer.from(`{"token":"${target}-startup-secret"}\n`);
+    const replacement = `{"token":"${target}-replacement-secret"}\n`;
+    await writeFile(fixture.authFile, startup, { mode: 0o600 });
+    const adapter = target === "codex"
+      ? createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies, redactor.register)
+      : createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies, redactor.register);
+
+    await adapter.preflight();
+    await writeFile(fixture.authFile, replacement, { mode: 0o600 });
+    const pending = adapter.run(fixture.input);
+    await waitForSpawn(processes.calls);
+    processes.children[0]!.finish(0, null);
+    await pending;
+
+    assert.equal(redactor.redact(startup.toString()), "[REDACTED]", target);
+    assert.equal(redactor.redact(replacement), replacement, target);
   }
 });
 

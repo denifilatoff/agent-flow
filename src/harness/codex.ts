@@ -25,11 +25,15 @@ export interface CodexAuthSources {
 export function createCodexAdapter(
   auth: CodexAuthSources,
   dependencyOverrides: Partial<ProcessDependencies> = {},
+  registerCredential: (value: Buffer) => void = () => undefined,
 ): HarnessAdapter {
   const dependencies = processDependencies(dependencyOverrides);
   let authFile: Promise<Buffer> | undefined;
   let configFile: Promise<Buffer> | undefined;
-  const loadAuth = () => authFile ??= readRegularFile(auth.authFile, "Codex authentication file");
+  const loadAuth = () => authFile ??= readRegularFile(auth.authFile, "Codex authentication file").then((value) => {
+    registerCredential(value);
+    return value;
+  });
   const loadConfig = () => auth.configFile
     ? configFile ??= readFile(auth.configFile)
     : undefined;

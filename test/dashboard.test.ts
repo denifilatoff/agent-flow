@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, open, readFile, realpath, rename, rm, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { loadConfigBundle } from "../src/config/load.ts";
 import { RuntimeManager } from "../src/config/runtime.ts";
-import { createDashboardSnapshot, discoverSessions } from "../src/dashboard.ts";
+import { createDashboardSnapshot, discoverSessions, readDashboardSessionFile } from "../src/dashboard.ts";
+import { createStartupRedactor } from "../src/redaction.ts";
 import type { ReadyDependencies } from "../src/preflight.ts";
 import type { Controller } from "../src/runtime/controller.ts";
 
@@ -37,6 +38,7 @@ test("projects the real runtime and pinned configuration without paths to secret
     preflight: {
       status: "ready", provider: "github", harnesses: ["claude", "codex"], configurationRevision: bundle.revision,
     },
+    redactSessionContent: (value: string) => value,
   } satisfies ReadyDependencies;
 
   const dashboard = await createDashboardSnapshot(runtime, ready);
@@ -54,7 +56,7 @@ test("projects the real runtime and pinned configuration without paths to secret
   }
 });
 
-test("stops session discovery after 100 entries and one truncation probe without advertising harness logs", async (t) => {
+test("stops session discovery after 100 entries and one truncation probe while advertising only safe files", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-sessions-"));
   const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-outside-"));
   t.after(async () => {
@@ -72,6 +74,11 @@ test("stops session discovery after 100 entries and one truncation probe without
     const timestamp = new Date(Date.UTC(2026, 7, 29, 0, 0, index));
     await utimes(directory, timestamp, timestamp);
   }
+  await writeFile(join(outside, "decision.json"), "{}\n");
+  await symlink(
+    join(outside, "decision.json"),
+    join(sessions, FLOW, "00000000-0000-4000-8000-000000000000", "decision.json"),
+  );
   await mkdir(join(sessions, "not-a-uuid"));
   await symlink(outside, join(sessions, FLOW, ATTEMPT), "dir");
 
@@ -82,9 +89,9 @@ test("stops session discovery after 100 entries and one truncation probe without
   assert.ok(result.entries.length <= 100);
   assert.equal(new Set(result.entries.map(({ attemptUuid }) => attemptUuid)).size, result.entries.length);
   assert.equal(result.entries.some(({ attemptUuid }) => attemptUuid === ATTEMPT), false);
-  assert.equal(result.entries.some((entry) => "files" in entry), false);
+  assert.deepEqual(result.entries[0]?.files, ["harness.log", "context.json"]);
+  assert.equal(result.entries.find(({ attemptUuid }) => attemptUuid.endsWith("000000000000"))?.files.includes("decision.json"), false);
   assert.equal(JSON.stringify(result).includes("provider-token=secret"), false);
-  assert.equal(JSON.stringify(result).includes("harness.log"), false);
 
   await rm(join(sessions, FLOW, "00000000-0000-4000-8000-000000000100"), { recursive: true });
   await rm(join(sessions, FLOW, "00000000-0000-4000-8000-000000000101"), { recursive: true });
@@ -92,6 +99,88 @@ test("stops session discovery after 100 entries and one truncation probe without
   assert.equal(exactLimit.available, true);
   assert.equal(exactLimit.truncated, true);
   assert.ok(exactLimit.entries.length <= 100);
+});
+
+test("reads and redacts only allowlisted session files with a one MiB bound", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-read-"));
+  const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-read-outside-"));
+  t.after(async () => {
+    await rm(data, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+  const attempt = join(data, "sessions", FLOW, ATTEMPT);
+  await mkdir(attempt, { recursive: true });
+  const secret = "provider-token+/=42";
+  const redactor = createStartupRedactor();
+  redactor.register(secret);
+  await writeFile(join(attempt, "harness.log"), [
+    secret,
+    encodeURIComponent(secret),
+    Buffer.from(secret).toString("base64"),
+    Buffer.from(secret).toString("hex"),
+  ].join("\n"));
+  await writeFile(join(attempt, "decision.json"), JSON.stringify({ event: "done", token: secret }));
+  await writeFile(join(attempt, "context.json"), JSON.stringify({ prompt: secret, filler: "x".repeat(1_048_577) }));
+  await writeFile(join(attempt, "other.txt"), secret);
+  await symlink(join(outside, "context.json"), join(attempt, "linked.json"));
+
+  for (const file of ["harness.log", "decision.json", "context.json"] as const) {
+    const result = await readDashboardSessionFile(
+      data,
+      FLOW,
+      ATTEMPT,
+      file,
+      redactor.redact,
+      undefined,
+      async (_fd, expectedPath) => expectedPath,
+    );
+    assert.equal(result.status, 200, file);
+    if (result.status !== 200) continue;
+    assert.equal(result.body.content.includes(secret), false, file);
+    assert.ok(Buffer.byteLength(result.body.content) <= 1_048_576, file);
+    if (file === "decision.json") assert.deepEqual(JSON.parse(result.body.content), { event: "done", token: "[REDACTED]" });
+    if (file === "context.json") assert.equal(result.body.truncated, true);
+  }
+  assert.equal((await readDashboardSessionFile(data, FLOW, ATTEMPT, "other.txt", redactor.redact)).status, 400);
+  assert.equal((await readDashboardSessionFile(data, "NOT-A-UUID", ATTEMPT, "context.json", redactor.redact)).status, 400);
+  assert.equal((await readDashboardSessionFile(data, FLOW, ATTEMPT, "%63ontext.json", redactor.redact)).status, 400);
+});
+
+test("fails closed for symlinks, descriptor mismatches, and unavailable descriptor verification", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-descriptor-"));
+  const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-descriptor-outside-"));
+  t.after(async () => {
+    await rm(data, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+  const flow = join(data, "sessions", FLOW);
+  const attempt = join(flow, ATTEMPT);
+  await mkdir(attempt, { recursive: true });
+  await writeFile(join(attempt, "context.json"), "{\"source\":\"inside\"}\n");
+  await writeFile(join(outside, "context.json"), "{\"source\":\"outside\"}\n");
+  await symlink(join(outside, "decision.json"), join(attempt, "decision.json"));
+  const redact = (value: string) => value;
+
+  assert.equal((await readDashboardSessionFile(data, FLOW, ATTEMPT, "decision.json", redact)).status, 404);
+  assert.equal((await readDashboardSessionFile(
+    data, FLOW, ATTEMPT, "context.json", redact, undefined,
+    async () => realpath(join(outside, "context.json")),
+  )).status, 404);
+  assert.equal((await readDashboardSessionFile(
+    data, FLOW, ATTEMPT, "context.json", redact, undefined,
+    async () => { throw new Error("/proc unavailable"); },
+  )).status, 404);
+
+  const parked = join(flow, `${ATTEMPT}.parked`);
+  const swapped = await readDashboardSessionFile(data, FLOW, ATTEMPT, "context.json", redact, async (path, flags) => {
+    await rename(attempt, parked);
+    await symlink(outside, attempt, "dir");
+    const handle = await open(path, flags);
+    await unlink(attempt);
+    await rename(parked, attempt);
+    return handle;
+  });
+  assert.equal(swapped.status, 404);
 });
 
 test("bounds discovery across invalid, non-directory, empty-flow, and invalid-attempt dirents", async (t) => {

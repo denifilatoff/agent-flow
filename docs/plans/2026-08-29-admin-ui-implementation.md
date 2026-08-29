@@ -3,12 +3,13 @@
 > **For agentic workers:** Use `superpowers:executing-plans` to implement this plan task by task.
 
 **Goal:** Replace the prototype dashboard with a production, read-only operator UI that uses the mounted runtime
-configuration, the exact pinned stack revision, controller observations, and bounded attempt-session metadata.
+configuration, the exact pinned stack revision, controller observations, and bounded redacted attempt-session files.
 
-**Architecture:** The existing Node HTTP server serves a small static application and one additive dashboard endpoint.
-The endpoint projects runtime and pinned Git configuration without secrets. The controller exposes an in-memory
-observation snapshot; it does not become an operational store. Agent-writable attempt files remain local and are not
-returned by the unauthenticated HTTP API. GitHub or GitLab remains the only canonical operational state.
+**Architecture:** The existing Node HTTP server serves a small static application, a dashboard endpoint, and bounded
+session file endpoints. The dashboard projects runtime and pinned Git configuration without secrets. The controller
+exposes an in-memory observation snapshot; it does not become an operational store. The HTTP API reads only three
+allowlisted attempt files through verified Linux descriptors, caps every session response, and redacts the startup
+credential snapshot. GitHub or GitLab remains the only canonical operational state.
 
 **Tech stack:** TypeScript, Node.js standard library, HTML, CSS, browser JavaScript, and the Node test runner. No
 frontend framework or new package is required.
@@ -23,7 +24,7 @@ frontend framework or new package is required.
 - Keep all HTTP routes read-only. Do not add configuration mutation, provider mutation, or session mutation.
 - Never return secret values or secret file paths.
 - Treat controller observations and session files as ephemeral diagnostic projections, not canonical state.
-- Bound session discovery itself and expose metadata only; keep agent-writable session contents local.
+- Bound session discovery and expose only redacted `harness.log`, `decision.json`, and `context.json` content.
 - Preserve the approved six-color palette, 2 px radius, 8 px spacing grid, 44 px controls, focus visibility, and
   reduced-motion behavior.
 - Do not edit `README.md`, push, or create a pull request.
@@ -82,8 +83,8 @@ frontend framework or new package is required.
 - [x] Bind the successful preflight bundle and controller to operational status.
 - [x] Include the observed flow instance, state, and observation time for active tickets so human gates and provider
   waits are rendered from controller evidence rather than inferred from stale session files.
-- [x] Serve `GET /api/dashboard` with bounded session metadata and keep agent-writable session contents local. Return
-  explicit unavailable states when runtime evidence does not exist.
+- [x] Serve `GET /api/dashboard` with bounded session metadata. Return explicit unavailable states when runtime
+  evidence does not exist.
 - [x] Keep every non-GET request rejected and preserve existing health and status behavior.
 
 **Checkpoint:** Run typecheck, focused runtime and HTTP tests, then the complete unit suite.
@@ -104,6 +105,30 @@ frontend framework or new package is required.
 - [x] Expose only scheduler-held ticket locks, separate from the existing unfinished-flow projection.
 - [x] Mark the session index as truncated when more than 100 entries exist so absence is not presented as proof.
 - [x] Keep these fields ephemeral, bounded, and free of provider payloads or new durable state.
+
+### Task 2b: Read bounded session files without disclosing startup credentials
+
+**Files:**
+
+- Create: `src/redaction.ts`
+- Modify: `src/dashboard.ts`
+- Modify: `src/preflight.ts`
+- Modify: `src/health.ts`
+- Modify: `src/main.ts`
+- Modify: `src/harness/codex.ts`
+- Modify: `src/harness/claude.ts`
+- Test: `test/redaction.test.ts`
+- Test: `test/dashboard.test.ts`
+- Test: `test/health.test.ts`
+- Test: `test/harness/process.test.ts`
+- Test: `test/production-credentials.test.ts`
+
+- [x] Snapshot provider and harness credentials during startup and register their raw, parsed string, JSON-escaped,
+  URL-encoded, base64, and hexadecimal forms in an in-memory redactor.
+- [x] Pass only the redaction function through preflight and operational status. Do not expose registered values.
+- [x] Read only canonical UUID paths and the three allowlisted files through `O_NOFOLLOW` descriptors verified via
+  `/proc/self/fd`, with a one MiB response cap and fail-closed behavior.
+- [x] Keep discovery at 101 visited directory entries plus three fixed safe-file checks per advertised session.
 
 ## Checkpoint 2: Production static application
 
@@ -134,7 +159,7 @@ frontend framework or new package is required.
 - Create: `test/ui-contract.test.ts`
 
 - [x] Add a failing static contract test for the four screens, palette, radius, navigation storage, collapsed menu,
-  refresh intervals, session metadata, graph keyboard controls, numeric validation, and clipboard fallback.
+  refresh intervals, session reader tabs, graph keyboard controls, numeric validation, and clipboard fallback.
 - [x] Adapt the approved mockup structure and styling without its demonstration banner, placeholder SHA, or fake data.
 - [x] Render status, repositories, queues, human gates, errors, journal, locks, runtime configuration, agent execution,
   pinned flow states, and explicit empty or unavailable states from `/api/dashboard`.
@@ -149,8 +174,9 @@ frontend framework or new package is required.
 
 - [x] Build and run the real server with a pinned local fixture and mounted file secrets.
 - [x] Verify all four screens in the in-app browser at desktop and mobile widths.
-- [x] Exercise navigation persistence, menu persistence, automatic refresh, search, local-only session states, graph
-  keyboard selection, validation, YAML generation, and clipboard fallback.
+- [x] Exercise navigation persistence, menu persistence, automatic refresh, search, graph keyboard selection,
+  validation, YAML generation, and clipboard fallback.
+- [ ] Verify the bounded redacted session tabs in the running Linux container and in-app browser.
 - [x] Compare desktop screenshots with the approved mockup and correct material spacing, typography, color, overflow,
   focus, and responsive differences.
 - [x] Build the Docker image and prove health, status, dashboard, page, and asset routes from the container.

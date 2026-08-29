@@ -10,6 +10,7 @@ import { loadConfigBundle } from "../src/config/load.ts";
 import { RuntimeManager } from "../src/config/runtime.ts";
 import { createHealthServer, createOperationalStatus } from "../src/health.ts";
 import type { ReadyDependencies } from "../src/preflight.ts";
+import { createStartupRedactor } from "../src/redaction.ts";
 import type { Controller } from "../src/runtime/controller.ts";
 
 const FLOW = "11111111-1111-4111-8111-111111111111";
@@ -21,7 +22,7 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   const initial = (await readFile("config/runtime.example.yaml", "utf8")).replace("/var/lib/agent-flow", root);
   await writeFile(path, initial);
   const runtime = await RuntimeManager.create(path);
-  const status = createOperationalStatus(runtime);
+  const status = createOperationalStatus(runtime, async (_fd, expectedPath) => expectedPath);
   const server = createHealthServer("127.0.0.1", 0, status);
   await new Promise<void>((resolve) => server.once("listening", resolve));
   t.after(async () => {
@@ -58,7 +59,7 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   assert.equal(unavailable.status, 503);
   assert.equal(unavailable.headers.get("cache-control"), "no-store");
   assert.deepEqual(await unavailable.json(), { available: false, reason: "preflight unavailable" });
-  assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/context.json`))).status, 404);
+  assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/context.json`))).status, 503);
 
   await writeFile(path, initial.replace("https://api.github.com", "https://user:password@api.github.com"));
   await runtime.reload();
@@ -78,13 +79,27 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
     snapshot: () => ({ lifecycle: "ready", repositories: [], tickets: [],
       queue: { active: 0, queued: 0, concurrency: 4 }, activeWork: [], errors: [] }),
   };
+  const redactor = createStartupRedactor();
+  const providerSecret = "provider-token+/=42";
+  const harnessSecret = "harness-secret-314159";
+  redactor.register(providerSecret);
+  redactor.register(Buffer.from(JSON.stringify({ accessToken: harnessSecret })));
   status.bindReady({
     bundle, providers: { github: {} as never }, harnesses: { claude: {} as never, codex: {} as never }, controller,
     preflight: { status: "ready", provider: "github", harnesses: ["claude", "codex"],
       configurationRevision: bundle.revision },
+    redactSessionContent: redactor.redact,
   } satisfies ReadyDependencies);
   await mkdir(join(root, "sessions", FLOW, ATTEMPT), { recursive: true });
-  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "context.json"), "provider-token=secret\n");
+  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "context.json"), JSON.stringify({ providerSecret }));
+  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "decision.json"), JSON.stringify({ harnessSecret }));
+  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "harness.log"), [
+    providerSecret,
+    JSON.stringify(harnessSecret).slice(1, -1),
+    encodeURIComponent(providerSecret),
+    Buffer.from(harnessSecret).toString("base64"),
+    Buffer.from(providerSecret).toString("hex"),
+  ].join("\n"));
   status.markReady();
   assert.equal((await fetch(url("/health/ready"))).status, 200);
   const dashboard = await fetch(url("/api/dashboard"));
@@ -92,13 +107,29 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   assert.equal(dashboard.headers.get("cache-control"), "no-store");
   const dashboardBody = await dashboard.text();
   assert.equal((JSON.parse(dashboardBody) as { available: boolean }).available, true);
-  assert.equal(dashboardBody.includes("provider-token=secret"), false);
-  for (const file of ["context.json", "decision.json", "harness.log", "other.txt"]) {
-    const session = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/${file}`));
-    assert.equal(session.status, 404);
-    assert.equal(session.headers.get("cache-control"), "no-store");
-    assert.equal((await session.text()).includes("provider-token=secret"), false);
+  const statusBody = await (await fetch(url("/api/status"))).text();
+  for (const secret of [providerSecret, harnessSecret]) {
+    assert.equal(dashboardBody.includes(secret), false);
+    assert.equal(statusBody.includes(secret), false);
   }
+  for (const file of ["context.json", "decision.json", "harness.log"]) {
+    const session = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/${file}`));
+    assert.equal(session.status, 200, file);
+    assert.equal(session.headers.get("cache-control"), "no-store");
+    const body = await session.text();
+    for (const secret of [providerSecret, harnessSecret]) assert.equal(body.includes(secret), false, `${file}: ${secret}`);
+  }
+  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "harness.log"), "z".repeat(1_048_577));
+  const bounded = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/harness.log`));
+  const boundedBody = await bounded.text();
+  assert.ok(Buffer.byteLength(boundedBody) <= 1_048_576);
+  assert.equal((JSON.parse(boundedBody) as { truncated: boolean }).truncated, true);
+  assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/other.txt`))).status, 400);
+  for (const route of [
+    `/api/sessions/${FLOW}/${ATTEMPT}/%63ontext.json`,
+    `/api/sessions/${FLOW}/${ATTEMPT}/../context.json`,
+    `/api/sessions/${FLOW}/%2e%2e/context.json`,
+  ]) assert.notEqual((await rawGet(port, route)).status, 200, route);
 
   await writeFile(path, initial.replace(
     "https://github.com/example/agent-stack.git",
@@ -127,6 +158,7 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   for (const [route, method, statusCode] of [
     ["/api/status", "POST", 405],
     ["/api/dashboard", "POST", 405],
+    [`/api/sessions/${FLOW}/${ATTEMPT}/context.json`, "POST", 405],
     ["/api/unknown", "GET", 404],
   ] as const) {
     const api = await fetch(url(route), { method });

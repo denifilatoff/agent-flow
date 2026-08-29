@@ -19,6 +19,7 @@
   let remaining = Number(refreshInterval.value);
   let loading = false;
   let wizardConfigured = false;
+  let sessionReaderCount = 0;
 
   function safeGet(key) {
     try { return localStorage.getItem(key); } catch { return null; }
@@ -295,8 +296,46 @@
       const reader = element("div", "session-reader");
       const head = element("div", "session-reader-head");
       head.append(element("strong", "", "Diagnostic session"), element("code", "", `${session.flowUuid}/${session.attemptUuid}`));
-      reader.append(head, empty("Session content is available only on the controller filesystem."));
+      const sessionTabs = element("div", "session-tabs");
+      sessionTabs.setAttribute("role", "tablist");
+      sessionTabs.setAttribute("aria-label", "Diagnostic session files");
+      const content = element("div", "session-content");
+      const readerId = `session-reader-${++sessionReaderCount}`;
+      content.id = `${readerId}-panel`;
+      content.setAttribute("role", "tabpanel");
+      const definitions = [
+        ["events", "Events", null],
+        ["harness", "harness.log", "harness.log"],
+        ["decision", "decision.json", "decision.json"],
+        ["context", "context.json", "context.json"],
+      ];
+      for (const [key, label, file] of definitions) {
+        const button = element("button", "session-tab", label);
+        button.type = "button";
+        button.id = `${readerId}-${key}`;
+        button.dataset.sessionTab = key;
+        button.setAttribute("role", "tab");
+        button.setAttribute("aria-controls", content.id);
+        button.setAttribute("aria-selected", String(key === "events"));
+        button.tabIndex = key === "events" ? 0 : -1;
+        button.addEventListener("click", () => void renderSessionTab(session, sessionTabs, content, key, file));
+        button.addEventListener("keydown", (event) => {
+          if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+          const buttons = [...sessionTabs.querySelectorAll('[role="tab"]')];
+          const offset = event.key === "ArrowRight" ? 1 : -1;
+          const next = buttons[(buttons.indexOf(button) + offset + buttons.length) % buttons.length];
+          event.preventDefault();
+          next.focus();
+          next.dispatchEvent(new MouseEvent("click"));
+        });
+        sessionTabs.append(button);
+      }
+      content.setAttribute("aria-labelledby", `${readerId}-events`);
+      reader.append(head, sessionTabs, content);
       card.append(reader);
+      card.addEventListener("toggle", () => {
+        if (card.open && !content.hasChildNodes()) void renderSessionTab(session, sessionTabs, content, "events", null);
+      });
     } else {
       card.append(empty(sessionMissingMessage(ticket, discovery)));
     }
@@ -308,6 +347,36 @@
     if (!ticket?.flowInstanceId) return "No flowInstanceId has been observed, so the session is unavailable.";
     if (discovery.truncated) return "Session status is unknown because this flowInstanceId is not in the limited snapshot.";
     return "No diagnostic session found for this flowInstanceId.";
+  }
+
+  async function renderSessionTab(session, sessionTabs, content, key, file) {
+    for (const button of sessionTabs.querySelectorAll("[data-session-tab]")) {
+      const selected = button.dataset.sessionTab === key;
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+      if (selected) content.setAttribute("aria-labelledby", button.id);
+    }
+    const pre = element("pre");
+    content.replaceChildren(pre);
+    if (!file) {
+      pre.textContent = "The event stream is not stored, so this tab is unavailable.";
+      return;
+    }
+    if (!session.files.includes(file)) {
+      pre.textContent = `${file}: file not present in the session snapshot.`;
+      return;
+    }
+    pre.textContent = `${file}: loading…`;
+    try {
+      const path = `/api/sessions/${encodeURIComponent(session.flowUuid)}/${encodeURIComponent(session.attemptUuid)}/${file}`;
+      const response = await fetch(path, { headers: { accept: "application/json" } });
+      const result = await response.json();
+      pre.textContent = response.ok && result.available === true
+        ? `${result.content}${result.truncated ? "\n\n[Content truncated by the server]" : ""}`
+        : `${file}: ${result.reason || `HTTP ${response.status}`}`;
+    } catch {
+      pre.textContent = `${file}: unavailable.`;
+    }
   }
 
   function filterJournal() {

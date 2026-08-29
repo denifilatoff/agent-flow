@@ -59,6 +59,7 @@ function dependencies(calls: string[], fail?: string): PreflightDependencies {
       return { stdout: "ignored", stderr: "ignored" };
     },
     createController() { calls.push("controller:create"); return controller; },
+    redactSessionContent: (value) => value.replaceAll("secret", "[REDACTED]"),
   };
 }
 
@@ -73,6 +74,7 @@ test("runs fail-closed startup checks in a fixed order", async () => {
     harnesses: ["claude", "codex"],
     configurationRevision: bundle.revision,
   });
+  assert.equal(ready.redactSessionContent("credential=secret"), "credential=[REDACTED]");
   assert.deepEqual(calls, [
     "config:load", "config:validate", "directories", "github:rest", "provider:environment",
     "gh:auth status --hostname api.github.test", "git:--version", "apm:--version",

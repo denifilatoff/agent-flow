@@ -23,6 +23,7 @@ import { createGitLabAdapter } from "./provider/gitlab.ts";
 import { createRateLimitedHttpClient } from "./provider/http.ts";
 import { listControlComments } from "./provider/control-comment.ts";
 import type { ProviderAdapter, ProviderKind } from "./provider/types.ts";
+import { createStartupRedactor } from "./redaction.ts";
 import { runPreflight, type PreflightDependencies, type ReadyDependencies } from "./preflight.ts";
 import { createAttemptRunner, type AttemptRunnerDependencies } from "./runtime/attempt-runner.ts";
 import { createControlWriter, type ControlWriter } from "./runtime/control-state.ts";
@@ -137,12 +138,16 @@ export function createProductionDependencies(
   let prepared: ReturnType<typeof prepareConfigurationRepository> | undefined;
   const pinned = new Map<string, ConfigBundle>();
   let loadedCredential: import("./harness/types.ts").ProviderCredential | undefined;
-  const credential = readSecretFile(configured.provider.tokenFile).then((value) => ({
-    provider: configured.provider.type,
-    name: providerTokenEnvironment(configured.provider.type, configured.provider.apiUrl),
-    value,
-    apiUrl: configured.provider.apiUrl,
-  }));
+  const startupRedactor = createStartupRedactor();
+  const credential = readSecretFile(configured.provider.tokenFile).then((value) => {
+    startupRedactor.register(value);
+    return {
+      provider: configured.provider.type,
+      name: providerTokenEnvironment(configured.provider.type, configured.provider.apiUrl),
+      value,
+      apiUrl: configured.provider.apiUrl,
+    };
+  });
 
   const load = async (revision?: string): Promise<ConfigBundle> => {
     const cached = revision ? pinned.get(revision.toLowerCase()) : undefined;
@@ -193,10 +198,18 @@ export function createProductionDependencies(
     createHarnesses(): Harnesses {
       return {
         ...(configured.execution.harnesses.codex
-          ? { codex: createCodexAdapter({ authFile: configured.execution.harnesses.codex.authFile }, overrides.harnessProcesses) }
+          ? { codex: createCodexAdapter(
+              { authFile: configured.execution.harnesses.codex.authFile },
+              overrides.harnessProcesses,
+              startupRedactor.register,
+            ) }
           : {}),
         ...(configured.execution.harnesses.claude
-          ? { claude: createClaudeAdapter({ credentialsFile: configured.execution.harnesses.claude.authFile }, overrides.harnessProcesses) }
+          ? { claude: createClaudeAdapter(
+              { credentialsFile: configured.execution.harnesses.claude.authFile },
+              overrides.harnessProcesses,
+              startupRedactor.register,
+            ) }
           : {}),
       };
     },
@@ -204,6 +217,7 @@ export function createProductionDependencies(
       if (!loadedCredential) throw new Error("provider credential is not loaded");
       return composeController(bundle, providers, harnesses, load, runtime, loadedCredential, overrides);
     },
+    redactSessionContent: startupRedactor.redact,
     runtime,
   };
 }

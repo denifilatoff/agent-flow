@@ -10,6 +10,7 @@ import { validateSemantics } from "./config/semantic.ts";
 import type { HarnessTarget } from "./config/types.js";
 import type { HarnessAdapter } from "./harness/types.js";
 import type { ProviderKind, ProviderAdapter } from "./provider/types.js";
+import type { SecretRedactor } from "./redaction.ts";
 import type { Controller } from "./runtime/controller.js";
 import { ensureSafeDirectory, prepareDataRoot } from "./runtime/filesystem.ts";
 
@@ -24,6 +25,7 @@ export interface PreflightDependencies {
   providerEnvironment(): Promise<NodeJS.ProcessEnv>;
   createHarnesses(bundle: ConfigBundle): Harnesses;
   createController(bundle: ConfigBundle, providers: Providers, harnesses: Harnesses): Controller;
+  redactSessionContent?: SecretRedactor;
   validateConfig?: (bundle: ConfigBundle) => Promise<void>;
   prepareDirectories?: (dataDirectory: string) => Promise<void>;
   runCommand?: CommandRunner;
@@ -34,6 +36,7 @@ export interface ReadyDependencies {
   providers: Providers;
   harnesses: Harnesses;
   controller: Controller;
+  redactSessionContent: SecretRedactor;
   preflight: {
     status: "ready";
     provider: ProviderKind;
@@ -100,6 +103,7 @@ export async function runPreflight(dependencies: PreflightDependencies): Promise
     providers,
     harnesses,
     controller,
+    redactSessionContent: dependencies.redactSessionContent ?? unavailableRedactor,
     preflight: {
       status: "ready",
       provider: kind,
@@ -107,6 +111,10 @@ export async function runPreflight(dependencies: PreflightDependencies): Promise
       configurationRevision: bundle.revision,
     },
   };
+}
+
+function unavailableRedactor(): never {
+  throw new Error("session redaction unavailable");
 }
 
 async function prepareDirectories(dataDirectory: string): Promise<void> {
