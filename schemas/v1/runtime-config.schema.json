@@ -24,7 +24,11 @@
       "required": ["type", "apiUrl", "repositories", "tokenFile"],
       "properties": {
         "type": { "enum": ["github", "gitlab"] },
-        "apiUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "apiUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://(?![^/?#]*@)[^?#]+$"
+        },
         "repositories": {
           "type": "array",
           "minItems": 1,
@@ -91,7 +95,11 @@
     "configurationRepository": {
       "oneOf": [
         { "$ref": "#/$defs/absolutePath" },
-        { "type": "string", "format": "uri", "pattern": "^(?:https://|file:///)(?![^/]*@)" }
+        {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^(?:https://(?![^/?#]*@)[^?#]+|file:///[^?#]+)$"
+        }
       ]
     },
     "execution": {

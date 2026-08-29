@@ -4,6 +4,7 @@ import { open } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 
 import { ConfigValidationError, parseYaml, validateDocument } from "./schema-validator.ts";
+import { normalizeConfigurationSource } from "./repository.ts";
 import type { ExecutionSnapshot, HarnessTarget, RuntimeConfig } from "./types.ts";
 import type { CatalogHarnesses } from "./semantic.ts";
 
@@ -160,6 +161,15 @@ function boundedError(error: unknown): string {
 class RuntimeBindingError extends Error {}
 
 function validateRuntimeBindings(config: RuntimeConfig, expected?: ReadonlyMap<string, ReadonlySet<HarnessTarget>>): void {
+  try {
+    normalizeConfigurationSource(config.configuration.repository);
+    const apiUrl = new URL(config.provider.apiUrl);
+    if (apiUrl.protocol !== "https:" || apiUrl.username || apiUrl.password || apiUrl.search || apiUrl.hash) {
+      throw new Error();
+    }
+  } catch {
+    throw new RuntimeBindingError("runtime URL contains credentials or unsupported components");
+  }
   const harnesses = new Set(Object.keys(config.execution.harnesses));
   for (const [agentId, execution] of Object.entries(config.execution.agents)) {
     if (!harnesses.has(execution.harness)) {

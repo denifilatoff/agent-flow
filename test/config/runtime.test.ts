@@ -57,6 +57,40 @@ test("rejects secret values and relative runtime paths", async () => {
   assert.equal((await readFile("config/runtime.example.yaml", "utf8")).includes("token:"), false);
 });
 
+test("rejects credentials and secret-bearing URL components", async () => {
+  const runtime = await parseYaml("config/runtime.example.yaml") as RuntimeConfig;
+  for (const apiUrl of [
+    "https://user:password@api.github.com",
+    "https://api.github.com?private_token=secret",
+    "https://api.github.com#secret",
+  ]) {
+    assert.throws(() => validateDocument("RuntimeConfig", {
+      ...runtime,
+      provider: { ...runtime.provider, apiUrl },
+    }));
+  }
+  for (const repository of [
+    "https://token@github.com/example/agent-stack.git",
+    "https://github.com/example/agent-stack.git?private_token=secret",
+    "file:///config/agent-stack.git#secret",
+  ]) {
+    assert.throws(() => validateDocument("RuntimeConfig", {
+      ...runtime,
+      configuration: { ...runtime.configuration, repository },
+    }));
+  }
+
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-runtime-url-secret-"));
+  try {
+    const path = join(root, "runtime.yaml");
+    const source = await readFile("config/runtime.example.yaml", "utf8");
+    await writeFile(path, source.replace("https://api.github.com", "https://user:password@api.github.com"));
+    await assert.rejects(loadRuntimeConfig(path), /RuntimeConfig validation failed/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("rejects incomplete harness and pinned-catalog bindings", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-flow-runtime-bindings-"));
   try {

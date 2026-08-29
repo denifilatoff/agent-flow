@@ -60,6 +60,18 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   assert.deepEqual(await unavailable.json(), { available: false, reason: "preflight unavailable" });
   assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/context.json`))).status, 404);
 
+  await writeFile(path, initial.replace("https://api.github.com", "https://user:password@api.github.com"));
+  await runtime.reload();
+  const rejectedStatus = await (await fetch(url("/api/status"))).text();
+  const rejectedDashboard = await (await fetch(url("/api/dashboard"))).text();
+  for (const secret of ["user", "password"]) {
+    assert.equal(rejectedStatus.includes(secret), false);
+    assert.equal(rejectedDashboard.includes(secret), false);
+  }
+  assert.match(rejectedStatus, /runtime configuration is invalid/);
+  await writeFile(path, initial);
+  await runtime.reload();
+
   const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", "a".repeat(40));
   const controller: Controller = {
     async bootstrap() {}, async run() {}, async reconcileNow() {},
@@ -87,6 +99,18 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
     assert.equal(session.headers.get("cache-control"), "no-store");
     assert.equal((await session.text()).includes("provider-token=secret"), false);
   }
+
+  await writeFile(path, initial.replace(
+    "https://github.com/example/agent-stack.git",
+    "https://github.com/example/agent-stack.git?private_token=secret#secret",
+  ));
+  await runtime.reload();
+  const retainedDashboard = await (await fetch(url("/api/dashboard"))).text();
+  assert.equal(retainedDashboard.includes("private_token"), false);
+  assert.equal(retainedDashboard.includes("#secret"), false);
+  assert.match(retainedDashboard, /https:\/\/github\.com\/example\/agent-stack\.git/);
+  await writeFile(path, initial);
+  await runtime.reload();
 
   await writeFile(path, initial.replace("port: 8080", "port: 8081"));
   await runtime.reload();
