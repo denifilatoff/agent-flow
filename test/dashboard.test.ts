@@ -139,15 +139,17 @@ test("reads and redacts only complete allowlisted session files within one MiB",
   const attempt = join(data, "sessions", FLOW, ATTEMPT);
   await mkdir(attempt, { recursive: true });
   const secret = "provider-token+/=42";
+  const numericSecret = "314159";
   const redactor = createStartupRedactor();
   redactor.register(secret);
+  redactor.register(numericSecret);
   await writeFile(join(attempt, "harness.log"), [
     secret,
     encodeURIComponent(secret),
     Buffer.from(secret).toString("base64"),
     Buffer.from(secret).toString("hex"),
   ].join("\n"));
-  await writeFile(join(attempt, "decision.json"), JSON.stringify({ event: "done", token: secret }));
+  await writeFile(join(attempt, "decision.json"), JSON.stringify({ event: "done", token: secret, pin: 314159 }));
   await writeFile(join(attempt, "context.json"), `{\"prompt\":\"${secret}`);
   await writeFile(join(attempt, "other.txt"), secret);
   await symlink(join(outside, "context.json"), join(attempt, "linked.json"));
@@ -166,7 +168,9 @@ test("reads and redacts only complete allowlisted session files within one MiB",
     if (result.status !== 200) continue;
     assert.equal(result.body.content.includes(secret), false, file);
     assert.ok(Buffer.byteLength(result.body.content) <= 1_048_576, file);
-    if (file === "decision.json") assert.deepEqual(JSON.parse(result.body.content), { event: "done", token: "[REDACTED]" });
+    if (file === "decision.json") assert.deepEqual(JSON.parse(result.body.content), {
+      event: "done", token: "[REDACTED]", pin: "[REDACTED]",
+    });
     if (file === "context.json") assert.equal(result.body.content, `{\"prompt\":\"[REDACTED]`);
     assert.equal(result.body.truncated, false);
   }

@@ -251,6 +251,11 @@ function redactJsonContent(content: string, redact: SecretRedactor): string {
 
 function mapJsonStrings(value: unknown, redact: SecretRedactor): unknown {
   if (typeof value === "string") return redact(value);
+  if (typeof value === "number" || typeof value === "boolean") {
+    const rendered = String(value);
+    const redacted = redact(rendered);
+    return redacted === rendered ? value : redacted;
+  }
   if (Array.isArray(value)) return value.map((item) => mapJsonStrings(item, redact));
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [redact(key), mapJsonStrings(item, redact)]));

@@ -195,7 +195,15 @@ export async function readSecretFile(path: string): Promise<string> {
     if (!metadata.isFile() || metadata.size < 1 || metadata.size > 65_536) {
       throw new Error("secret file must be a non-empty regular file no larger than 65536 bytes");
     }
-    const value = (await handle.readFile("utf8")).trim();
+    const buffer = Buffer.alloc(65_537);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > 65_536) throw new Error("secret file must be no larger than 65536 bytes");
+    const value = buffer.subarray(0, length).toString("utf8").trim();
     if (!value || /[\0\r\n]/.test(value)) throw new Error("secret file must contain one non-empty value");
     return value;
   } finally {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { RuntimeManager, loadRuntimeConfig, runtimeDigest } from "../../src/config/runtime.ts";
+import { RuntimeManager, loadRuntimeConfig, readSecretFile, runtimeDigest } from "../../src/config/runtime.ts";
 import { parseYaml, validateDocument } from "../../src/config/schema-validator.ts";
 import type { RuntimeConfig } from "../../src/config/types.ts";
 
@@ -56,6 +56,17 @@ test("normalizes mappings for a stable digest without reading secret files", asy
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("bounds secret file reads", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-secret-bound-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const secret = join(root, "secret");
+
+  await writeFile(secret, "x".repeat(65_536));
+  assert.equal((await readSecretFile(secret)).length, 65_536);
+  await writeFile(secret, "x".repeat(65_537));
+  await assert.rejects(readSecretFile(secret), /no larger than 65536 bytes/);
 });
 
 test("rejects secret values and relative runtime paths", async () => {
