@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { lstat, open, readdir, realpath } from "node:fs/promises";
+import { lstat, open, opendir, realpath } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -9,7 +9,7 @@ import { assertCanonicalUuid, assertSafeDirectory, assertSafeFile } from "./runt
 
 const SESSION_LIMIT = 100;
 const FILE_LIMIT = 1_048_576;
-const SESSION_FILES = ["context.json", "decision.json", "harness.log"] as const;
+const SESSION_FILES = ["context.json", "decision.json"] as const;
 type SessionFile = typeof SESSION_FILES[number];
 type SessionFileOpener = (path: string, flags: number) => Promise<FileHandle>;
 export type DescriptorPathResolver = (fd: number, expectedPath: string) => Promise<string>;
@@ -78,12 +78,13 @@ export async function discoverSessions(dataDirectory: string): Promise<SessionDi
 
   let flows;
   try {
-    flows = await readdir(sessions, { withFileTypes: true });
+    flows = await opendir(sessions);
   } catch {
     return { available: false, entries: [], reason: "sessions unavailable" };
   }
   const entries: DashboardSession[] = [];
-  for (const flow of flows) {
+  let truncated = false;
+  flowScan: for await (const flow of flows) {
     if (!flow.isDirectory() || !isCanonicalUuid(flow.name)) continue;
     let flowRoot: string;
     try {
@@ -91,11 +92,20 @@ export async function discoverSessions(dataDirectory: string): Promise<SessionDi
     } catch {
       continue;
     }
-    const attempts = await readdir(flowRoot, { withFileTypes: true }).catch(() => []);
-    for (const attempt of attempts) {
+    let attempts;
+    try {
+      attempts = await opendir(flowRoot);
+    } catch {
+      continue;
+    }
+    for await (const attempt of attempts) {
       if (!attempt.isDirectory() || !isCanonicalUuid(attempt.name)) continue;
       try {
         const root = await assertSafeDirectory(sessions, join(flowRoot, attempt.name), "attempt session directory");
+        if (entries.length === SESSION_LIMIT) {
+          truncated = true;
+          break flowScan;
+        }
         const metadata = await lstat(root);
         const files: SessionFile[] = [];
         for (const file of SESSION_FILES) {
@@ -113,8 +123,8 @@ export async function discoverSessions(dataDirectory: string): Promise<SessionDi
     || right.attemptUuid.localeCompare(left.attemptUuid));
   return {
     available: true,
-    entries: entries.slice(0, SESSION_LIMIT),
-    truncated: entries.length > SESSION_LIMIT,
+    entries,
+    truncated,
   };
 }
 

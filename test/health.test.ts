@@ -83,11 +83,11 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   assert.equal(session.status, 200);
   assert.equal(session.headers.get("cache-control"), "no-store");
   assert.deepEqual(await session.json(), { available: true, content: "session context\n", truncated: false });
-  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "harness.log"), "x".repeat(1_048_577));
-  const bounded = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/harness.log`));
-  const boundedBody = Buffer.from(await bounded.arrayBuffer());
-  assert.ok(boundedBody.length <= 1_048_576);
-  assert.equal((JSON.parse(boundedBody.toString("utf8")) as { truncated: boolean }).truncated, true);
+  await writeFile(join(root, "sessions", FLOW, ATTEMPT, "harness.log"), "provider-token=secret\n");
+  const rawLog = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/harness.log`));
+  const rawLogBody = await rawLog.text();
+  assert.equal(rawLog.status, 400);
+  assert.equal(rawLogBody.includes("provider-token=secret"), false);
   assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/other.txt`))).status, 400);
 
   await writeFile(path, initial.replace("port: 8080", "port: 8081"));

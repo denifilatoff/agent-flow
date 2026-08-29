@@ -58,7 +58,7 @@ test("projects the real runtime and pinned configuration without paths to secret
   }
 });
 
-test("discovers only the 100 newest canonical regular session directories without following symlinks", async (t) => {
+test("stops session discovery after 100 entries and one truncation probe without advertising harness logs", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-sessions-"));
   const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-outside-"));
   t.after(async () => {
@@ -67,11 +67,12 @@ test("discovers only the 100 newest canonical regular session directories withou
   });
   const sessions = join(data, "sessions");
   await mkdir(join(sessions, FLOW), { recursive: true });
-  for (let index = 0; index < 101; index += 1) {
+  for (let index = 0; index < 102; index += 1) {
     const attempt = `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
     const directory = join(sessions, FLOW, attempt);
     await mkdir(directory);
     await writeFile(join(directory, "context.json"), "{}\n");
+    await writeFile(join(directory, "harness.log"), "provider-token=secret\n");
     const timestamp = new Date(Date.UTC(2026, 7, 29, 0, 0, index));
     await utimes(directory, timestamp, timestamp);
   }
@@ -83,19 +84,21 @@ test("discovers only the 100 newest canonical regular session directories withou
   assert.equal(result.available, true);
   assert.equal(result.truncated, true);
   assert.equal(result.entries.length, 100);
-  assert.equal(result.entries[0]?.attemptUuid, "00000000-0000-4000-8000-000000000100");
-  assert.equal(result.entries.at(-1)?.attemptUuid, "00000000-0000-4000-8000-000000000001");
+  assert.equal(new Set(result.entries.map(({ attemptUuid }) => attemptUuid)).size, 100);
   assert.equal(result.entries.some(({ attemptUuid }) => attemptUuid === ATTEMPT), false);
   assert.deepEqual(result.entries[0]?.files, ["context.json"]);
+  assert.equal(JSON.stringify(result).includes("provider-token=secret"), false);
+  assert.equal(JSON.stringify(result).includes("harness.log"), false);
 
-  await rm(join(sessions, FLOW, "00000000-0000-4000-8000-000000000000"), { recursive: true });
+  await rm(join(sessions, FLOW, "00000000-0000-4000-8000-000000000100"), { recursive: true });
+  await rm(join(sessions, FLOW, "00000000-0000-4000-8000-000000000101"), { recursive: true });
   const exactLimit = await discoverSessions(data);
   assert.equal(exactLimit.available, true);
   assert.equal(exactLimit.truncated, false);
   assert.equal(exactLimit.entries.length, 100);
 });
 
-test("reads only allowed regular session files and caps content at one MiB", async (t) => {
+test("reads only structured session files, caps content at one MiB, and rejects raw harness logs", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-read-"));
   const outside = await mkdtemp(join(tmpdir(), "agent-flow-dashboard-read-outside-"));
   t.after(async () => {
@@ -104,15 +107,15 @@ test("reads only allowed regular session files and caps content at one MiB", asy
   });
   const attempt = join(data, "sessions", FLOW, ATTEMPT);
   await mkdir(attempt, { recursive: true });
-  await writeFile(join(attempt, "harness.log"), "x".repeat(1_048_577));
+  await writeFile(join(attempt, "harness.log"), "provider-token=secret\n");
+  await writeFile(join(attempt, "context.json"), "x".repeat(1_048_577));
   await symlink(join(outside, "decision.json"), join(attempt, "decision.json"));
-  await mkdir(join(attempt, "context.json"));
 
   const read = await readDashboardSessionFile(
     data,
     FLOW,
     ATTEMPT,
-    "harness.log",
+    "context.json",
     undefined,
     async (_fd, expectedPath) => expectedPath,
   );
@@ -121,10 +124,15 @@ test("reads only allowed regular session files and caps content at one MiB", asy
     assert.equal(Buffer.byteLength(read.body.content), 1_048_576);
     assert.equal(read.body.truncated, true);
   }
-  assert.equal((await readDashboardSessionFile(data, "NOT-A-UUID", ATTEMPT, "harness.log")).status, 400);
+  const harnessLog = await readDashboardSessionFile(data, FLOW, ATTEMPT, "harness.log");
+  assert.deepEqual(harnessLog, {
+    status: 400,
+    body: { available: false, reason: "invalid session path" },
+  });
+  assert.equal(JSON.stringify(harnessLog).includes("provider-token=secret"), false);
+  assert.equal((await readDashboardSessionFile(data, "NOT-A-UUID", ATTEMPT, "context.json")).status, 400);
   assert.equal((await readDashboardSessionFile(data, FLOW, ATTEMPT, "other.txt")).status, 400);
   assert.equal((await readDashboardSessionFile(data, FLOW, ATTEMPT, "decision.json")).status, 404);
-  assert.equal((await readDashboardSessionFile(data, FLOW, ATTEMPT, "context.json")).status, 404);
 });
 
 test("rejects an attempt directory swapped during file open", async (t) => {
