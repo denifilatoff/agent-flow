@@ -123,7 +123,8 @@ test("serves liveness, runtime-aware readiness, and read-only redacted status", 
   const bounded = await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/harness.log`));
   const boundedBody = await bounded.text();
   assert.ok(Buffer.byteLength(boundedBody) <= 1_048_576);
-  assert.equal((JSON.parse(boundedBody) as { truncated: boolean }).truncated, true);
+  assert.equal(bounded.status, 413);
+  assert.deepEqual(JSON.parse(boundedBody), { available: false, reason: "session file too large" });
   assert.equal((await fetch(url(`/api/sessions/${FLOW}/${ATTEMPT}/other.txt`))).status, 400);
   for (const route of [
     `/api/sessions/${FLOW}/${ATTEMPT}/%63ontext.json`,
