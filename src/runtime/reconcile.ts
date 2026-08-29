@@ -70,6 +70,8 @@ export interface ReconcileDependencies {
 export interface ReconcileOutcome {
   flowInstanceId: string | null;
   stateId: string | null;
+  configRevision: string | null;
+  stateKind: FlowState["kind"] | null;
   changed: boolean;
   started: boolean;
 }
@@ -110,7 +112,7 @@ export async function reconcileTicket(
           true,
         );
       }
-      return outcome(latest?.parsed.state ?? null, false, false);
+      return outcome(latest?.parsed.state ?? null, latest?.bundle ?? null, false, false);
     }
     return activate(dependencies, snapshot, loaded);
   }
@@ -169,7 +171,7 @@ export async function reconcileTicket(
   const started = removeActivation
     ? false
     : await startIfNeeded(dependencies, snapshot, current.bundle, next);
-  return outcome(next, changed, started);
+  return outcome(next, current.bundle, changed, started);
 }
 
 async function activate(
@@ -180,12 +182,17 @@ async function activate(
   const actor = snapshot.activation.actor;
   const eventId = snapshot.activation.eventId;
   const occurredAt = snapshot.activation.occurredAt;
-  if (!actor || !eventId || !occurredAt) return outcome(history.at(-1)?.parsed.state ?? null, false, false);
+  const previous = history.at(-1);
+  if (!actor || !eventId || !occurredAt) {
+    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, false, false);
+  }
   const permission = await providerCall(
     "provider permission read failed",
     () => dependencies.provider.permission(snapshot.ref.repository, actor),
   );
-  if (!AUTHORIZED.has(permission)) return outcome(history.at(-1)?.parsed.state ?? null, false, false);
+  if (!AUTHORIZED.has(permission)) {
+    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, false, false);
+  }
 
   const bundle = await configCall("current configuration load failed", () => dependencies.config.loadCurrent());
   assertBundle(bundle, bundle.revision);
@@ -216,7 +223,7 @@ async function activate(
   await createControl(dependencies.provider, snapshot.ref, control);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, bundle, control.stateId, false);
   const started = await startIfNeeded(dependencies, snapshot, bundle, control);
-  return outcome(control, true, started);
+  return outcome(control, bundle, true, started);
 }
 
 async function cancel(
@@ -276,7 +283,7 @@ async function cancel(
   }, timestamp);
   await writeExistingControl(dependencies, snapshot.ref, latest, control);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, current.bundle, "cancelled", true);
-  return outcome(control, true, false);
+  return outcome(control, current.bundle, true, false);
 }
 
 async function loadControls(
@@ -286,11 +293,6 @@ async function loadControls(
   const bundles = new Map<string, ConfigBundle>();
   const result: LoadedControl[] = [];
   for (const item of parsed) {
-    if (item.state.stateId === "done" || item.state.stateId === "cancelled") {
-      const bundle = await configCall("current configuration load failed", () => config.loadCurrent());
-      result.push({ parsed: item, bundle, terminal: true });
-      continue;
-    }
     let bundle = bundles.get(item.state.configRevision);
     if (!bundle) {
       bundle = await configCall(
@@ -606,10 +608,22 @@ function flowEvent(
   };
 }
 
-function outcome(control: ControlState | null, changed: boolean, started: boolean): ReconcileOutcome {
+function outcome(
+  control: ControlState | null,
+  bundle: ConfigBundle | null,
+  changed: boolean,
+  started: boolean,
+): ReconcileOutcome {
+  if (control && bundle?.revision !== control.configRevision) {
+    throw new Error("control configuration does not match its pinned bundle");
+  }
+  const stateKind = control ? bundle?.flow.spec.states[control.stateId]?.kind : null;
+  if (control && !stateKind) throw new Error("control state does not exist in pinned flow");
   return {
     flowInstanceId: control?.flowInstanceId ?? null,
     stateId: control?.stateId ?? null,
+    configRevision: control?.configRevision ?? null,
+    stateKind: stateKind ?? null,
     changed,
     started,
   };

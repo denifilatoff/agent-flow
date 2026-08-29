@@ -37,6 +37,7 @@ import {
 import { deriveEvent } from "../../src/runtime/derive-event.ts";
 
 const SHA = "a".repeat(40);
+const OLD_SHA = "b".repeat(40);
 const OLD_HEAD = "1".repeat(40);
 const NEW_HEAD = "2".repeat(40);
 const FLOW_1 = "11111111-1111-4111-8111-111111111111";
@@ -475,7 +476,14 @@ test("ignores an activation by an actor below write permission", async () => {
 
   const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
 
-  assert.equal(outcome.stateId, null);
+  assert.deepEqual(outcome, {
+    flowInstanceId: null,
+    stateId: null,
+    configRevision: null,
+    stateKind: null,
+    changed: false,
+    started: false,
+  });
   assert.equal(provider.created, 0);
   assert.equal(provider.updated, 0);
   assert.deepEqual(launcher.requests, []);
@@ -780,6 +788,31 @@ test("finishes crash-window cleanup instead of reactivating the original label e
   assert.equal(provider.created, 0);
   assert.ok(!provider.snapshot.labels.includes("agent-flow:development"));
   assert.deepEqual(launcher.requests, []);
+});
+
+test("reports terminal state evidence from its pinned configuration", async () => {
+  const provider = new FakeProvider();
+  provider.snapshot.activation = { present: false, eventId: null, actor: null, occurredAt: null };
+  installControl(provider, controlState({ configRevision: OLD_SHA, stateId: "done" }));
+  const pinned = structuredClone(BUNDLE);
+  pinned.revision = OLD_SHA;
+  const deps = dependencies(provider);
+  deps.config.loadCurrent = async () => { throw new Error("current configuration must not classify old state"); };
+  deps.config.loadPinned = async (revision) => {
+    assert.equal(revision, OLD_SHA);
+    return pinned;
+  };
+
+  const outcome = await reconcileTicket(deps, TICKET);
+
+  assert.deepEqual(outcome, {
+    flowInstanceId: FLOW_1,
+    stateId: "done",
+    configRevision: OLD_SHA,
+    stateKind: "final",
+    changed: false,
+    started: false,
+  });
 });
 
 test("repairs the permanent managed label for terminal history", async () => {

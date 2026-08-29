@@ -22,7 +22,7 @@ export interface DashboardSession {
 }
 
 export type SessionDiscovery =
-  | { available: true; entries: DashboardSession[] }
+  | { available: true; entries: DashboardSession[]; truncated: boolean }
   | { available: false; entries: []; reason: "sessions unavailable" };
 
 export type SessionFileResult =
@@ -111,7 +111,11 @@ export async function discoverSessions(dataDirectory: string): Promise<SessionDi
   entries.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt)
     || right.flowUuid.localeCompare(left.flowUuid)
     || right.attemptUuid.localeCompare(left.attemptUuid));
-  return { available: true, entries: entries.slice(0, SESSION_LIMIT) };
+  return {
+    available: true,
+    entries: entries.slice(0, SESSION_LIMIT),
+    truncated: entries.length > SESSION_LIMIT,
+  };
 }
 
 export async function readDashboardSessionFile(

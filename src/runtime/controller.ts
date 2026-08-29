@@ -37,6 +37,7 @@ export interface ControllerSnapshot {
   repositories: Array<{ provider: string; repository: string; nextWindowStartedAt: string | null }>;
   tickets: ControllerTicketObservation[];
   queue: SchedulerSnapshot;
+  locks: TicketRef[];
   activeWork: TicketRef[];
   errors: string[];
 }
@@ -44,6 +45,8 @@ export interface ControllerSnapshot {
 export interface ControllerTicketObservation extends TicketRef {
   flowInstanceId: string | null;
   stateId: string | null;
+  configRevision: string | null;
+  stateKind: ReconcileOutcome["stateKind"];
   observedAt: string | null;
 }
 
@@ -79,7 +82,7 @@ export function createController(dependencies: ControllerDependencies): Controll
   const cursors = new Map<string, string>();
   const flowInstances = new Set<string>();
   const observedTickets = new Map<string, ObservedTicket>();
-  const acceptedObservations = new WeakMap<Promise<void>, ObservedTicket>();
+  const acceptedObservations = new Map<Promise<void>, ObservedTicket>();
   const activeTickets = new Map<string, TicketRef>();
   const errors: string[] = [];
   let lifecycle: ControllerLifecycle = "created";
@@ -97,6 +100,8 @@ export function createController(dependencies: ControllerDependencies): Controll
         const result = await dependencies.reconcile(ref);
         observation.flowInstanceId = result.flowInstanceId;
         observation.stateId = result.stateId;
+        observation.configRevision = result.configRevision;
+        observation.stateKind = result.stateKind;
         observation.observedAt = now();
         if (result.flowInstanceId) flowInstances.add(result.flowInstanceId);
         if (result.flowInstanceId && result.stateId !== "done" && result.stateId !== "cancelled") {
@@ -215,6 +220,7 @@ export function createController(dependencies: ControllerDependencies): Controll
         })),
         tickets: [...observedTickets.values()].map(copyObservation),
         queue: tickets.snapshot(),
+        locks: schedulerLocks(),
         activeWork: [...activeTickets.values()].map(copyTicket),
         errors: [...errors],
       };
@@ -228,11 +234,17 @@ export function createController(dependencies: ControllerDependencies): Controll
       ...copyTicket(ref),
       flowInstanceId: null,
       stateId: null,
+      configRevision: null,
+      stateKind: null,
       observedAt: null,
     };
     const scheduled = tickets.schedule(observation);
     const accepted = acceptedObservations.get(scheduled) ?? observation;
     acceptedObservations.set(scheduled, accepted);
+    void scheduled.then(
+      () => acceptedObservations.delete(scheduled),
+      () => acceptedObservations.delete(scheduled),
+    );
     observedTickets.set(id, accepted);
     return scheduled.catch((error: unknown) => {
       removeObservation(id, accepted);
@@ -242,6 +254,12 @@ export function createController(dependencies: ControllerDependencies): Controll
 
   function removeObservation(id: string, observation: ObservedTicket): void {
     if (observedTickets.get(id) === observation) observedTickets.delete(id);
+  }
+
+  function schedulerLocks(): TicketRef[] {
+    const locks = new Map<string, TicketRef>();
+    for (const { ref } of acceptedObservations.values()) locks.set(ticketKey(ref), ref);
+    return [...locks.values()].map(copyTicket);
   }
 
   function queueSweep(): void {

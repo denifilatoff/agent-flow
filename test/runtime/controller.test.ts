@@ -16,7 +16,14 @@ function key(ref: TicketRef): string {
 }
 
 function outcome(ref: TicketRef): ReconcileOutcome {
-  return { flowInstanceId: key(ref), stateId: "assessment", changed: false, started: false };
+  return {
+    flowInstanceId: key(ref),
+    stateId: "assessment",
+    configRevision: "a".repeat(40),
+    stateKind: "agent",
+    changed: false,
+    started: false,
+  };
 }
 
 function launcher(): AttemptLauncher & { cancelled: string[] } {
@@ -674,7 +681,7 @@ test("reports controller work from its ephemeral collections", async () => {
     concurrency: 1,
     reconcile: async (ref) => {
       await gate.promise;
-      return outcome(ref);
+      return { ...outcome(ref), stateId: "awaiting-merge", stateKind: "provider-wait" };
     },
     launcher: launcher(),
     now: () => "2026-08-29T10:00:00.000Z",
@@ -685,6 +692,7 @@ test("reports controller work from its ephemeral collections", async () => {
     repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: null }],
     tickets: [],
     queue: { active: 0, queued: 0, concurrency: 1 },
+    locks: [],
     activeWork: [],
     errors: [],
   });
@@ -696,8 +704,16 @@ test("reports controller work from its ephemeral collections", async () => {
   assert.deepEqual(controller.snapshot(), {
     lifecycle: "ready",
     repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: "2026-08-29T10:00:00.000Z" }],
-    tickets: [{ ...GITHUB_ONE, flowInstanceId: null, stateId: null, observedAt: null }],
+    tickets: [{
+      ...GITHUB_ONE,
+      flowInstanceId: null,
+      stateId: null,
+      configRevision: null,
+      stateKind: null,
+      observedAt: null,
+    }],
     queue: { active: 1, queued: 0, concurrency: 1 },
+    locks: [GITHUB_ONE],
     activeWork: [],
     errors: [],
   });
@@ -711,10 +727,13 @@ test("reports controller work from its ephemeral collections", async () => {
     tickets: [{
       ...GITHUB_ONE,
       flowInstanceId: key(GITHUB_ONE),
-      stateId: "assessment",
+      stateId: "awaiting-merge",
+      configRevision: "a".repeat(40),
+      stateKind: "provider-wait",
       observedAt: "2026-08-29T10:00:00.000Z",
     }],
     queue: { active: 0, queued: 0, concurrency: 1 },
+    locks: [],
     activeWork: [GITHUB_ONE],
     errors: [],
   });
@@ -733,13 +752,17 @@ test("keeps the accepted observation when same-ticket work coalesces before star
 
   const first = controller.reconcileNow(GITHUB_ONE);
   const coalesced = controller.reconcileNow(GITHUB_ONE);
+  assert.deepEqual(controller.snapshot().locks, [GITHUB_ONE]);
   await Promise.all([first, coalesced]);
 
   assert.equal(calls, 1);
+  assert.deepEqual(controller.snapshot().locks, []);
   assert.deepEqual(controller.snapshot().tickets, [{
     ...GITHUB_ONE,
     flowInstanceId: key(GITHUB_ONE),
     stateId: "assessment",
+    configRevision: "a".repeat(40),
+    stateKind: "agent",
     observedAt: "2026-08-29T11:00:00.000Z",
   }]);
 });
@@ -774,6 +797,7 @@ test("keeps only bounded generic polling errors in its snapshot", async () => {
 test("keeps a newer coalesced ticket observation after an earlier reconcile fails", async () => {
   const firstStarted = Promise.withResolvers<void>();
   const failFirst = Promise.withResolvers<void>();
+  const finishLater = Promise.withResolvers<void>();
   let calls = 0;
   const controller = createController({
     providers: [{ adapter: idleGitHub(), repositories: ["owner/one"] }],
@@ -784,6 +808,7 @@ test("keeps a newer coalesced ticket observation after an earlier reconcile fail
         await failFirst.promise;
         throw new Error("first reconcile failed");
       }
+      await finishLater.promise;
       return outcome(ref);
     },
     launcher: launcher(),
@@ -793,14 +818,18 @@ test("keeps a newer coalesced ticket observation after an earlier reconcile fail
   const first = controller.reconcileNow(GITHUB_ONE);
   await firstStarted.promise;
   const later = controller.reconcileNow(GITHUB_ONE);
+  assert.deepEqual(controller.snapshot().locks, [GITHUB_ONE]);
   failFirst.resolve();
 
   await assert.rejects(first, /first reconcile failed/);
+  assert.deepEqual(controller.snapshot().locks, [GITHUB_ONE]);
   assert.deepEqual(controller.snapshot().tickets.map(({ provider, repository, number }) => ({
     provider, repository, number,
   })), [GITHUB_ONE]);
 
+  finishLater.resolve();
   await later;
+  assert.deepEqual(controller.snapshot().locks, []);
 });
 
 test("removes an observation rejected after the ticket scheduler closes", async () => {
@@ -880,6 +909,7 @@ test("reports running and stopped snapshots around a polling repository scan", a
     repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: "2026-08-29T10:05:00.000Z" }],
     tickets: [],
     queue: { active: 0, queued: 0, concurrency: 1 },
+    locks: [],
     activeWork: [],
     errors: [],
   });

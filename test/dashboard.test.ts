@@ -81,11 +81,18 @@ test("discovers only the 100 newest canonical regular session directories withou
   const result = await discoverSessions(data);
 
   assert.equal(result.available, true);
+  assert.equal(result.truncated, true);
   assert.equal(result.entries.length, 100);
   assert.equal(result.entries[0]?.attemptUuid, "00000000-0000-4000-8000-000000000100");
   assert.equal(result.entries.at(-1)?.attemptUuid, "00000000-0000-4000-8000-000000000001");
   assert.equal(result.entries.some(({ attemptUuid }) => attemptUuid === ATTEMPT), false);
   assert.deepEqual(result.entries[0]?.files, ["context.json"]);
+
+  await rm(join(sessions, FLOW, "00000000-0000-4000-8000-000000000000"), { recursive: true });
+  const exactLimit = await discoverSessions(data);
+  assert.equal(exactLimit.available, true);
+  assert.equal(exactLimit.truncated, false);
+  assert.equal(exactLimit.entries.length, 100);
 });
 
 test("reads only allowed regular session files and caps content at one MiB", async (t) => {
