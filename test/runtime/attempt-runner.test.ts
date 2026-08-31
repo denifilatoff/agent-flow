@@ -161,7 +161,11 @@ function fixture(options: {
       assert.equal(agentId, "developer");
       return { bundle: configuredRequest.bundle, packageDirectory: "/config/agent-packages/developer" };
     }),
-    workspaceManager: { async prepareWorkspace() { events.push("workspace:prepare"); return {
+    workspaceManager: { async prepareWorkspace(...args: unknown[]) {
+      assert.deepEqual(args[3], {
+        provider: "github", name: "GH_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
+      });
+      events.push("workspace:prepare"); return {
       baseClone: "/data/repositories/repo", worktree: "/data/worktrees/flow", repository: "owner/repo",
       ticketNumber: 7, flowInstanceId: FLOW,
     }; } }, harnesses: { codex: harness }, writeControl,

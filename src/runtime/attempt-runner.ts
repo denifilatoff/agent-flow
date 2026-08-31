@@ -227,6 +227,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           request.snapshot.repository,
           request.ref,
           control.flowInstanceId,
+          dependencies.providerCredential,
         );
         assertCurrent(running, series, attempt);
         const context = attemptContext(request, control);
