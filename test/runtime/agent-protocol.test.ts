@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadConfigBundle } from "../../src/config/load.ts";
+import { parseYaml, validateDocument } from "../../src/config/schema-validator.ts";
 import type { FlowDefinition } from "../../src/config/types.ts";
 import {
   allowedAgentEvents,
@@ -10,13 +10,12 @@ import {
   type RuntimePromptInput,
 } from "../../src/runtime/agent-protocol.ts";
 
-const REVISION = "0123456789abcdef0123456789abcdef01234567";
 const FLOW_ID = "11111111-1111-4111-8111-111111111111";
 const ATTEMPT_ID = "22222222-2222-4222-8222-222222222222";
 const HEAD_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 
 async function shippedFlow(): Promise<FlowDefinition> {
-  return (await loadConfigBundle(process.cwd(), "config/stack.yaml", REVISION)).flow;
+  return validateDocument("Flow", await parseYaml("config/flows/development.yaml"));
 }
 
 function promptInput(flow: FlowDefinition, overrides: Partial<RuntimePromptInput> = {}): RuntimePromptInput {

@@ -1,7 +1,7 @@
 apiVersion: agent-flow/v1alpha1
 kind: Stack
 spec:
-  flow: config/flows/development.yaml
+  flow: config/flows/development-autonomous.yaml
   catalog: config/agents.yaml
   contracts:
     - schemas/v1/agent-decision.schema.json

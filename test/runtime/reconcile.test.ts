@@ -3,6 +3,7 @@ import test from "node:test";
 import { inspect } from "node:util";
 
 import { loadConfigBundle, type ConfigBundle } from "../../src/config/load.ts";
+import { parseYaml, validateDocument } from "../../src/config/schema-validator.ts";
 import type {
   Actor,
   AgentReceipt,
@@ -62,6 +63,7 @@ const MAINTAINER: Actor = { login: "maintainer", providerId: "7" };
 const OUTSIDER: Actor = { login: "outsider", providerId: "8" };
 
 const BUNDLE = await loadConfigBundle(process.cwd(), "config/stack.yaml", SHA);
+BUNDLE.flow = validateDocument("Flow", await parseYaml("config/flows/development.yaml"));
 
 function repository(): ProviderRepository {
   return {

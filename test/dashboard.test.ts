@@ -59,7 +59,7 @@ test("projects the real runtime and pinned configuration without paths to secret
 
   assert.equal(dashboard.available, true);
   assert.equal(dashboard.configuration.revision, bundle.revision);
-  assert.equal(Object.keys(dashboard.flow.spec.states).length, 11);
+  assert.equal(Object.keys(dashboard.flow.spec.states).length, 9);
   assert.deepEqual(Object.keys(dashboard.catalog.agents), ["architect", "planner", "developer", "reviewer"]);
   assert.equal(dashboard.preflight.status, "ready");
   assert.equal(dashboard.controller.lifecycle, "ready");
@@ -68,7 +68,7 @@ test("projects the real runtime and pinned configuration without paths to secret
     repositoryUrl: "https://github.com/example/agent-stack",
     revisionUrl: `https://github.com/example/agent-stack/tree/${bundle.revision}`,
     stackUrl: `https://github.com/example/agent-stack/blob/${bundle.revision}/config/stack.yaml`,
-    flowUrl: `https://github.com/example/agent-stack/blob/${bundle.revision}/config/flows/development.yaml`,
+    flowUrl: `https://github.com/example/agent-stack/blob/${bundle.revision}/config/flows/development-autonomous.yaml`,
     catalogUrl: `https://github.com/example/agent-stack/blob/${bundle.revision}/config/agents.yaml`,
     agentPackageUrls: {
       architect: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/architect`,

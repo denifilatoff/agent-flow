@@ -37,6 +37,19 @@ test("accepts the shipped bundle", async () => {
   await assert.doesNotReject(validateSemantics(bundle));
 });
 
+test("loads the autonomous development flow without mandatory human gates", async () => {
+  const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", REVISION);
+
+  assert.equal(bundle.flow.metadata.id, "development-autonomous");
+  assert.equal(bundle.flow.spec.states.assessment.on?.["agent-succeeded"]?.target, "planning");
+  assert.equal(bundle.flow.spec.states.planning.on?.["agent-succeeded"]?.target, "development");
+  assert.equal(
+    Object.values(bundle.flow.spec.states).some((state) => state.kind === "human-gate"),
+    false,
+  );
+  await assert.doesNotReject(validateSemantics(bundle));
+});
+
 test("uses and requires schemas from the pinned root", async () => {
   const root = await mkdtemp(join(tmpdir(), "agent-flow-pinned-schema-"));
   try {
@@ -106,7 +119,7 @@ test("reports every flow error in deterministic path order", async () => {
     guards: ["missing-guard"],
     actions: ["missing-action"],
   } as never;
-  delete bundle.flow.spec.states["assessment-review"].on;
+  delete bundle.flow.spec.states["awaiting-merge"].on;
   bundle.flow.spec.states.done.on = {
     "authorized-comment": { target: "missing-final-target" },
   };

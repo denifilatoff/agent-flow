@@ -1,0 +1,124 @@
+apiVersion: agent-flow/v1alpha1
+kind: Flow
+metadata:
+  id: development-autonomous
+  activationLabel: agent-flow:development
+  managedLabel: agent-flow:managed
+spec:
+  initial: assessment
+  states:
+    assessment:
+      kind: agent
+      agent: architect
+      resultContract: assessment
+      context: [ticket, control-state, human-comment]
+      "on":
+        agent-succeeded:
+          target: planning
+          guards: [receipt-valid, activation-present, ticket-open]
+          actions: [record-receipt]
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt, remember-resume-state]
+        attempts-exhausted:
+          target: blocked
+          actions: [remember-resume-state]
+    planning:
+      kind: agent
+      agent: planner
+      resultContract: plan
+      context: [ticket, control-state, assessment, human-comment]
+      "on":
+        agent-succeeded:
+          target: development
+          guards: [receipt-valid, activation-present, ticket-open]
+          actions: [record-receipt]
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt, remember-resume-state]
+        attempts-exhausted:
+          target: blocked
+          actions: [remember-resume-state]
+    development:
+      kind: agent
+      agent: developer
+      resultContract: development
+      context: [ticket, control-state, assessment, plan, change-request, review, human-comment]
+      "on":
+        agent-succeeded:
+          target: review
+          guards: [receipt-valid, activation-present, ticket-open]
+          actions: [record-receipt]
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt, remember-resume-state]
+        attempts-exhausted:
+          target: blocked
+          actions: [remember-resume-state]
+    review:
+      kind: agent
+      agent: reviewer
+      resultContract: review
+      context: [ticket, control-state, assessment, plan, change-request, review, human-comment]
+      "on":
+        review-approved:
+          target: awaiting-merge
+          guards: [receipt-valid, head-matches, activation-present, ticket-open]
+          actions: [record-receipt]
+        review-changes-requested:
+          target: development
+          guards: [receipt-valid, head-matches, activation-present, ticket-open]
+          actions: [record-receipt]
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt, remember-resume-state]
+        attempts-exhausted:
+          target: blocked
+          actions: [remember-resume-state]
+    awaiting-merge:
+      kind: provider-wait
+      "on":
+        change-request-updated:
+          target: review
+          guards: [activation-present, ticket-open]
+        change-request-merged:
+          target: done
+          actions: [remove-activation-label]
+        change-request-closed:
+          target: needs-human
+          resumeTarget: review
+          actions: [remember-resume-state]
+    needs-human:
+      kind: paused
+      "on":
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt]
+        human-answer-cancelled:
+          target: cancelled
+          guards: [authorized-actor, receipt-valid]
+          actions: [record-receipt, clear-resume-state, remove-activation-label]
+        human-answer-accepted:
+          target: $resume
+          guards: [authorized-actor, receipt-valid, activation-present, ticket-open]
+          actions: [record-receipt, clear-resume-state]
+        human-answer-unclear:
+          target: needs-human
+          guards: [authorized-actor, receipt-valid, activation-present, ticket-open]
+          actions: [record-receipt]
+    blocked:
+      kind: paused
+      "on":
+        authorized-comment:
+          target: $resume
+          guards: [authorized-actor, activation-present, ticket-open]
+          actions: [reset-retry-budget, clear-resume-state]
+    done:
+      kind: final
+    cancelled:
+      kind: final
