@@ -21,6 +21,9 @@ function outcome(ref: TicketRef): ReconcileOutcome {
     stateId: "assessment",
     configRevision: "a".repeat(40),
     stateKind: "agent",
+    repositoryUrl: `https://github.example.test/${ref.repository}`,
+    ticketUrl: `https://github.example.test/${ref.repository}/issues/${ref.number}`,
+    actionUrl: `https://github.example.test/${ref.repository}/issues/${ref.number}`,
     changed: false,
     started: false,
   };
@@ -681,7 +684,12 @@ test("reports controller work from its ephemeral collections", async () => {
     concurrency: 1,
     reconcile: async (ref) => {
       await gate.promise;
-      return { ...outcome(ref), stateId: "awaiting-merge", stateKind: "provider-wait" };
+      return {
+        ...outcome(ref),
+        stateId: "awaiting-merge",
+        stateKind: "provider-wait",
+        actionUrl: `https://github.example.test/${ref.repository}/pull/2`,
+      };
     },
     launcher: launcher(),
     now: () => "2026-08-29T10:00:00.000Z",
@@ -710,6 +718,9 @@ test("reports controller work from its ephemeral collections", async () => {
       stateId: null,
       configRevision: null,
       stateKind: null,
+      repositoryUrl: null,
+      ticketUrl: null,
+      actionUrl: null,
       observedAt: null,
     }],
     queue: { active: 1, queued: 0, concurrency: 1 },
@@ -730,6 +741,9 @@ test("reports controller work from its ephemeral collections", async () => {
       stateId: "awaiting-merge",
       configRevision: "a".repeat(40),
       stateKind: "provider-wait",
+      repositoryUrl: "https://github.example.test/owner/one",
+      ticketUrl: "https://github.example.test/owner/one/issues/1",
+      actionUrl: "https://github.example.test/owner/one/pull/2",
       observedAt: "2026-08-29T10:00:00.000Z",
     }],
     queue: { active: 0, queued: 0, concurrency: 1 },
@@ -763,8 +777,36 @@ test("keeps the accepted observation when same-ticket work coalesces before star
     stateId: "assessment",
     configRevision: "a".repeat(40),
     stateKind: "agent",
+    repositoryUrl: "https://github.example.test/owner/one",
+    ticketUrl: "https://github.example.test/owner/one/issues/1",
+    actionUrl: "https://github.example.test/owner/one/issues/1",
     observedAt: "2026-08-29T11:00:00.000Z",
   }]);
+});
+
+test("keeps the last completed observation visible while the ticket refreshes", async () => {
+  const refresh = Promise.withResolvers<void>();
+  let calls = 0;
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => {
+      if (++calls === 2) await refresh.promise;
+      return outcome(ref);
+    },
+    launcher: launcher(),
+    now: () => "2026-08-29T11:00:00.000Z",
+  });
+  await controller.bootstrap();
+  await controller.reconcileNow(GITHUB_ONE);
+
+  const refreshing = controller.reconcileNow(GITHUB_ONE);
+  await Promise.resolve();
+  assert.equal(controller.snapshot().tickets[0]?.stateId, "assessment");
+  assert.equal(controller.snapshot().tickets[0]?.observedAt, "2026-08-29T11:00:00.000Z");
+
+  refresh.resolve();
+  await refreshing;
 });
 
 test("keeps only bounded generic polling errors in its snapshot", async () => {

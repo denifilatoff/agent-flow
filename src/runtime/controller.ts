@@ -47,6 +47,9 @@ export interface ControllerTicketObservation extends TicketRef {
   stateId: string | null;
   configRevision: string | null;
   stateKind: ReconcileOutcome["stateKind"];
+  repositoryUrl: string | null;
+  ticketUrl: string | null;
+  actionUrl: string | null;
   observedAt: string | null;
 }
 
@@ -102,6 +105,9 @@ export function createController(dependencies: ControllerDependencies): Controll
         observation.stateId = result.stateId;
         observation.configRevision = result.configRevision;
         observation.stateKind = result.stateKind;
+        observation.repositoryUrl = result.repositoryUrl;
+        observation.ticketUrl = result.ticketUrl;
+        observation.actionUrl = result.actionUrl;
         observation.observedAt = now();
         if (result.flowInstanceId) flowInstances.add(result.flowInstanceId);
         if (result.flowInstanceId && result.stateId !== "done" && result.stateId !== "cancelled") {
@@ -229,15 +235,21 @@ export function createController(dependencies: ControllerDependencies): Controll
 
   function scheduleTicket(ref: TicketRef): Promise<void> {
     const id = ticketKey(ref);
-    const observation: ObservedTicket = {
-      ref,
-      ...copyTicket(ref),
-      flowInstanceId: null,
-      stateId: null,
-      configRevision: null,
-      stateKind: null,
-      observedAt: null,
-    };
+    const previous = observedTickets.get(id);
+    const observation: ObservedTicket = previous
+      ? { ...previous, ref, ...copyTicket(ref) }
+      : {
+          ref,
+          ...copyTicket(ref),
+          flowInstanceId: null,
+          stateId: null,
+          configRevision: null,
+          stateKind: null,
+          repositoryUrl: null,
+          ticketUrl: null,
+          actionUrl: null,
+          observedAt: null,
+        };
     const scheduled = tickets.schedule(observation);
     const accepted = acceptedObservations.get(scheduled) ?? observation;
     acceptedObservations.set(scheduled, accepted);

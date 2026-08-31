@@ -40,7 +40,7 @@ test("projects the real runtime and pinned configuration without paths to secret
     async bootstrap() {}, async run() {}, async reconcileNow() {},
     snapshot: () => ({
       lifecycle: "ready", repositories: [], tickets: [],
-      queue: { active: 0, queued: 0, concurrency: 4 }, activeWork: [], errors: [],
+      queue: { active: 0, queued: 0, concurrency: 4 }, locks: [], activeWork: [], errors: [],
     }),
   };
   const ready = {
@@ -64,6 +64,19 @@ test("projects the real runtime and pinned configuration without paths to secret
   assert.equal(dashboard.preflight.status, "ready");
   assert.equal(dashboard.controller.lifecycle, "ready");
   assert.equal(dashboard.sessions.available, true);
+  assert.deepEqual(dashboard.configuration.provenance, {
+    repositoryUrl: "https://github.com/example/agent-stack",
+    revisionUrl: `https://github.com/example/agent-stack/tree/${bundle.revision}`,
+    stackUrl: `https://github.com/example/agent-stack/blob/${bundle.revision}/config/stack.yaml`,
+    flowUrl: `https://github.com/example/agent-stack/blob/${bundle.revision}/config/flows/development.yaml`,
+    catalogUrl: `https://github.com/example/agent-stack/blob/${bundle.revision}/config/agents.yaml`,
+    agentPackageUrls: {
+      architect: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/architect`,
+      planner: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/planner`,
+      developer: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/developer`,
+      reviewer: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/reviewer`,
+    },
+  });
   for (const forbidden of ["tokenFile", "authFile", "dataDirectory", "/run/secrets/", root]) {
     assert.equal(serialized.includes(forbidden), false, `dashboard exposed ${forbidden}`);
   }

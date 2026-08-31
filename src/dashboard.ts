@@ -65,6 +65,12 @@ export async function createDashboardSnapshot(runtime: RuntimeManager, ready: Re
       revision: ready.bundle.revision,
       stackPath: effective.configuration.stack,
       stack: structuredClone(ready.bundle.stack),
+      provenance: configurationProvenance(
+        effective.configuration.repository,
+        effective.provider.type,
+        ready.bundle,
+        effective.configuration.stack,
+      ),
     },
     flow: structuredClone(ready.bundle.flow),
     catalog: structuredClone(ready.bundle.catalog),
@@ -72,6 +78,51 @@ export async function createDashboardSnapshot(runtime: RuntimeManager, ready: Re
     controller: ready.controller.snapshot(),
     sessions: await discoverSessions(effective.runtime.dataDirectory),
   };
+}
+
+function configurationProvenance(
+  repository: string,
+  provider: "github" | "gitlab",
+  bundle: ReadyDependencies["bundle"],
+  stackPath: string,
+) {
+  const repositoryUrl = repositoryWebUrl(repository);
+  if (!repositoryUrl) {
+    return {
+      repositoryUrl: null,
+      revisionUrl: null,
+      stackUrl: null,
+      flowUrl: null,
+      catalogUrl: null,
+      agentPackageUrls: Object.fromEntries(Object.keys(bundle.catalog.agents).map((agent) => [agent, null])),
+    };
+  }
+  const tree = provider === "gitlab" ? "/-/tree/" : "/tree/";
+  const blob = provider === "gitlab" ? "/-/blob/" : "/blob/";
+  const pathUrl = (kind: string, path: string) =>
+    `${repositoryUrl}${kind}${bundle.revision}/${path.split("/").map(encodeURIComponent).join("/")}`;
+  return {
+    repositoryUrl,
+    revisionUrl: `${repositoryUrl}${tree}${bundle.revision}`,
+    stackUrl: pathUrl(blob, stackPath),
+    flowUrl: pathUrl(blob, bundle.stack.spec.flow),
+    catalogUrl: pathUrl(blob, bundle.stack.spec.catalog),
+    agentPackageUrls: Object.fromEntries(Object.entries(bundle.catalog.agents)
+      .map(([agent, definition]) => [agent, pathUrl(tree, definition.package)])),
+  };
+}
+
+function repositoryWebUrl(repository: string): string | null {
+  try {
+    const url = new URL(repository);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    url.hash = "";
+    url.search = "";
+    url.pathname = url.pathname.replace(/\.git\/?$/, "").replace(/\/$/, "");
+    return url.href.replace(/\/$/, "");
+  } catch {
+    return null;
+  }
 }
 
 export async function discoverSessions(dataDirectory: string): Promise<SessionDiscovery> {

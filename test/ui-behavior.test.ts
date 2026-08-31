@@ -82,6 +82,7 @@ class TestElement {
     const text = String(value);
     this.attributes.set(name, text);
     if (name === "id") this.id = text;
+    if (name === "class") this.className = text;
     if (name.startsWith("data-")) {
       const key = name.slice(5).replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
       this.dataset[key] = text;
@@ -252,4 +253,100 @@ test("keeps session reader selection stable across slow responses and journal se
   search.dispatchEvent(new TestEvent("input"));
   assert.equal(card.hidden, false);
   assert.equal(other.hidden, true);
+});
+
+test("renders operational links and directed graph focus from the dashboard projection", async () => {
+  const script = await readFile("src/ui/app.js", "utf8");
+  const document = new TestDocument();
+  document.getElementById("refresh-interval").value = "30";
+  document.getElementById("draft-group").value = "polling";
+  for (const id of [
+    "flow-graph", "flow-revision", "node-kind", "node-inspector", "waiting-panel",
+    "configuration-source", "configuration-grid", "resources", "agents",
+  ]) document.body.append(document.getElementById(id));
+  const context: Record<string, unknown> = {
+    document,
+    localStorage: { getItem: () => null, setItem: () => undefined },
+    navigator: { clipboard: { writeText: async () => undefined } },
+    fetch: async () => ({ ok: false }),
+    MouseEvent: TestEvent,
+    setInterval: () => 0,
+    URL,
+    URLSearchParams,
+    console,
+  };
+  context.window = context;
+  const instrumented = script.replace(
+    "  renderWizard();\n  void loadDashboard();",
+    "  globalThis.__uiTest = { renderWaiting, renderGraph, renderConfiguration };",
+  );
+  vm.runInNewContext(instrumented, context);
+  const ui = (context as { __uiTest?: Record<string, Function> }).__uiTest;
+  assert.ok(ui, "app.js test hook was not installed");
+
+  ui.renderWaiting([{
+    provider: "github", repository: "owner/repo", number: 42,
+    stateId: "assessment-review", stateKind: "human-gate", configRevision: "a".repeat(40),
+    actionUrl: "https://github.example.test/owner/repo/issues/42",
+  }]);
+  const waitingLink = document.getElementById("waiting-panel").querySelectorAll("a")[0];
+  assert.equal(waitingLink?.attributes.get("href"), "https://github.example.test/owner/repo/issues/42");
+  assert.equal(waitingLink?.attributes.get("target"), "_blank");
+  assert.equal(waitingLink?.attributes.get("rel"), "noreferrer noopener");
+
+  const flow = {
+    metadata: { id: "development" },
+    spec: {
+      initial: "assessment",
+      states: {
+        assessment: { kind: "agent", agent: "architect", on: { complete: { target: "review" } } },
+        review: { kind: "human-gate", agent: "architect", on: { approve: { target: "done" } } },
+        done: { kind: "final" },
+      },
+    },
+  };
+  ui.renderGraph(flow, "a".repeat(40));
+  const graph = document.getElementById("flow-graph");
+  assert.equal(graph.querySelectorAll("marker")[0]?.attributes.get("id"), "flow-arrow");
+  const edges = graph.querySelectorAll(".flow-edge");
+  assert.equal(edges.length, 2);
+  assert.ok(edges.every((edge) => edge.attributes.get("marker-end") === "url(#flow-arrow)"));
+  assert.notEqual(edges[0]?.attributes.get("x2"), "765", "the arrow must stop at the target border, not under the node");
+  assert.ok(edges[0]?.classList.contains("outgoing"));
+  assert.ok(edges[1]?.classList.contains("muted"));
+
+  ui.renderConfiguration({
+    configuration: {
+      repository: "https://github.com/example/agent-stack.git",
+      revision: "a".repeat(40),
+      stackPath: "config/stack.yaml",
+      stack: { kind: "Stack", spec: { flow: "config/flows/development.yaml", catalog: "config/agents.yaml", contracts: [], schemas: [] } },
+      provenance: {
+        repositoryUrl: "https://github.com/example/agent-stack",
+        revisionUrl: `https://github.com/example/agent-stack/tree/${"a".repeat(40)}`,
+        stackUrl: `https://github.com/example/agent-stack/blob/${"a".repeat(40)}/config/stack.yaml`,
+        flowUrl: `https://github.com/example/agent-stack/blob/${"a".repeat(40)}/config/flows/development.yaml`,
+        catalogUrl: `https://github.com/example/agent-stack/blob/${"a".repeat(40)}/config/agents.yaml`,
+        agentPackageUrls: { architect: `https://github.com/example/agent-stack/tree/${"a".repeat(40)}/agent-packages/architect` },
+      },
+    },
+    runtime: {
+      apiVersion: "agent-flow/v1alpha1", kind: "RuntimeConfig",
+      provider: { type: "github", apiUrl: "https://api.github.com", repositories: ["owner/repo"] },
+      execution: { harnesses: ["codex"], agents: { architect: { harness: "codex", model: "gpt", reasoning: "high", maxAttempts: 1, delaySeconds: 0, timeoutSeconds: 60 } } },
+      polling: { intervalSeconds: 30, maxCallsPerMinute: 20, quotaReservePercent: 25 },
+      runtime: { concurrency: 1, http: { port: 8080 } },
+    },
+    flow,
+    catalog: { kind: "AgentCatalog", agents: { architect: { package: "agent-packages/architect" } } },
+    preflight: { status: "ready", harnesses: ["codex"] },
+  });
+  const configurationLinks = [
+    ...document.getElementById("configuration-source").querySelectorAll("a"),
+    ...document.getElementById("configuration-grid").querySelectorAll("a"),
+    ...document.getElementById("agents").querySelectorAll("a"),
+  ];
+  assert.ok(configurationLinks.some((link) => link.attributes.get("href") === "https://github.com/example/agent-stack"));
+  assert.ok(configurationLinks.some((link) => link.attributes.get("href")?.endsWith("/config/flows/development.yaml")));
+  assert.ok(configurationLinks.some((link) => link.attributes.get("href")?.endsWith("/agent-packages/architect")));
 });

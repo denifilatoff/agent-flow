@@ -199,11 +199,14 @@
     const body = element("tbody");
     for (const repository of repositories) {
       const observations = snapshot.controller.tickets.filter((ticket) => ticket.provider === repository.provider && ticket.repository === repository.repository);
+      const repositoryUrl = observations.find((ticket) => ticket.repositoryUrl)?.repositoryUrl;
       const counts = new Map();
       for (const ticket of observations) counts.set(ticket.stateKind || "unclassified", (counts.get(ticket.stateKind || "unclassified") || 0) + 1);
       const countText = [...counts].map(([kind, count]) => `${kind}: ${count}`).join(" · ") || "none";
       const item = element("tr");
-      item.append(element("td", "mono", repository.provider), element("td", "mono", repository.repository), element("td", "mono", countText), element("td", "mono", formatDate(repository.nextWindowStartedAt, "Cursor not set")));
+      const repositoryCell = element("td", "mono");
+      repositoryCell.append(repositoryUrl ? externalLink(repository.repository, repositoryUrl) : document.createTextNode(repository.repository));
+      item.append(element("td", "mono", repository.provider), repositoryCell, element("td", "mono", countText), element("td", "mono", formatDate(repository.nextWindowStartedAt, "Cursor not set")));
       body.append(item);
     }
     table.append(head, body);
@@ -236,7 +239,8 @@
     const list = element("div", "row-list");
     for (const ticket of waiting) {
       const revision = ticket.configRevision || "configRevision unavailable";
-      list.append(dataRow(ticketIdentity(ticket), `${ticket.stateId || "state unavailable"} · ${ticket.stateKind || "kind unavailable"} · ${revision}`));
+      const action = ticket.actionUrl ? externalLink(ticketIdentity(ticket), ticket.actionUrl) : ticketIdentity(ticket);
+      list.append(dataRow(action, `${ticket.stateId || "state unavailable"} · ${ticket.stateKind || "kind unavailable"} · ${revision}`));
     }
     replace("waiting-panel", list);
   }
@@ -281,7 +285,9 @@
   function journalCard(entry, discovery) {
     const { ticket, session } = entry;
     const card = element("details", "event-card");
-    const identity = ticket ? ticketIdentity(ticket) : "Ticket identifier unavailable";
+    const identity = ticket
+      ? ticket.ticketUrl ? externalLink(ticketIdentity(ticket), ticket.ticketUrl) : ticketIdentity(ticket)
+      : "Ticket identifier unavailable";
     card.dataset.search = ticket ? `${ticket.provider} ${ticket.repository} ${ticket.number}`.toLowerCase() : "";
     const summary = element("summary");
     summary.append(
@@ -289,7 +295,7 @@
       eventField("Agent work", "Unavailable"),
       eventField("Transition", ticket?.stateId ? `History not stored · current: ${ticket.stateId} · pinned: ${ticket.configRevision || "configRevision unavailable"}` : "History not stored"),
       eventField("Ticket", ticket ? `#${ticket.number}` : "Unavailable"),
-      eventField("Repository", ticket ? `${ticket.provider}:${ticket.repository}` : identity),
+      eventField("Repository", identity),
     );
     card.append(summary);
     if (session) {
@@ -400,17 +406,34 @@
       const evidence = observation
         ? `${observation.stateId || "state not yet observed"} · ${observation.configRevision || "configRevision unavailable"}`
         : "observation still pending";
-      list.append(dataRow(`${ref.provider}:${ref.repository}#${ref.number}`, evidence));
+      const identity = observation?.ticketUrl
+        ? externalLink(ticketIdentity(ref), observation.ticketUrl)
+        : ticketIdentity(ref);
+      list.append(dataRow(identity, evidence));
     }
     replace("locks-panel", list);
   }
 
   function renderConfiguration(snapshot) {
     const source = document.getElementById("configuration-source");
+    const provenance = snapshot.configuration.provenance;
     const sourceMain = element("div");
-    sourceMain.append(element("small", "", "Configuration source"), element("code", "", `${snapshot.configuration.repository} · ${snapshot.configuration.stackPath}`));
+    const sourceValue = element("code");
+    sourceValue.append(
+      provenance.repositoryUrl
+        ? externalLink(provenance.repositoryUrl, provenance.repositoryUrl)
+        : document.createTextNode(`${snapshot.configuration.repository} (local mount; web URL unavailable)`),
+      document.createTextNode(" · "),
+      provenance.stackUrl
+        ? externalLink(snapshot.configuration.stackPath, provenance.stackUrl)
+        : document.createTextNode(snapshot.configuration.stackPath),
+    );
+    sourceMain.append(element("small", "", "Configuration source"), sourceValue);
     const revision = element("div", "revision");
-    revision.append(element("span", "", "pinned revision"), document.createElement("br"), element("strong", "", snapshot.configuration.revision), document.createElement("br"), element("span", "", "read only"));
+    const revisionValue = provenance.revisionUrl
+      ? externalLink(snapshot.configuration.revision, provenance.revisionUrl)
+      : element("strong", "", snapshot.configuration.revision);
+    revision.append(element("span", "", "pinned revision"), document.createElement("br"), revisionValue, document.createElement("br"), element("span", "", "read only"));
     source.replaceChildren(sourceMain, revision);
 
     const runtime = snapshot.runtime;
@@ -422,9 +445,9 @@
         ["polling.maxCallsPerMinute", runtime.polling.maxCallsPerMinute], ["polling.quotaReservePercent", runtime.polling.quotaReservePercent],
         ["runtime.concurrency", runtime.runtime.concurrency], ["runtime.http.port", runtime.runtime.http.port],
       ]),
-      configPanel("Stack", [["kind", stack.kind], ["flow", stack.spec.flow], ["catalog", stack.spec.catalog], ["contracts", stack.spec.contracts.join(", ")], ["schemas", stack.spec.schemas.join(", ")]]),
-      configPanel("Flow", [["id", flow.metadata.id], ["activationLabel", flow.metadata.activationLabel], ["managedLabel", flow.metadata.managedLabel], ["initial", flow.spec.initial], ["states", Object.keys(flow.spec.states).length]]),
-      configPanel("AgentCatalog", [["kind", snapshot.catalog.kind], ["agents", Object.keys(snapshot.catalog.agents).join(", ")], ["source", stack.spec.catalog]]),
+      configPanel("Stack", [["kind", stack.kind], ["source", sourceReference(snapshot.configuration.stackPath, provenance.stackUrl)], ["flow", sourceReference(stack.spec.flow, provenance.flowUrl)], ["catalog", sourceReference(stack.spec.catalog, provenance.catalogUrl)], ["contracts", stack.spec.contracts.join(", ")], ["schemas", stack.spec.schemas.join(", ")]]),
+      configPanel("Flow", [["id", flow.metadata.id], ["source", sourceReference(stack.spec.flow, provenance.flowUrl)], ["activationLabel", flow.metadata.activationLabel], ["managedLabel", flow.metadata.managedLabel], ["initial", flow.spec.initial], ["states", Object.keys(flow.spec.states).length]]),
+      configPanel("AgentCatalog", [["kind", snapshot.catalog.kind], ["agents", Object.keys(snapshot.catalog.agents).join(", ")], ["source", sourceReference(stack.spec.catalog, provenance.catalogUrl)]]),
     );
     renderResources(snapshot);
     renderAgents(snapshot);
@@ -477,7 +500,7 @@
       summary.append(element("span", "mono", agentId), element("span", "tag", execution ? `${execution.harness} · ${execution.maxAttempts} × ${execution.timeoutSeconds} s` : "execution binding unavailable"));
       const body = element("div", "agent-body");
       body.append(definitionList([
-        ["package", catalog.package], ["harness", execution?.harness || "Unavailable"], ["model", execution?.model || "Unavailable"],
+        ["package", sourceReference(catalog.package, snapshot.configuration.provenance.agentPackageUrls[agentId])], ["harness", execution?.harness || "Unavailable"], ["model", execution?.model || "Unavailable"],
         ["reasoning", execution?.reasoning || "Unavailable"], ["maxAttempts", execution?.maxAttempts ?? "Unavailable"],
         ["delaySeconds", execution?.delaySeconds ?? "Unavailable"], ["timeoutSeconds", execution?.timeoutSeconds ?? "Unavailable"],
         ["states", states.map(([id]) => id).join(", ") || "None"],
@@ -494,6 +517,10 @@
     document.getElementById("flow-revision").textContent = `pinned · ${revision}`;
     const graph = document.getElementById("flow-graph");
     const title = svg("title", { id: "flow-graph-title" }, `States for ${flow.metadata.id}`);
+    const arrow = svg("marker", { id: "flow-arrow", viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+    arrow.append(svg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "context-stroke" }));
+    const definitions = svg("defs", {});
+    definitions.append(arrow);
     const positions = graphPositions(Object.keys(flow.spec.states));
     const edges = [];
     for (const [sourceId, state] of Object.entries(flow.spec.states)) {
@@ -503,16 +530,18 @@
         if (!target) continue;
         let edge;
         if (target === source) {
-          edge = svg("path", { class: "flow-edge", fill: "none", d: `M ${source.x + 75} ${source.y} C ${source.x + 30} ${source.y - 48}, ${source.x + 120} ${source.y - 48}, ${source.x + 75} ${source.y}` });
+          edge = svg("path", { class: "flow-edge", fill: "none", d: `M ${source.x + 60} ${source.y} C ${source.x + 25} ${source.y - 48}, ${source.x + 125} ${source.y - 48}, ${source.x + 90} ${source.y}`, "marker-end": "url(#flow-arrow)" });
         } else {
-          edge = svg("line", { class: "flow-edge", x1: source.x + 75, y1: source.y + 33, x2: target.x + 75, y2: target.y + 33 });
+          edge = svg("line", { class: "flow-edge", ...edgeEndpoints(source, target), "marker-end": "url(#flow-arrow)" });
         }
+        edge.setAttribute("data-source", sourceId);
+        edge.setAttribute("data-target", transition.target === "$resume" ? sourceId : transition.target);
         edge.append(svg("title", {}, `${sourceId}: ${eventName} → ${transition.target}`));
         edges.push(edge);
       }
     }
     const nodes = Object.entries(flow.spec.states).map(([id, state]) => graphNode(id, state, positions[id], () => selectNode(flow, id)));
-    graph.replaceChildren(title, ...edges, ...nodes);
+    graph.replaceChildren(title, definitions, ...edges, ...nodes);
     selectNode(flow, flow.spec.initial);
   }
 
@@ -525,6 +554,18 @@
       const [x, y] = known[id] || [45 + (index % 5) * 215, 75 + Math.floor(index / 5) * 160];
       return [id, { x, y }];
     }));
+  }
+
+  function edgeEndpoints(source, target) {
+    const dx = target.x - source.x;
+    const dy = target.y - source.y;
+    const scale = 1 / Math.max(Math.abs(dx) / 75, Math.abs(dy) / 33);
+    return {
+      x1: source.x + 75 + dx * scale,
+      y1: source.y + 33 + dy * scale,
+      x2: target.x + 75 - dx * scale,
+      y2: target.y + 33 - dy * scale,
+    };
   }
 
   function graphNode(id, state, position, select) {
@@ -549,6 +590,13 @@
       const selected = node.dataset.node === id;
       node.classList.toggle("active", selected);
       node.setAttribute("aria-pressed", String(selected));
+    }
+    for (const edge of document.querySelectorAll(".flow-edge")) {
+      const outgoing = edge.dataset.source === id;
+      const incoming = edge.dataset.target === id && !outgoing;
+      edge.classList.toggle("outgoing", outgoing);
+      edge.classList.toggle("incoming", incoming);
+      edge.classList.toggle("muted", !outgoing && !incoming);
     }
     const state = flow.spec.states[id];
     document.getElementById("node-kind").textContent = state.kind;
@@ -708,20 +756,43 @@
 
   function eventField(label, value) {
     const field = element("span", "event-field");
-    field.append(element("small", "", label), element("strong", "", value));
+    const content = element("strong");
+    content.append(value && typeof value === "object" ? value : document.createTextNode(String(value)));
+    field.append(element("small", "", label), content);
     return field;
   }
 
   function dataRow(label, value) {
     const row = element("div", "data-row");
-    row.append(element("strong", "", label), element("span", "", value));
+    const heading = element("strong");
+    heading.append(label && typeof label === "object" ? label : document.createTextNode(String(label)));
+    row.append(heading, element("span", "", value));
     return row;
   }
 
   function definitionList(values) {
     const list = element("dl", "kv-list");
-    for (const [key, value] of values) list.append(element("dt", "", key), element("dd", "", value));
+    for (const [key, value] of values) {
+      const description = element("dd");
+      description.append(value && typeof value === "object" ? value : document.createTextNode(String(value)));
+      list.append(element("dt", "", key), description);
+    }
     return list;
+  }
+
+  function sourceReference(path, url) {
+    return url ? externalLink(path, url) : document.createTextNode(path);
+  }
+
+  function externalLink(label, url) {
+    let parsed;
+    try { parsed = new URL(url); } catch { return document.createTextNode(label); }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return document.createTextNode(label);
+    const link = element("a", "external-link", label);
+    link.setAttribute("href", parsed.href);
+    link.setAttribute("target", "_blank");
+    link.setAttribute("rel", "noreferrer noopener");
+    return link;
   }
 
   function option(value, label) {

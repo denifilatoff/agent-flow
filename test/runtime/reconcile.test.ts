@@ -450,6 +450,9 @@ test("accepts one authorized activation and owns one stage label", async () => {
   const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
 
   assert.equal(outcome.stateId, "assessment");
+  assert.equal(outcome.repositoryUrl, "https://github.example.test/example-owner/example-repository");
+  assert.equal(outcome.ticketUrl, "https://github.example.test/example-owner/example-repository/issues/17");
+  assert.equal(outcome.actionUrl, outcome.ticketUrl);
   assert.equal(provider.created, 1);
   assert.deepEqual(
     provider.snapshot.labels.filter((label) => label.startsWith("agent-")),
@@ -485,6 +488,9 @@ test("ignores an activation by an actor below write permission", async () => {
     stateId: null,
     configRevision: null,
     stateKind: null,
+    repositoryUrl: "https://github.example.test/example-owner/example-repository",
+    ticketUrl: "https://github.example.test/example-owner/example-repository/issues/17",
+    actionUrl: "https://github.example.test/example-owner/example-repository/issues/17",
     changed: false,
     started: false,
   });
@@ -814,6 +820,9 @@ test("keeps terminal history independent from unavailable pinned revisions", asy
       stateId: "done",
       configRevision: OLD_SHA,
       stateKind: "final",
+      repositoryUrl: "https://github.example.test/example-owner/example-repository",
+      ticketUrl: "https://github.example.test/example-owner/example-repository/issues/17",
+      actionUrl: "https://github.example.test/example-owner/example-repository/issues/17",
       changed: false,
       started: false,
     });

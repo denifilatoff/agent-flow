@@ -72,6 +72,9 @@ export interface ReconcileOutcome {
   stateId: string | null;
   configRevision: string | null;
   stateKind: FlowState["kind"] | null;
+  repositoryUrl: string;
+  ticketUrl: string;
+  actionUrl: string;
   changed: boolean;
   started: boolean;
 }
@@ -112,7 +115,7 @@ export async function reconcileTicket(
           true,
         );
       }
-      return outcome(latest?.parsed.state ?? null, latest?.bundle ?? null, false, false, latest?.terminal);
+      return outcome(latest?.parsed.state ?? null, latest?.bundle ?? null, snapshot, false, false, latest?.terminal);
     }
     return activate(dependencies, snapshot, loaded);
   }
@@ -171,7 +174,7 @@ export async function reconcileTicket(
   const started = removeActivation
     ? false
     : await startIfNeeded(dependencies, snapshot, current.bundle, next);
-  return outcome(next, current.bundle, changed, started);
+  return outcome(next, current.bundle, snapshot, changed, started);
 }
 
 async function activate(
@@ -184,14 +187,14 @@ async function activate(
   const occurredAt = snapshot.activation.occurredAt;
   const previous = history.at(-1);
   if (!actor || !eventId || !occurredAt) {
-    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, false, false, previous?.terminal);
+    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, snapshot, false, false, previous?.terminal);
   }
   const permission = await providerCall(
     "provider permission read failed",
     () => dependencies.provider.permission(snapshot.ref.repository, actor),
   );
   if (!AUTHORIZED.has(permission)) {
-    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, false, false, previous?.terminal);
+    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, snapshot, false, false, previous?.terminal);
   }
 
   const bundle = await configCall("current configuration load failed", () => dependencies.config.loadCurrent());
@@ -223,7 +226,7 @@ async function activate(
   await createControl(dependencies.provider, snapshot.ref, control);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, bundle, control.stateId, false);
   const started = await startIfNeeded(dependencies, snapshot, bundle, control);
-  return outcome(control, bundle, true, started);
+  return outcome(control, bundle, snapshot, true, started);
 }
 
 async function cancel(
@@ -283,7 +286,7 @@ async function cancel(
   }, timestamp);
   await writeExistingControl(dependencies, snapshot.ref, latest, control);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, current.bundle, "cancelled", true);
-  return outcome(control, current.bundle, true, false);
+  return outcome(control, current.bundle, snapshot, true, false);
 }
 
 async function loadControls(
@@ -616,6 +619,7 @@ function flowEvent(
 function outcome(
   control: ControlState | null,
   bundle: ConfigBundle | null,
+  snapshot: ProviderTicketSnapshot,
   changed: boolean,
   started: boolean,
   terminal = false,
@@ -625,14 +629,29 @@ function outcome(
   }
   const stateKind = control ? terminal ? "final" : bundle?.flow.spec.states[control.stateId]?.kind : null;
   if (control && !stateKind) throw new Error("control state does not exist in pinned flow");
+  const repositoryUrl = repositoryWebUrl(snapshot.repository);
+  const ticketUrl = `${repositoryUrl}${snapshot.ref.provider === "gitlab" ? "/-/issues/" : "/issues/"}${snapshot.ref.number}`;
   return {
     flowInstanceId: control?.flowInstanceId ?? null,
     stateId: control?.stateId ?? null,
     configRevision: control?.configRevision ?? null,
     stateKind: stateKind ?? null,
+    repositoryUrl,
+    ticketUrl,
+    actionUrl: stateKind === "provider-wait" && control?.changeRequest?.url
+      ? control.changeRequest.url
+      : ticketUrl,
     changed,
     started,
   };
+}
+
+function repositoryWebUrl(repository: ProviderTicketSnapshot["repository"]): string {
+  const url = new URL(repository.cloneUrl);
+  url.hash = "";
+  url.search = "";
+  url.pathname = url.pathname.replace(/\.git\/?$/, "").replace(/\/$/, "");
+  return url.href.replace(/\/$/, "");
 }
 
 function now(dependencies: ReconcileDependencies): string {
