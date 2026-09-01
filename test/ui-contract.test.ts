@@ -31,8 +31,9 @@ test("keeps the approved visual and responsive constraints", () => {
   assert.match(css, /--radius:\s*2px/);
   assert.match(css, /min-width:\s*320px/);
   assert.match(css, /overflow-x:\s*(?:hidden|clip)/);
+  assert.match(css, /\.event-log\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
+  assert.doesNotMatch(css, /\.event-log\s*\{[^}]*grid-template-columns:\s*repeat\(2/);
   assert.match(css, /\.event-card summary\s*\{[^}]*grid-template-columns:\s*88px 80px minmax\(0, 1fr\) 64px minmax\(0, \.8fr\)/);
-  assert.match(css, /@media\s*\(max-width:\s*900px\)\s*\{\s*\.event-log\s*\{\s*grid-template-columns:\s*1fr/);
   assert.match(css, /#flow-revision\s*\{[^}]*max-width:\s*100%[^}]*overflow-wrap:\s*anywhere/);
   assert.match(css, /:focus-visible/);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
@@ -53,6 +54,8 @@ test("persists refresh settings and exposes safe diagnostic readers", () => {
   assert.doesNotMatch(script, /innerHTML/);
   assert.match(script, /journal-search/);
   assert.match(script, /filterJournal/);
+  for (const id of ["journal-previous", "journal-page", "journal-next"]) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /aria-label="Journal pages"/);
 });
 
 test("uses exact observation, lock, and bounded session evidence", () => {

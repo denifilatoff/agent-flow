@@ -93,14 +93,16 @@ tbody tr:last-child td { border-bottom: 0; }
 .search { width: min(280px, 100%); }
 .input, .select, .textarea { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid var(--border); border-radius: 2px; background: var(--surface); font-size: 12px; }
 .textarea { min-height: 220px; padding: 12px; resize: vertical; font-family: var(--mono); line-height: 1.55; }
-.event-log { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 12px; }
+.event-log { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 12px; }
 .event-card { min-width: 0; border: 1px solid var(--border); border-radius: 2px; background: var(--surface); }
-.event-card[open] { grid-column: 1 / -1; border-color: var(--fg); }
+.event-card[open] { border-color: var(--fg); }
 .event-card summary { min-height: 76px; display: grid; grid-template-columns: 88px 80px minmax(0, 1fr) 64px minmax(0, .8fr); gap: 8px; align-items: start; padding: 10px; cursor: pointer; list-style: none; }
 .event-card summary::-webkit-details-marker { display: none; }
 .event-card summary:hover { background: var(--soft); }
 .event-field small { display: block; margin-bottom: 5px; color: var(--muted); font: 8px var(--mono); text-transform: uppercase; }
 .event-field strong, .event-field span { display: block; overflow-wrap: anywhere; font: 10px/1.4 var(--mono); }
+.journal-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-top: 1px solid var(--border); font: 10px var(--mono); }
+.journal-pagination .button:disabled { cursor: default; opacity: .45; }
 .session-reader { border-top: 1px solid var(--border); }
 .session-reader-head { display: flex; justify-content: space-between; gap: 16px; padding: 10px 12px; background: var(--soft); font: 10px/1.5 var(--mono); }
 .session-tabs { display: flex; overflow-x: auto; border-bottom: 1px solid var(--border); }

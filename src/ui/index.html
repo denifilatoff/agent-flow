@@ -49,8 +49,9 @@
             <article class="panel"><div class="panel-head"><h2>Errors</h2><span class="panel-meta">up to 10 runtime errors</span></div><div class="panel-body" id="errors-panel"><p class="loading">Loading errors…</p></div></article>
           </div>
           <article class="panel section-gap">
-            <div class="panel-head journal-head"><div><h2>Observation journal</h2><span class="panel-meta">session link by flowInstanceId</span></div><label class="search"><span class="sr-only">Search by provider, repository, or ticket</span><input class="input" id="journal-search" type="search" placeholder="provider / repository / ticket"></label></div>
+            <div class="panel-head journal-head"><div><h2>Observation journal</h2><span class="panel-meta">latest 100 entries</span></div><label class="search"><span class="sr-only">Search by provider, repository, or ticket</span><input class="input" id="journal-search" type="search" placeholder="provider / repository / ticket"></label></div>
             <div class="event-log" id="journal"><p class="loading">Loading journal…</p></div>
+            <nav class="journal-pagination" aria-label="Journal pages"><button class="button" id="journal-previous" type="button" disabled>Previous</button><span id="journal-page" aria-live="polite">0 of 0</span><button class="button" id="journal-next" type="button" disabled>Next</button></nav>
           </article>
           <article class="panel section-gap"><div class="panel-head"><h2>Execution locks</h2><span class="panel-meta">per-ticket lock</span></div><div class="panel-body" id="locks-panel"><p class="loading">Loading locks…</p></div></article>
         </section>

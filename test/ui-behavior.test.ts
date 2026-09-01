@@ -181,12 +181,11 @@ function deferredResponse(content: string) {
   };
 }
 
-test("keeps session reader selection stable across slow responses and journal search", async () => {
+test("keeps session reader selection stable across slow responses", async () => {
   const script = await readFile("src/ui/app.js", "utf8");
   const document = new TestDocument();
   const journal = document.getElementById("journal");
-  const search = document.getElementById("journal-search");
-  document.body.append(journal, search);
+  document.body.append(journal);
   document.getElementById("refresh-interval").value = "30";
   document.getElementById("draft-group").value = "polling";
   const harness = deferredResponse("slow harness output");
@@ -223,8 +222,7 @@ test("keeps session reader selection stable across slow responses and journal se
   };
   const discovery = { available: true, truncated: false };
   const card = journalCard({ ticket: { provider: "github", repository: "owner/repo", number: 42 }, session }, discovery);
-  const other = journalCard({ ticket: { provider: "gitlab", repository: "other/repo", number: 7 }, session: null }, discovery);
-  journal.append(card, other);
+  journal.append(card);
   const tabs = card.querySelectorAll('[role="tab"]');
   const harnessTab = tabs.find((tab) => tab.dataset.sessionTab === "harness");
   const decisionTab = tabs.find((tab) => tab.dataset.sessionTab === "decision");
@@ -248,11 +246,68 @@ test("keeps session reader selection stable across slow responses and journal se
   assert.equal(staleHarnessOutput.textContent, "harness.log: loading…", "stale requests must not write a result");
   assert.equal(panel.children[0].children.length, 0, "session content must remain text-only");
   assert.equal(decisionTab.attributes.get("aria-selected"), "true");
+});
 
-  search.value = "owner/repo";
+test("shows and searches the latest 100 journal entries in pages of 20", async () => {
+  const script = await readFile("src/ui/app.js", "utf8");
+  const document = new TestDocument();
+  for (const id of ["journal", "journal-search", "journal-page", "journal-previous", "journal-next"]) {
+    document.body.append(document.getElementById(id));
+  }
+  document.getElementById("refresh-interval").value = "30";
+  document.getElementById("draft-group").value = "polling";
+  const context: Record<string, unknown> = {
+    document,
+    localStorage: { getItem: () => null, setItem: () => undefined },
+    navigator: { clipboard: { writeText: async () => undefined } },
+    fetch: async () => ({ ok: false }),
+    MouseEvent: TestEvent,
+    setInterval: () => 0,
+    URLSearchParams,
+    console,
+  };
+  context.window = context;
+  const instrumented = script.replace(
+    "  renderWizard();\n  void loadDashboard();",
+    "  renderWizard();\n  globalThis.__uiTest = { renderJournal };",
+  );
+  vm.runInNewContext(instrumented, context);
+  const renderJournal = (context as { __uiTest?: { renderJournal: Function } }).__uiTest?.renderJournal;
+  assert.ok(renderJournal, "app.js test hook was not installed");
+
+  const tickets = Array.from({ length: 105 }, (_, index) => {
+    const number = index + 1;
+    return {
+      provider: "github",
+      repository: `owner/ticket-${String(number).padStart(3, "0")}`,
+      number,
+      observedAt: new Date(Date.UTC(2026, 7, 29, 10, 0, number)).toISOString(),
+    };
+  });
+  renderJournal({ controller: { tickets }, sessions: { available: true, entries: [], truncated: false } });
+
+  const journal = document.getElementById("journal");
+  assert.equal(journal.querySelectorAll(".event-card").length, 20);
+  assert.match(journal.children[0].dataset.search, /ticket-105/);
+  assert.match(journal.children[19].dataset.search, /ticket-086/);
+  assert.equal(document.getElementById("journal-page").textContent, "1–20 of 100");
+
+  document.getElementById("journal-next").dispatchEvent(new TestEvent("click"));
+  assert.match(journal.children[0].dataset.search, /ticket-085/);
+  assert.match(journal.children[19].dataset.search, /ticket-066/);
+  assert.equal(document.getElementById("journal-page").textContent, "21–40 of 100");
+
+  const search = document.getElementById("journal-search");
+  search.value = "ticket-051";
   search.dispatchEvent(new TestEvent("input"));
-  assert.equal(card.hidden, false);
-  assert.equal(other.hidden, true);
+  assert.equal(journal.querySelectorAll(".event-card").length, 1);
+  assert.match(journal.children[0].dataset.search, /ticket-051/);
+  assert.equal(document.getElementById("journal-page").textContent, "1–1 of 1");
+
+  search.value = "ticket-005";
+  search.dispatchEvent(new TestEvent("input"));
+  assert.equal(journal.querySelectorAll(".event-card").length, 0);
+  assert.equal(document.getElementById("journal-page").textContent, "0 of 0");
 });
 
 test("renders operational links and directed graph focus from the dashboard projection", async () => {

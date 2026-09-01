@@ -20,6 +20,12 @@
   let loading = false;
   let wizardConfigured = false;
   let sessionReaderCount = 0;
+  let journalEntries = [];
+  let journalDiscovery = { available: false, entries: [], reason: "sessions unavailable" };
+  let journalPage = 0;
+  let journalEmptyMessage = "No observations or diagnostic sessions.";
+  const journalLimit = 100;
+  const journalPageSize = 20;
 
   function safeGet(key) {
     try { return localStorage.getItem(key); } catch { return null; }
@@ -143,6 +149,9 @@
     for (const id of ["status-metrics", "repositories-table", "queue-panel", "waiting-panel", "errors-panel", "journal", "locks-panel", "configuration-source", "configuration-grid", "resources", "agents", "node-inspector"]) {
       replace(id, empty(message));
     }
+    journalEntries = [];
+    journalPage = 0;
+    updateJournalPagination(0, 0);
     replace("flow-graph", svg("title", {}, message));
     document.getElementById("flow-revision").textContent = "Pinned Flow unavailable";
     document.getElementById("node-kind").textContent = "Unavailable";
@@ -273,13 +282,10 @@
     }
     for (const session of sessions) if (!used.has(session)) entries.push({ ticket: null, session });
     entries.sort((left, right) => String(right.session?.modifiedAt || right.ticket?.observedAt || "").localeCompare(String(left.session?.modifiedAt || left.ticket?.observedAt || "")));
-    const journal = document.getElementById("journal");
-    if (!entries.length) {
-      journal.replaceChildren(empty(snapshot.sessions.available ? "No observations or diagnostic sessions." : "Session discovery unavailable."));
-      return;
-    }
-    journal.replaceChildren(...entries.map((entry) => journalCard(entry, snapshot.sessions)));
-    filterJournal();
+    journalEntries = entries.slice(0, journalLimit);
+    journalDiscovery = snapshot.sessions;
+    journalEmptyMessage = snapshot.sessions.available ? "No observations or diagnostic sessions." : "Session discovery unavailable.";
+    renderJournalPage();
   }
 
   function journalCard(entry, discovery) {
@@ -288,7 +294,7 @@
     const identity = ticket
       ? ticket.ticketUrl ? externalLink(ticketIdentity(ticket), ticket.ticketUrl) : ticketIdentity(ticket)
       : "Ticket identifier unavailable";
-    card.dataset.search = ticket ? `${ticket.provider} ${ticket.repository} ${ticket.number}`.toLowerCase() : "";
+    card.dataset.search = journalSearch(entry);
     const summary = element("summary");
     summary.append(
       eventField("Observed", formatDate(session?.modifiedAt || ticket?.observedAt, "Time unavailable")),
@@ -390,10 +396,44 @@
   }
 
   function filterJournal() {
+    journalPage = 0;
+    renderJournalPage();
+  }
+
+  function journalSearch(entry) {
+    const ticket = entry.ticket;
+    return ticket ? `${ticket.provider} ${ticket.repository} ${ticket.number}`.toLowerCase() : "";
+  }
+
+  function renderJournalPage() {
     const query = document.getElementById("journal-search").value.trim().toLowerCase();
-    for (const card of document.querySelectorAll("#journal .event-card")) card.hidden = Boolean(query && !card.dataset.search.includes(query));
+    const matches = journalEntries.filter((entry) => !query || journalSearch(entry).includes(query));
+    const lastPage = Math.max(0, Math.ceil(matches.length / journalPageSize) - 1);
+    journalPage = Math.min(journalPage, lastPage);
+    const start = journalPage * journalPageSize;
+    const visible = matches.slice(start, start + journalPageSize);
+    const journal = document.getElementById("journal");
+    journal.replaceChildren(...(visible.length
+      ? visible.map((entry) => journalCard(entry, journalDiscovery))
+      : [empty(journalEntries.length ? "No journal entries match this search." : journalEmptyMessage)]));
+    updateJournalPagination(start, matches.length);
+  }
+
+  function updateJournalPagination(start, total) {
+    const visible = Math.min(journalPageSize, Math.max(0, total - start));
+    document.getElementById("journal-page").textContent = total ? `${start + 1}–${start + visible} of ${total}` : "0 of 0";
+    document.getElementById("journal-previous").disabled = start === 0;
+    document.getElementById("journal-next").disabled = start + visible >= total;
   }
   document.getElementById("journal-search").addEventListener("input", filterJournal);
+  document.getElementById("journal-previous").addEventListener("click", () => {
+    journalPage = Math.max(0, journalPage - 1);
+    renderJournalPage();
+  });
+  document.getElementById("journal-next").addEventListener("click", () => {
+    journalPage += 1;
+    renderJournalPage();
+  });
 
   function renderLocks(snapshot) {
     if (!snapshot.controller.locks.length) {
