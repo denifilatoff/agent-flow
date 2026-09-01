@@ -42,16 +42,37 @@ function comment(state: ControlState, id = state.flowInstanceId): ProviderCommen
   return { id, body: renderControlComment(state) };
 }
 
+function legacyControlComment(state: ControlState): string {
+  return `<!-- agent-flow-control:v1 -->\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n`;
+}
+
 test("round trips the exact control marker and increments sequence", () => {
   const body = renderControlComment(controlState({ sequence: 4 }));
   assert.equal(body.split("\n")[0], "<!-- agent-flow-control:v1 -->");
+  assert.equal(body.split("\n")[1], "<details>");
+  assert.equal(body.split("\n")[2], "<summary>Agent Flow · assessment</summary>");
   assert.equal((body.match(/```/g) ?? []).length, 2);
-  assert.ok(body.endsWith("```\n"));
+  assert.ok(body.endsWith("```\n\n</details>\n"));
 
   const next = advanceControlState(parseControlComment(body)!, { stateId: "planning" }, NOW);
   assert.equal(next.sequence, 5);
   assert.equal(next.stateId, "planning");
   assert.equal(next.updatedAt, NOW);
+});
+
+test("reads legacy expanded control comments", () => {
+  const state = controlState({ sequence: 4 });
+
+  assert.deepEqual(parseControlComment(legacyControlComment(state)), state);
+});
+
+test("rejects a collapsed summary for a different state", () => {
+  const body = renderControlComment(controlState()).replace(
+    "Agent Flow · assessment",
+    "Agent Flow · planning",
+  );
+
+  assert.throws(() => parseControlComment(body), /control comment/);
 });
 
 test("round trips a control comment after GitLab removes its final newline", () => {

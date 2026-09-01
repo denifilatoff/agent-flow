@@ -4,7 +4,8 @@ import { validateDocument } from "../config/schema-validator.ts";
 import type { ControlState } from "../config/types.js";
 
 const CONTROL_MARKER = "<!-- agent-flow-control:v1 -->";
-const CONTROL_COMMENT = /^<!-- agent-flow-control:v1 -->\n```json\n([\s\S]+)\n```\n?$/;
+const COLLAPSED_CONTROL_COMMENT = /^<!-- agent-flow-control:v1 -->\n<details>\n<summary>Agent Flow · ([^<\n]+)<\/summary>\n\n```json\n([\s\S]+)\n```\n\n<\/details>\n?$/;
+const LEGACY_CONTROL_COMMENT = /^<!-- agent-flow-control:v1 -->\n```json\n([\s\S]+)\n```\n?$/;
 const PATCH_FIELDS = new Set<keyof ControlStatePatch>([
   "stateId",
   "resumeStateId",
@@ -32,21 +33,25 @@ export type ControlStatePatch = Partial<Pick<
 export function parseControlComment(body: string): ControlState | null {
   if (body.split("\n", 1)[0] !== CONTROL_MARKER) return null;
 
-  const match = CONTROL_COMMENT.exec(body);
-  if (!match) throw new Error("invalid control comment format");
+  const collapsed = COLLAPSED_CONTROL_COMMENT.exec(body);
+  const legacy = LEGACY_CONTROL_COMMENT.exec(body);
+  const json = collapsed?.[2] ?? legacy?.[1];
+  if (!json) throw new Error("invalid control comment format");
 
   let value: unknown;
   try {
-    value = JSON.parse(match[1]!);
+    value = JSON.parse(json);
   } catch (error) {
     throw new Error("invalid control comment JSON", { cause: error });
   }
-  return validateDocument<ControlState>("ControlState", value);
+  const state = validateDocument<ControlState>("ControlState", value);
+  if (collapsed && collapsed[1] !== state.stateId) throw new Error("invalid control comment summary");
+  return state;
 }
 
 export function renderControlComment(state: ControlState): string {
   const valid = validateDocument<ControlState>("ControlState", state);
-  return `${CONTROL_MARKER}\n\`\`\`json\n${JSON.stringify(valid, null, 2)}\n\`\`\`\n`;
+  return `${CONTROL_MARKER}\n<details>\n<summary>Agent Flow · ${valid.stateId}</summary>\n\n\`\`\`json\n${JSON.stringify(valid, null, 2)}\n\`\`\`\n\n</details>\n`;
 }
 
 export function parseExpectedControlComment(body: string, expected: ControlState): ControlState | null {
