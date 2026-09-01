@@ -592,11 +592,7 @@
       node.setAttribute("aria-pressed", String(selected));
     }
     for (const edge of document.querySelectorAll(".flow-edge")) {
-      const outgoing = edge.dataset.source === id;
-      const incoming = edge.dataset.target === id && !outgoing;
-      edge.classList.toggle("outgoing", outgoing);
-      edge.classList.toggle("incoming", incoming);
-      edge.classList.toggle("muted", !outgoing && !incoming);
+      edge.classList.toggle("outgoing", edge.dataset.source === id);
     }
     const state = flow.spec.states[id];
     document.getElementById("node-kind").textContent = state.kind;

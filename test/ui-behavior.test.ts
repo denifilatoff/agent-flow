@@ -278,7 +278,7 @@ test("renders operational links and directed graph focus from the dashboard proj
   context.window = context;
   const instrumented = script.replace(
     "  renderWizard();\n  void loadDashboard();",
-    "  globalThis.__uiTest = { renderWaiting, renderGraph, renderConfiguration };",
+    "  globalThis.__uiTest = { renderWaiting, renderGraph, renderConfiguration, selectNode };",
   );
   vm.runInNewContext(instrumented, context);
   const ui = (context as { __uiTest?: Record<string, Function> }).__uiTest;
@@ -313,7 +313,12 @@ test("renders operational links and directed graph focus from the dashboard proj
   assert.ok(edges.every((edge) => edge.attributes.get("marker-end") === "url(#flow-arrow)"));
   assert.notEqual(edges[0]?.attributes.get("x2"), "765", "the arrow must stop at the target border, not under the node");
   assert.ok(edges[0]?.classList.contains("outgoing"));
-  assert.ok(edges[1]?.classList.contains("muted"));
+  assert.ok(edges.every((edge) => !edge.classList.contains("muted")));
+
+  ui.selectNode(flow, "review");
+  assert.ok(!edges[0]?.classList.contains("incoming"));
+  assert.ok(edges[1]?.classList.contains("outgoing"));
+  assert.ok(edges.every((edge) => !edge.classList.contains("muted")));
 
   ui.renderConfiguration({
     configuration: {

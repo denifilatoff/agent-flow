@@ -131,10 +131,8 @@ tbody tr:last-child td { border-bottom: 0; }
 .graph-toolbar { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--border); color: var(--muted); font: 10px var(--mono); }
 .graph-scroll { overflow: auto; background-color: var(--bg); background-image: linear-gradient(to right, color-mix(in oklch, var(--border) 24%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in oklch, var(--border) 24%, transparent) 1px, transparent 1px); background-size: 16px 16px; }
 .flow-svg { display: block; min-width: 1080px; width: 100%; height: auto; }
-.flow-edge { stroke: var(--border); stroke-width: 1.5; opacity: .45; transition: opacity 120ms ease, stroke 120ms ease, stroke-width 120ms ease; }
+.flow-edge { stroke: var(--border); stroke-width: 1.5; opacity: .8; transition: opacity 120ms ease, stroke 120ms ease, stroke-width 120ms ease; }
 .flow-edge.outgoing { stroke: var(--accent); stroke-width: 2.5; opacity: 1; }
-.flow-edge.incoming { stroke: var(--fg); stroke-width: 2; opacity: .78; }
-.flow-edge.muted { opacity: .12; }
 .flow-node rect { fill: var(--surface); stroke: var(--fg); stroke-width: 1.5; rx: 2px; ry: 2px; }
 .flow-node[data-kind="human-gate"] rect, .flow-node[data-kind="paused"] rect { stroke: var(--accent); stroke-width: 2; }
 .flow-node[data-kind="provider-wait"] rect { fill: var(--accent-soft); }
