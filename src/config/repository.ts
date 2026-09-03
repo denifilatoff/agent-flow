@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -36,22 +37,46 @@ export interface GitAuthentication {
   environment: NodeJS.ProcessEnv;
 }
 
-export function gitAuthentication(url?: URL): GitAuthentication {
-  const helper = url?.protocol === "https:" && url.hostname === "github.com" && !url.port
-    ? "gh auth git-credential"
-    : url?.protocol === "https:" && url.hostname === "gitlab.com" && !url.port
-      ? "glab auth git-credential"
-      : undefined;
+interface GitProviderCredential {
+  provider: "github" | "gitlab";
+  name: string;
+  value: string;
+  apiUrl: string;
+}
+
+export function gitAuthentication(url?: URL, credential?: GitProviderCredential): GitAuthentication {
+  const credentialMatches = url?.protocol === "https:" && credential
+    && url.hostname.toLowerCase() === providerGitHostname(credential);
+  const helper = credentialMatches
+    ? credential.provider === "github" ? "gh auth git-credential" : "glab auth git-credential"
+    : url?.protocol === "https:" && url.hostname === "github.com" && !url.port
+      ? "gh auth git-credential"
+      : url?.protocol === "https:" && url.hostname === "gitlab.com" && !url.port
+        ? "glab auth git-credential"
+        : undefined;
   const key = url && helper ? `credential.https://${url.hostname}.helper` : undefined;
   return {
     arguments: key ? ["-c", `${key}=`, "-c", `${key}=!${helper}`] : [],
-    environment: { GIT_TERMINAL_PROMPT: "0" },
+    environment: {
+      GIT_TERMINAL_PROMPT: "0",
+      ...(credentialMatches ? { [credential.name]: credential.value } : {}),
+    },
   };
 }
 
-export function configurationGitAuthentication(source: string): GitAuthentication {
+export function configurationGitAuthentication(
+  source: string,
+  credential?: GitProviderCredential,
+): GitAuthentication {
   const normalized = normalizeConfigurationSource(source);
-  return gitAuthentication(isAbsolute(normalized) ? undefined : new URL(normalized));
+  return gitAuthentication(isAbsolute(normalized) ? undefined : new URL(normalized), credential);
+}
+
+function providerGitHostname(credential: GitProviderCredential): string {
+  const hostname = new URL(credential.apiUrl).hostname.toLowerCase();
+  if (credential.provider !== "github") return hostname;
+  if (hostname === "api.github.com") return "github.com";
+  return hostname.startsWith("api.") && hostname.endsWith(".ghe.com") ? hostname.slice(4) : hostname;
 }
 
 interface ConfigurationSource {
@@ -93,6 +118,7 @@ export interface PreparedConfigurationRepository {
 export async function prepareConfigurationRepository(
   source: string,
   dataDirectory: string,
+  authenticationOverride?: GitAuthentication,
 ): Promise<PreparedConfigurationRepository> {
   const configured = configurationSource(source);
   if (configured.kind === "local") {
@@ -101,7 +127,7 @@ export async function prepareConfigurationRepository(
 
   const dataRoot = await prepareDataRoot(dataDirectory);
   const target = resolve(dataRoot, "config-repository");
-  const authentication = configurationGitAuthentication(configured.normalized);
+  const authentication = authenticationOverride ?? configurationGitAuthentication(configured.normalized);
   try {
     const entry = await lstat(target);
     if (entry.isSymbolicLink()) throw new Error("configuration repository must not be a symbolic link");
@@ -124,9 +150,7 @@ export async function prepareConfigurationRepository(
         maxBuffer: 16 * 1024 * 1024,
         env: { ...process.env, ...authentication.environment },
       });
-    } catch {
-      throw new Error("configuration repository fetch failed");
-    }
+    } catch {}
     return { source: configured.normalized, repository: target };
   } catch (error) {
     if (!isNodeError(error, "ENOENT")) throw error;
@@ -213,28 +237,76 @@ async function listMaterializedFiles(root: string, path: string): Promise<string
 
 interface TreeEntry {
   mode: string;
+  objectId: string;
   type: string;
   path: string;
 }
 
-function treeEntries(output: Buffer): TreeEntry[] {
+function treeEntries(output: Buffer, requiredRoots = ROOTS): TreeEntry[] {
   const entries = output
     .toString("utf8")
     .split("\0")
     .filter(Boolean)
     .map((record) => {
-      const match = /^(\d+) (\w+) [0-9a-f]{40}\t(.+)$/.exec(record);
+      const match = /^(\d+) (\w+) ([0-9a-f]{40})\t(.+)$/.exec(record);
       if (!match) throw new Error("invalid Git tree entry");
-      const [, mode, type, path] = match;
+      const [, mode, type, objectId, path] = match;
       if (mode === "120000" || type !== "blob" || !isSafePath(path)) {
         throw new Error(`unsafe Git tree entry ${path}`);
       }
-      return { mode, type, path };
+      return { mode, objectId, type, path };
     });
-  if (!ROOTS.every((root) => entries.some((entry) => entry.path.startsWith(root)))) {
+  if (!requiredRoots.every((root) => entries.some((entry) => entry.path.startsWith(root)))) {
     throw new Error("Git tree is missing a required configuration root");
   }
   return entries;
+}
+
+export async function stagePinnedPackage(
+  materializedRoot: string,
+  revision: string,
+  packagePath: string,
+  destination: string,
+): Promise<string> {
+  if (!SHA.test(revision) || !packagePath.startsWith("agent-packages/") || !isSafePath(packagePath)) {
+    throw new Error("pinned agent package identity is invalid");
+  }
+  const repository = resolve(materializedRoot, ".source.git");
+  const normalized = revision.toLowerCase();
+  if (await resolveRevision(repository, normalized) !== normalized) {
+    throw new Error("pinned agent package revision does not match");
+  }
+  const verifyObjects = () => git(repository, [
+    "-c", "fsck.skipList=/dev/null",
+    "fsck", "--strict", "--full", "--no-dangling", "--no-reflogs", normalized,
+  ]);
+  await verifyObjects();
+  const prefix = `${packagePath}/`;
+  const entries = treeEntries(
+    await git(repository, ["ls-tree", "-r", "-z", "--full-tree", normalized, "--", packagePath]),
+    [prefix],
+  );
+  await verifyObjects();
+  const output = resolve(destination);
+  await mkdir(output);
+  try {
+    for (const entry of entries) {
+      const target = resolve(output, entry.path.slice(prefix.length));
+      if (!isInside(output, target)) throw new Error(`unsafe Git tree entry ${entry.path}`);
+      await mkdir(dirname(target), { recursive: true });
+      const content = await git(repository, ["show", `${normalized}:${entry.path}`]);
+      const objectId = createHash("sha1")
+        .update(`blob ${content.length}\0`)
+        .update(content)
+        .digest("hex");
+      if (objectId !== entry.objectId) throw new Error(`pinned Git blob ${entry.path} failed verification`);
+      await writeFile(target, content, { flag: "wx" });
+    }
+    return output;
+  } catch (error) {
+    await rm(output, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export async function resolveRevision(repository: string, requested?: string): Promise<string> {
@@ -261,6 +333,15 @@ export async function materializeRevision(repository: string, revision: string, 
     if (!(error instanceof Error) || !/ENOENT/.test(String((error as NodeJS.ErrnoException).code))) throw error;
   }
 
+  return createMaterialization(repository, sha, configRoot, target);
+}
+
+async function createMaterialization(
+  repository: string,
+  sha: string,
+  configRoot: string,
+  target: string,
+): Promise<string> {
   const entries = treeEntries(await git(repository, ["ls-tree", "-r", "-z", "--full-tree", sha, "--", "config", "schemas/v1", "agent-packages"]));
   const temporary = await mkdtemp(resolve(configRoot, `.${sha}.`));
 
@@ -287,11 +368,41 @@ export async function materializeRevision(repository: string, revision: string, 
   return target;
 }
 
+async function restoreMaterialization(target: string, sha: string, configRoot: string): Promise<string> {
+  const entry = await lstat(target);
+  if (!entry.isDirectory() || entry.isSymbolicLink()) {
+    throw new Error(`materialization directory ${target} is incomplete`);
+  }
+  const retainedRepository = resolve(target, ".source.git");
+  try {
+    if (await resolveRevision(retainedRepository, sha) !== sha) {
+      throw new Error("revision mismatch");
+    }
+  } catch {
+    throw new Error(`materialization directory ${target} is incomplete`);
+  }
+
+  const repair = await mkdtemp(resolve(configRoot, `.${sha}.repair.`));
+  const stale = resolve(repair, "stale");
+  await rename(target, stale);
+  try {
+    const restored = await createMaterialization(resolve(stale, ".source.git"), sha, configRoot, target);
+    await rm(repair, { recursive: true, force: true });
+    return restored;
+  } catch (error) {
+    try {
+      await rename(stale, target);
+    } catch {}
+    await rm(repair, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 export async function loadPinnedConfig(
   repository: string,
   dataDirectory: string,
   requested?: string,
-  controllerPath = "config/controller.example.yaml",
+  stackPath = "config/stack.yaml",
 ): Promise<ConfigBundle> {
   if (requested !== undefined) {
     if (!SHA.test(requested)) throw new Error("requested revision must be a 40-character SHA");
@@ -306,11 +417,17 @@ export async function loadPinnedConfig(
       const normalized = requested.toLowerCase();
       const materialized = resolve(configRoot, normalized);
       if (await completeDirectory(materialized, normalized)) {
-        return loadConfigBundle(materialized, controllerPath, normalized);
+        return loadConfigBundle(materialized, stackPath, normalized);
+      }
+      try {
+        const restored = await restoreMaterialization(materialized, normalized, configRoot);
+        return loadConfigBundle(restored, stackPath, normalized);
+      } catch (error) {
+        if (!isNodeError(error, "ENOENT")) throw error;
       }
     }
   }
   const revision = await resolveRevision(repository, requested);
   const root = await materializeRevision(repository, revision, dataDirectory);
-  return loadConfigBundle(root, controllerPath, revision);
+  return loadConfigBundle(root, stackPath, revision);
 }

@@ -64,6 +64,15 @@ test("reads legacy visible control comments", () => {
   assert.deepEqual(parseControlComment(legacyComment(JSON.stringify(state, null, 2))), state);
 });
 
+test("reads collapsed comments from the UI branch without losing the pinned state", () => {
+  const state = controlState({ sequence: 4 });
+  const body = `<!-- agent-flow-control:v1 -->\n<details>\n<summary>Agent Flow · assessment</summary>\n\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n\n</details>\n`;
+  assert.deepEqual(parseControlComment(body), state);
+  assert.deepEqual(parseControlComment(body.trimEnd()), state);
+  assert.throws(() => parseControlComment(body.replace("Agent Flow · assessment", "Agent Flow · planning")),
+    /control comment summary/);
+});
+
 test("round trips a control comment after GitLab removes its final newline", () => {
   const state = controlState({ sequence: 4 });
   const gitLabBody = renderControlComment(state).slice(0, -1);

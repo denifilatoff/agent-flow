@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { access, chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -14,8 +14,8 @@ import {
   prepareConfigurationRepository,
   configurationGitAuthentication,
   resolveRevision,
+  stagePinnedPackage,
 } from "../../src/config/repository.ts";
-import { createProductionDependencies } from "../../src/main.ts";
 
 const exec = promisify(execFile);
 
@@ -56,16 +56,6 @@ class TestRepository {
     return (await exec("git", ["-C", this.path, "rev-parse", "HEAD"])).stdout.trim();
   }
 
-  async configure(source: string, dataDirectory: string): Promise<void> {
-    const controller = join(this.path, "config/controller.example.yaml");
-    const contents = (await readFile(controller, "utf8"))
-      .replace("repository: /config", `repository: ${source}`)
-      .replace("dataDirectory: /data", `dataDirectory: ${dataDirectory}`);
-    await writeFile(controller, contents);
-    await exec("git", ["-C", this.path, "add", "config/controller.example.yaml"]);
-    await exec("git", ["-C", this.path, "commit", "-m", "configure remote source"]);
-  }
-
   async replaceHistory(): Promise<void> {
     const branch = (await exec("git", ["-C", this.path, "branch", "--show-current"])).stdout.trim();
     await exec("git", ["-C", this.path, "checkout", "--orphan", "replacement"]);
@@ -96,69 +86,29 @@ test("clones a remote configuration source and fetches its new HEAD only on a la
   assert.equal((await loadPinnedConfig(second.repository, data, firstSha)).revision, firstSha);
 });
 
-test("a production dependency prepares its Git source once per service startup", async (t) => {
+test("uses an exact cached revision when the configuration remote is unavailable", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  const unavailable = `${repo.path}-unavailable`;
+  t.after(async () => Promise.all([
+    rm(unavailable, { recursive: true, force: true }),
+    rm(data, { recursive: true, force: true }),
+  ]));
+  const source = pathToFileURL(repo.path).href;
+  const prepared = await prepareConfigurationRepository(source, data);
+  const revision = await repo.head();
+  await rename(repo.path, unavailable);
+
+  const cached = await prepareConfigurationRepository(source, data);
+  assert.equal((await loadPinnedConfig(cached.repository, data, revision)).revision, revision);
+  assert.equal(cached.repository, prepared.repository);
+});
+
+test("restores a mutated materialization after its pinned commit is pruned from the mirror", async (t) => {
   const repo = await TestRepository.create();
   const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
   t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
   const source = pathToFileURL(repo.path).href;
-  await repo.configure(source, data);
-  const dependencies = createProductionDependencies({
-    AGENT_FLOW_CONFIG_REPOSITORY: source,
-    AGENT_FLOW_DATA_DIRECTORY: data,
-  }, 8080);
-
-  const first = await dependencies.loadConfig();
-  await repo.commitChangedFlow();
-  const sameStartup = await dependencies.loadConfig();
-
-  assert.equal(sameStartup.revision, first.revision);
-  assert.notEqual(first.revision, await repo.head());
-  const nextStartup = await createProductionDependencies({
-    AGENT_FLOW_CONFIG_REPOSITORY: source,
-    AGENT_FLOW_DATA_DIRECTORY: data,
-  }, 8080).loadConfig();
-  assert.equal(nextStartup.revision, await repo.head());
-});
-
-test("a production dependency retains its verified bundle for the service lifetime", async (t) => {
-  const repo = await TestRepository.create();
-  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
-  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
-  const source = pathToFileURL(repo.path).href;
-  await repo.configure(source, data);
-  const dependencies = createProductionDependencies({
-    AGENT_FLOW_CONFIG_REPOSITORY: source,
-    AGENT_FLOW_DATA_DIRECTORY: data,
-  }, 8080);
-  const first = await dependencies.loadConfig();
-  await rm(join(data, "config", first.revision, ".source.git"), { recursive: true });
-
-  assert.equal((await dependencies.loadConfig()).revision, first.revision);
-  await assert.rejects(createProductionDependencies({
-    AGENT_FLOW_CONFIG_REPOSITORY: source,
-    AGENT_FLOW_DATA_DIRECTORY: data,
-  }, 8080).loadConfig());
-});
-
-test("a production dependency never caches a bundle that failed runtime validation", async (t) => {
-  const repo = await TestRepository.create();
-  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
-  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
-  const dependencies = createProductionDependencies({
-    AGENT_FLOW_CONFIG_REPOSITORY: pathToFileURL(repo.path).href,
-    AGENT_FLOW_DATA_DIRECTORY: data,
-  }, 8080);
-
-  await assert.rejects(dependencies.loadConfig(), /runtime paths/i);
-  await assert.rejects(dependencies.loadConfig(), /runtime paths/i);
-});
-
-test("loads a verified materialization after its pinned commit is pruned from the mirror", async (t) => {
-  const repo = await TestRepository.create();
-  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
-  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
-  const source = pathToFileURL(repo.path).href;
-  await repo.configure(source, data);
   const prepared = await prepareConfigurationRepository(source, data);
   const pinned = await loadPinnedConfig(prepared.repository, data);
 
@@ -171,14 +121,64 @@ test("loads a verified materialization after its pinned commit is pruned from th
   const recovered = await loadPinnedConfig(prepared.repository, data, pinned.revision);
   assert.equal(recovered.revision, pinned.revision);
   assert.equal(recovered.flow.metadata.id, pinned.flow.metadata.id);
-  const productionRecovered = await createProductionDependencies({
-    AGENT_FLOW_CONFIG_REPOSITORY: source,
-    AGENT_FLOW_CONFIG_REVISION: pinned.revision,
-    AGENT_FLOW_DATA_DIRECTORY: data,
-  }, 8080).loadConfig();
-  assert.equal(productionRecovered.revision, pinned.revision);
-  await writeFile(join(data, "config", pinned.revision, "config/agents.yaml"), "spoofed: true\n");
-  await assert.rejects(loadPinnedConfig(prepared.repository, data, pinned.revision));
+  const catalogPath = join(data, "config", pinned.revision, "config/agents.yaml");
+  const expectedCatalog = await readFile(catalogPath, "utf8");
+  await writeFile(catalogPath, "spoofed: true\n");
+
+  const restored = await loadPinnedConfig(prepared.repository, data, pinned.revision);
+  assert.equal(restored.revision, pinned.revision);
+  assert.equal(await readFile(catalogPath, "utf8"), expectedCatalog);
+});
+
+test("stages an exact private agent package after the shared tree is mutated", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  const pinned = await loadPinnedConfig(repo.path, data);
+  const sharedManifest = join(pinned.root, "agent-packages/developer/apm.yml");
+  const expected = await readFile(sharedManifest, "utf8");
+  await repo.replaceHistory();
+  await assert.rejects(resolveRevision(repo.path, pinned.revision));
+  await writeFile(sharedManifest, "name: spoofed\n");
+
+  const packageDirectories = await Promise.all(["first", "second"].map((attempt) => stagePinnedPackage(
+    pinned.root,
+    pinned.revision,
+    "agent-packages/developer",
+    join(data, `${attempt}-private-attempt-package`),
+  )));
+
+  for (const packageDirectory of packageDirectories) {
+    assert.equal(await readFile(join(packageDirectory, "apm.yml"), "utf8"), expected);
+  }
+  assert.equal(await readFile(sharedManifest, "utf8"), "name: spoofed\n");
+});
+
+test("rejects a private package when a retained loose blob has spoofed bytes", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  const pinned = await loadPinnedConfig(repo.path, data);
+  const objectStore = join(pinned.root, ".source.git");
+  const path = "agent-packages/developer/apm.yml";
+  const objectId = (await exec("git", ["--no-replace-objects", "-C", objectStore, "rev-parse", `${pinned.revision}:${path}`])).stdout.trim();
+  const spoofed = Buffer.from("name: spoofed\n");
+  const loose = join(objectStore, "objects", objectId.slice(0, 2), objectId.slice(2));
+  await mkdir(join(objectStore, "objects", objectId.slice(0, 2)), { recursive: true });
+  await rm(loose, { force: true });
+  await writeFile(loose, deflateSync(Buffer.concat([
+    Buffer.from(`blob ${spoofed.length}\0`),
+    spoofed,
+  ])));
+  const destination = join(data, "corrupt-private-attempt-package");
+
+  await assert.rejects(stagePinnedPackage(
+    pinned.root,
+    pinned.revision,
+    "agent-packages/developer",
+    destination,
+  ));
+  await assert.rejects(access(destination));
 });
 
 test("rejects a marker-only materialization for a pruned revision", async (t) => {
@@ -193,7 +193,7 @@ test("rejects a marker-only materialization for a pruned revision", async (t) =>
   await assert.rejects(loadPinnedConfig(repo.path, data, sha), /revision|materialization/i);
 });
 
-test("rejects a materialization rewritten through a Git replacement ref", async (t) => {
+test("restores a materialization rewritten through a Git replacement ref", async (t) => {
   const repo = await TestRepository.create();
   const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));
   t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
@@ -202,11 +202,15 @@ test("rejects a materialization rewritten through a Git replacement ref", async 
   const replacement = await repo.head();
   const materialized = join(data, "config", pinned.revision);
   const objectStore = join(materialized, ".source.git");
+  const flowPath = join(materialized, "config/flows/development.yaml");
+  const expectedFlow = await readFile(flowPath, "utf8");
   await exec("git", ["-C", objectStore, "fetch", repo.path, replacement]);
   await exec("git", ["-C", objectStore, "replace", pinned.revision, replacement]);
-  await cp(join(repo.path, "config/flows/development.yaml"), join(materialized, "config/flows/development.yaml"));
+  await cp(join(repo.path, "config/flows/development.yaml"), flowPath);
 
-  await assert.rejects(loadPinnedConfig(repo.path, data, pinned.revision));
+  const restored = await loadPinnedConfig(repo.path, data, pinned.revision);
+  assert.equal(restored.revision, pinned.revision);
+  assert.equal(await readFile(flowPath, "utf8"), expectedFlow);
 });
 
 test("rejects a loose Git object whose bytes do not match its object ID", async (t) => {
@@ -216,10 +220,10 @@ test("rejects a loose Git object whose bytes do not match its object ID", async 
   const pinned = await loadPinnedConfig(repo.path, data);
   const materialized = join(data, "config", pinned.revision);
   const objectStore = join(materialized, ".source.git");
-  const path = "config/controller.example.yaml";
+  const path = "config/flows/development.yaml";
   const objectId = (await exec("git", ["--no-replace-objects", "-C", objectStore, "rev-parse", `${pinned.revision}:${path}`])).stdout.trim();
   const original = await readFile(join(materialized, path), "utf8");
-  const spoofed = original.replace("intervalSeconds: 300", "intervalSeconds: 600");
+  const spoofed = original.replace("id: development", "id: spoofed-development");
   assert.notEqual(spoofed, original);
   const loose = join(objectStore, "objects", objectId.slice(0, 2), objectId.slice(2));
   await mkdir(join(objectStore, "objects", objectId.slice(0, 2)), { recursive: true });
@@ -264,6 +268,22 @@ printf 'username=fixture\\npassword=fixture-token\\n'
 
   assert.deepEqual(configurationGitAuthentication("file:///tmp/config.git").arguments, []);
   assert.deepEqual(configurationGitAuthentication("https://git.example.test/config.git").arguments, []);
+  const enterprise = configurationGitAuthentication("https://github.enterprise.test/config.git", {
+    provider: "github", name: "GH_ENTERPRISE_TOKEN", value: "mounted-token",
+    apiUrl: "https://github.enterprise.test/api/v3",
+  });
+  assert.match(enterprise.arguments.join(" "), /gh auth git-credential/);
+  assert.equal(enterprise.environment.GH_ENTERPRISE_TOKEN, "mounted-token");
+  const enterpriseCloud = configurationGitAuthentication("https://example.ghe.com/config.git", {
+    provider: "github", name: "GH_TOKEN", value: "mounted-token",
+    apiUrl: "https://api.example.ghe.com",
+  });
+  assert.match(enterpriseCloud.arguments.join(" "), /gh auth git-credential/);
+  assert.equal(enterpriseCloud.environment.GH_TOKEN, "mounted-token");
+  assert.equal(JSON.stringify(configurationGitAuthentication("https://other.test/config.git", {
+    provider: "github", name: "GH_ENTERPRISE_TOKEN", value: "mounted-token",
+    apiUrl: "https://github.enterprise.test/api/v3",
+  })).includes("mounted-token"), false);
 });
 
 test("rejects a configuration mirror with the wrong origin", async (t) => {

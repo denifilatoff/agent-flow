@@ -11,11 +11,11 @@ test("rejects unknown fields and unsupported versions", async () => {
 });
 
 test("accepts every shipped YAML document", async () => {
+  validateDocument("Stack", await parseYaml("config/stack.yaml"));
+  validateDocument("Flow", await parseYaml("config/flows/development-autonomous.yaml"));
   validateDocument("Flow", await parseYaml("config/flows/development.yaml"));
   validateDocument("Flow", await parseYaml("config/flows/development-autonomous.yaml"));
   validateDocument("AgentCatalog", await parseYaml("config/agents.yaml"));
-  validateDocument("AgentCatalog", await parseYaml("config/agents-codex.yaml"));
-  validateDocument("ControllerConfig", await parseYaml("config/controller.example.yaml"));
 });
 
 test("accepts a minimal AgentDecision and rejects invalid decisions", () => {
@@ -26,53 +26,22 @@ test("accepts a minimal AgentDecision and rejects invalid decisions", () => {
   assert.throws(() => validateDocument<AgentDecision>("AgentDecision", { event: "agent-succeeded", extra: true }));
 });
 
-test("accepts a target-specific catalog and rejects unsafe catalog paths", async () => {
-  const value = await parseYaml("config/controller.example.yaml") as Record<string, unknown>;
-  const configuration = value.configuration as Record<string, unknown>;
-  validateDocument("ControllerConfig", {
-    ...value,
-    configuration: { ...configuration, catalog: "config/agents-codex.yaml" },
-  });
-  for (const catalog of ["../agents.yaml", "config/../agents.yaml", "/config/agents.yaml", "agents.yaml"]) {
-    assert.throws(() => validateDocument("ControllerConfig", {
-      ...value,
-      configuration: { ...configuration, catalog },
-    }));
-  }
-});
-
-test("accepts credential-free Git configuration URLs", async () => {
-  const value = await parseYaml("config/controller.example.yaml") as Record<string, unknown>;
-  const configuration = value.configuration as Record<string, unknown>;
-  validateDocument("ControllerConfig", {
-    ...value,
-    configuration: { ...configuration, repository: "https://example.test/agent-flow-config.git" },
-  });
-  assert.throws(() => validateDocument("ControllerConfig", {
-    ...value,
-    configuration: { ...configuration, repository: "https://user:secret@example.test/config.git" },
+test("keeps the Git agent catalog logical", async () => {
+  const catalog = await parseYaml("config/agents.yaml") as Record<string, unknown>;
+  validateDocument("AgentCatalog", catalog);
+  const agents = catalog.agents as Record<string, Record<string, unknown>>;
+  assert.deepEqual(agents.architect, { package: "agent-packages/architect" });
+  assert.throws(() => validateDocument("AgentCatalog", {
+    ...catalog,
+    agents: { ...agents, architect: { ...agents.architect, target: "codex" } },
   }));
 });
 
-test("accepts only provider CLI token environment names", async () => {
-  const value = await parseYaml("config/controller.example.yaml") as Record<string, unknown>;
-  const providers = value.providers as Record<string, Record<string, unknown>>;
-  const github = providers.github!;
-  for (const tokenEnv of ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN"]) {
-    validateDocument("ControllerConfig", { ...value, providers: { github: { ...github, tokenEnv } } });
-  }
-  const gitlab = { ...github, apiUrl: "https://gitlab.test/api/v4", repositories: ["group/repo"] };
-  for (const tokenEnv of ["OAUTH_TOKEN", "GITLAB_TOKEN"]) {
-    validateDocument("ControllerConfig", { ...value, providers: { gitlab: { ...gitlab, tokenEnv } } });
-  }
-  for (const [provider, config] of [["github", github], ["gitlab", gitlab]] as const) {
-    for (const tokenEnv of [
-      "HOME", "AGENT_FLOW_CONTEXT_PATH", "GH_CONFIG_DIR", "GLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "ARBITRARY_TOKEN",
-    ]) {
-      assert.throws(() => validateDocument("ControllerConfig", {
-        ...value, providers: { [provider]: { ...config, tokenEnv } },
-      }));
-    }
+test("rejects unsafe stack references", async () => {
+  const stack = await parseYaml("config/stack.yaml") as Record<string, unknown>;
+  const spec = stack.spec as Record<string, unknown>;
+  for (const flow of ["../flow.yaml", "config/../flow.yaml", "/config/flow.yaml", "flow.yaml"]) {
+    assert.throws(() => validateDocument("Stack", { ...stack, spec: { ...spec, flow } }));
   }
 });
 

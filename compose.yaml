@@ -3,21 +3,15 @@ services:
     init: true
     build:
       context: .
-    environment:
-      AGENT_FLOW_CONTROLLER_CONFIG: ${AGENT_FLOW_CONTROLLER_CONFIG:-config/controller.example.yaml}
-      AGENT_FLOW_CONFIG_REPOSITORY: ${AGENT_FLOW_CONFIG_REPOSITORY:-/config}
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${AGENT_FLOW_HTTP_PORT:-8080}:8080"
     volumes:
-      - ${AGENT_FLOW_CONFIG_PATH:-.}:/config:ro
-      - ${AGENT_FLOW_DATA_PATH:-./.agent-flow-data}:/data
-      - ${HOME}/.config/gh:/home/agent/.config/gh:ro
-      - ${HOME}/.config/glab-cli:/home/agent/.config/glab-cli:ro
-      - ${HOME}/.codex:/home/agent/.codex:ro
-      - ${HOME}/.claude:/home/agent/.claude:ro
-      - ${HOME}/.claude.json:/home/agent/.claude.json:ro
+      - ${AGENT_FLOW_RUNTIME_PATH:-./config/runtime.example.yaml}:/etc/agent-flow/runtime.yaml:ro
+      - ${AGENT_FLOW_PROVIDER_TOKEN_PATH:?set AGENT_FLOW_PROVIDER_TOKEN_PATH}:/run/secrets/agent-flow/provider-token:ro
+      - ${AGENT_FLOW_CODEX_AUTH_PATH:?set AGENT_FLOW_CODEX_AUTH_PATH}:/run/secrets/agent-flow/codex-auth:ro
+      - ${AGENT_FLOW_CLAUDE_AUTH_PATH:?set AGENT_FLOW_CLAUDE_AUTH_PATH}:/run/secrets/agent-flow/claude-auth:ro
+      - ${AGENT_FLOW_OPERATOR_PASSWORD_PATH:?set AGENT_FLOW_OPERATOR_PASSWORD_PATH}:/run/secrets/agent-flow/operator-password:ro
+      - ${AGENT_FLOW_DATA_PATH:-./.agent-flow-data}:/var/lib/agent-flow
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { ConfigBundle } from "../config/load.js";
+import { validateBundleDocument, type ConfigBundle } from "../config/load.ts";
 import type {
   AttemptSeries,
   ControlChangeRequest,
@@ -62,6 +62,7 @@ export interface ReconcileDependencies {
   config: ReconcileConfigSource;
   launcher: AttemptLauncher;
   writeControl: ControlWriter;
+  isAllowed?(ref: TicketRef): boolean;
   now?: () => string;
   newFlowInstanceId?: () => string;
 }
@@ -69,6 +70,11 @@ export interface ReconcileDependencies {
 export interface ReconcileOutcome {
   flowInstanceId: string | null;
   stateId: string | null;
+  configRevision: string | null;
+  stateKind: FlowState["kind"] | null;
+  repositoryUrl: string;
+  ticketUrl: string;
+  actionUrl: string;
   changed: boolean;
   started: boolean;
 }
@@ -107,15 +113,16 @@ export async function reconcileTicket(
           latest.bundle,
           latest.parsed.state.stateId,
           true,
+          latest.parsed.state.activationLabel,
         );
       }
-      return outcome(latest?.parsed.state ?? null, false, false);
+      return outcome(latest?.parsed.state ?? null, latest?.bundle ?? null, snapshot, false, false, latest?.terminal);
     }
     return activate(dependencies, snapshot, loaded);
   }
 
   const current = active[0]!;
-  assertAllowed(current.bundle, ref);
+  assertAllowed(dependencies, ref);
   const control = current.parsed.state;
   const activationLabel = control.activationLabel ?? current.bundle.flow.metadata.activationLabel;
   const activeSnapshot = {
@@ -143,7 +150,7 @@ export async function reconcileTicket(
   let machineEvent = deriveEvent(activeSnapshot, control, current.bundle.flow);
   if (!machineEvent && control.stateId === "blocked") {
     const source = await firstAuthorizedComment(provider, ref, snapshot, control);
-    if (source) machineEvent = flowEvent("authorized-comment", snapshot, true);
+    if (source) machineEvent = flowEvent("authorized-comment", activeSnapshot, true);
   }
 
   if (machineEvent) {
@@ -194,7 +201,7 @@ export async function reconcileTicket(
   const started = removeActivation
     ? false
     : await startIfNeeded(dependencies, activeSnapshot, current.bundle, next);
-  return outcome(next, changed, started);
+  return outcome(next, current.bundle, activeSnapshot, changed, started);
 }
 
 async function activate(
@@ -206,18 +213,21 @@ async function activate(
   const eventId = snapshot.activation.eventId;
   const occurredAt = snapshot.activation.occurredAt;
   const activationLabel = snapshot.activation.label;
+  const previous = history.at(-1);
   if (!actor || !eventId || !occurredAt || !activationLabel) {
-    return outcome(history.at(-1)?.parsed.state ?? null, false, false);
+    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, snapshot, false, false, previous?.terminal);
   }
   const permission = await providerCall(
     "provider permission read failed",
     () => dependencies.provider.permission(snapshot.ref.repository, actor),
   );
-  if (!AUTHORIZED.has(permission)) return outcome(history.at(-1)?.parsed.state ?? null, false, false);
+  if (!AUTHORIZED.has(permission)) {
+    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, snapshot, false, false, previous?.terminal);
+  }
 
   const bundle = await configCall("current configuration load failed", () => dependencies.config.loadCurrent());
   assertBundle(bundle, bundle.revision);
-  assertAllowed(bundle, snapshot.ref);
+  assertAllowed(dependencies, snapshot.ref);
   const route = bundle.flow.spec.activationRoutes?.[activationLabel];
   if (!snapshot.labels.includes(activationLabel)
     || (activationLabel !== bundle.flow.metadata.activationLabel && !route)) {
@@ -247,7 +257,7 @@ async function activate(
   await createControl(dependencies.provider, snapshot.ref, control);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, bundle, control.stateId, false);
   const started = await startIfNeeded(dependencies, snapshot, bundle, control);
-  return outcome(control, true, started);
+  return outcome(control, bundle, snapshot, true, started);
 }
 
 async function cancel(
@@ -307,7 +317,7 @@ async function cancel(
   }, timestamp);
   await writeExistingControl(dependencies, snapshot.ref, latest, control);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, current.bundle, "cancelled", true);
-  return outcome(control, true, false);
+  return outcome(control, current.bundle, snapshot, true, false);
 }
 
 async function loadControls(
@@ -317,6 +327,11 @@ async function loadControls(
   const bundles = new Map<string, ConfigBundle>();
   const result: LoadedControl[] = [];
   for (const item of parsed) {
+    if (item.state.stateId === "done" || item.state.stateId === "cancelled") {
+      const bundle = await configCall("current configuration load failed", () => config.loadCurrent());
+      result.push({ parsed: item, bundle, terminal: true });
+      continue;
+    }
     let bundle = bundles.get(item.state.configRevision);
     if (!bundle) {
       bundle = await configCall(
@@ -326,6 +341,7 @@ async function loadControls(
       assertBundle(bundle, item.state.configRevision);
       bundles.set(item.state.configRevision, bundle);
     }
+    validateBundleDocument(bundle, "ControlState", item.state);
     if (bundle.flow.metadata.id !== item.state.flowId) throw new Error("control flow does not match pinned configuration");
     const state = bundle.flow.spec.states[item.state.stateId];
     if (!state) throw new Error("control state does not exist in pinned flow");
@@ -343,8 +359,8 @@ function assertBundle(bundle: ConfigBundle, revision: string): void {
   }
 }
 
-function assertAllowed(bundle: ConfigBundle, ref: TicketRef): void {
-  if (!bundle.controller.providers[ref.provider]?.repositories.includes(ref.repository)) {
+function assertAllowed(dependencies: ReconcileDependencies, ref: TicketRef): void {
+  if (dependencies.isAllowed && !dependencies.isAllowed(ref)) {
     throw new Error("ticket repository is not in the pinned allowlist");
   }
 }
@@ -399,10 +415,15 @@ async function ownLabels(
   bundle: ConfigBundle,
   stateId: string,
   removeActivation: boolean,
+  pinnedActivationLabel?: string,
 ): Promise<void> {
   const stage = `agent-stage:${stateId}`;
   const managed = bundle.flow.metadata.managedLabel;
-  const activation = [bundle.flow.metadata.activationLabel, ...Object.keys(bundle.flow.spec.activationRoutes ?? {})];
+  const activation = [
+    bundle.flow.metadata.activationLabel,
+    ...Object.keys(bundle.flow.spec.activationRoutes ?? {}),
+    ...pinnedActivationLabel ? [pinnedActivationLabel] : [],
+  ];
   const remove = labels.filter((label) =>
     (label.startsWith("agent-stage:") && label !== stage)
     || (removeActivation && activation.includes(label)));
@@ -631,13 +652,42 @@ function flowEvent(
   };
 }
 
-function outcome(control: ControlState | null, changed: boolean, started: boolean): ReconcileOutcome {
+function outcome(
+  control: ControlState | null,
+  bundle: ConfigBundle | null,
+  snapshot: ProviderTicketSnapshot,
+  changed: boolean,
+  started: boolean,
+  terminal = false,
+): ReconcileOutcome {
+  if (control && !terminal && bundle?.revision !== control.configRevision) {
+    throw new Error("control configuration does not match its pinned bundle");
+  }
+  const stateKind = control ? terminal ? "final" : bundle?.flow.spec.states[control.stateId]?.kind : null;
+  if (control && !stateKind) throw new Error("control state does not exist in pinned flow");
+  const repositoryUrl = repositoryWebUrl(snapshot.repository);
+  const ticketUrl = `${repositoryUrl}${snapshot.ref.provider === "gitlab" ? "/-/issues/" : "/issues/"}${snapshot.ref.number}`;
   return {
     flowInstanceId: control?.flowInstanceId ?? null,
     stateId: control?.stateId ?? null,
+    configRevision: control?.configRevision ?? null,
+    stateKind: stateKind ?? null,
+    repositoryUrl,
+    ticketUrl,
+    actionUrl: stateKind === "provider-wait" && control?.changeRequest?.url
+      ? control.changeRequest.url
+      : ticketUrl,
     changed,
     started,
   };
+}
+
+function repositoryWebUrl(repository: ProviderTicketSnapshot["repository"]): string {
+  const url = new URL(repository.cloneUrl);
+  url.hash = "";
+  url.search = "";
+  url.pathname = url.pathname.replace(/\.git\/?$/, "").replace(/\/$/, "");
+  return url.href.replace(/\/$/, "");
 }
 
 function now(dependencies: ReconcileDependencies): string {

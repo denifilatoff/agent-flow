@@ -57,7 +57,6 @@ function adapter(client: FixtureClient, activationLabels?: readonly string[]) {
   return createGitHubAdapter(
     {
       apiUrl: "https://api.github.example.test",
-      tokenEnv: "GITHUB_TOKEN",
       repositories: [REPOSITORY],
     },
     client,

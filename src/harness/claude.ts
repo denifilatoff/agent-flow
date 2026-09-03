@@ -1,3 +1,4 @@
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { HarnessAdapter, HarnessRunInput, HarnessResult } from "./types.ts";
@@ -14,6 +15,7 @@ import {
   providerCredentialEnvironment,
   preflightHarness,
   processDependencies,
+  readRegularFile,
   runHarnessProcess,
   type ProcessDependencies,
 } from "./process.ts";
@@ -26,11 +28,21 @@ export interface ClaudeAuthSources {
 export function createClaudeAdapter(
   auth: ClaudeAuthSources,
   dependencyOverrides: Partial<ProcessDependencies> = {},
+  registerCredential: (value: Buffer) => void = () => undefined,
 ): HarnessAdapter {
   const dependencies = processDependencies(dependencyOverrides);
+  let credentialsFile: Promise<Buffer> | undefined;
+  let settingsFile: Promise<Buffer> | undefined;
+  const loadCredentials = () => credentialsFile ??= readRegularFile(auth.credentialsFile, "Claude authentication file").then((value) => {
+    registerCredential(value);
+    return value;
+  });
+  const loadSettings = () => auth.settingsFile
+    ? settingsFile ??= readFile(auth.settingsFile)
+    : undefined;
   return {
     target: "claude",
-    preflight: () => preflightHarness("claude", (home) => seedClaudeAuth(auth, home), dependencies),
+    preflight: () => preflightHarness("claude", (home) => seedClaudeAuth(loadCredentials(), loadSettings(), home), dependencies),
     async run(input: HarnessRunInput): Promise<HarnessResult> {
       assertTarget(input, "claude");
       const prompt = buildPrompt(
@@ -38,11 +50,11 @@ export function createClaudeAdapter(
         claudeStagePrompt(input.stagePrompt, input.session.contextPath, input.session.decisionPath),
       );
       if (input.signal.aborted) return { exitCode: null, signal: "SIGTERM", timedOut: false };
-      let home: string;
+      let home: string | undefined;
       let environment: NodeJS.ProcessEnv;
       try {
         home = await createHarnessHome(input.session, "claude");
-        await seedClaudeAuth(auth, home);
+        await seedClaudeAuth(loadCredentials(), loadSettings(), home);
         const runtime = input.compiledAgent.runtimeDirectory;
         await copyRegularFile(
           join(runtime, ".claude/agents", `${input.compiledAgent.agentId}.md`),
@@ -75,18 +87,29 @@ export function createClaudeAdapter(
           AGENT_FLOW_DECISION_PATH: input.session.decisionPath,
         });
       } catch {
+        if (home) await rm(home, { recursive: true, force: true });
         throw new HarnessPreflightError("claude");
       }
-      return runHarnessProcess("claude", {
+      try {
+        if (!home) throw new HarnessPreflightError("claude");
+        return await runHarnessProcess("claude", {
         file: "claude",
-        args: ["--agent", input.compiledAgent.agentId, "-p"],
+        args: [
+          "--agent", input.compiledAgent.agentId,
+          "--model", input.execution.model,
+          "--effort", input.execution.reasoning,
+          "-p",
+        ],
         cwd: input.workspace.worktree,
         env: environment,
         logPath: input.session.logPath,
         prompt,
         timeoutSeconds: input.timeoutSeconds,
         signal: input.signal,
-      }, dependencies);
+        }, dependencies);
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
     },
   };
 }
@@ -100,15 +123,9 @@ The entry agent must read contextPath and write one AgentDecision to decisionPat
 If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_DECISION_PATH, it may use these parsed paths directly.`;
 }
 
-async function seedClaudeAuth(auth: ClaudeAuthSources, home: string): Promise<void> {
-  await copyRegularFile(
-    auth.credentialsFile,
-    join(home, ".credentials.json"),
-    "Claude authentication file",
-  );
-  if (auth.settingsFile) {
-    await copyRegularFile(auth.settingsFile, join(home, "settings.json"), "Claude settings file");
-  }
+async function seedClaudeAuth(credentials: Promise<Buffer>, settings: Promise<Buffer> | undefined, home: string): Promise<void> {
+  await writeFile(join(home, ".credentials.json"), await credentials, { flag: "wx", mode: 0o600 });
+  if (settings) await writeFile(join(home, "settings.json"), await settings, { flag: "wx", mode: 0o600 });
 }
 
 function assertTarget(input: HarnessRunInput, target: "claude"): void {

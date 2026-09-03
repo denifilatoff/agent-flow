@@ -6,6 +6,7 @@ import type { ControlState } from "../config/types.js";
 const CONTROL_MARKER = "<!-- agent-flow-control:v1";
 const LEGACY_CONTROL_MARKER = `${CONTROL_MARKER} -->`;
 const CONTROL_COMMENT = /^<!-- agent-flow-control:v1\n([A-Za-z0-9+/]+={0,2})\n-->\n?$/;
+const COLLAPSED_CONTROL_COMMENT = /^<!-- agent-flow-control:v1 -->\n<details>\n<summary>Agent Flow · ([^<\n]+)<\/summary>\n\n```json\n([\s\S]+)\n```\n\n<\/details>\n?$/;
 const LEGACY_CONTROL_COMMENT = /^<!-- agent-flow-control:v1 -->\n```json\n([\s\S]+)\n```\n?$/;
 const PATCH_FIELDS = new Set<keyof ControlStatePatch>([
   "stateId",
@@ -36,20 +37,23 @@ export function parseControlComment(body: string): ControlState | null {
   if (firstLine !== CONTROL_MARKER && firstLine !== LEGACY_CONTROL_MARKER) return null;
 
   const hidden = firstLine === CONTROL_MARKER;
+  const collapsed = COLLAPSED_CONTROL_COMMENT.exec(body);
   const match = (hidden ? CONTROL_COMMENT : LEGACY_CONTROL_COMMENT).exec(body);
-  if (!match) throw new Error("invalid control comment format");
+  if (!match && !collapsed) throw new Error("invalid control comment format");
 
   let value: unknown;
   try {
-    const json = hidden ? Buffer.from(match[1]!, "base64").toString("utf8") : match[1]!;
-    if (hidden && Buffer.from(json).toString("base64") !== match[1]) {
+    const json = hidden ? Buffer.from(match![1]!, "base64").toString("utf8") : collapsed?.[2] ?? match![1]!;
+    if (hidden && Buffer.from(json).toString("base64") !== match![1]) {
       throw new Error("non-canonical base64");
     }
     value = JSON.parse(json);
   } catch (error) {
     throw new Error("invalid control comment JSON", { cause: error });
   }
-  return validateDocument<ControlState>("ControlState", value);
+  const state = validateDocument<ControlState>("ControlState", value);
+  if (collapsed && collapsed[1] !== state.stateId) throw new Error("invalid control comment summary");
+  return state;
 }
 
 export function renderControlComment(state: ControlState): string {

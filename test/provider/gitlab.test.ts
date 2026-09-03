@@ -61,7 +61,6 @@ function adapter(
   return createGitLabAdapter(
     {
       apiUrl,
-      tokenEnv: "GITLAB_TOKEN",
       repositories: [REPOSITORY],
     },
     client,
