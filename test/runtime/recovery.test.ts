@@ -102,6 +102,16 @@ test("inactive and incomplete evidence cannot resume work", () => {
   assert.equal(classifyRecovery(evidence({ snapshot: snapshot({ open: false }) }), CONTROLLER).kind, "inactive");
 });
 
+test("unresolved provider ambiguity prevents foreign owner election", () => {
+  const decision = classifyRecovery(evidence({
+    publications: [publication(FOREIGN)],
+    ambiguities: ["linked change request identity is unresolved"],
+  }), CONTROLLER);
+
+  assert.equal(decision.kind, "ambiguous");
+  assert.equal(decision.owner, null);
+});
+
 test("the first publication elects a foreign owner regardless of discovery order", () => {
   const winner = publication(FOREIGN, OTHER_SHA, "first", "2026-08-25T10:00:10Z");
   const loser = publication(CONTROLLER, SHA, "second", "2026-08-25T10:00:20Z");

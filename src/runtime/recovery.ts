@@ -16,6 +16,9 @@ export function classifyRecovery(evidence: RecoveryEvidence, controllerId: strin
   if (evidence.activeBoundary === "ambiguous") {
     return decision("ambiguous", null, "active work boundary is ambiguous");
   }
+  if (evidence.ambiguities.length > 0 || evidence.changes.length > 1) {
+    return decision("ambiguous", null, evidence.ambiguities[0] ?? "multiple linked change requests");
+  }
 
   const owner = electOwner(evidence.publications);
   if (owner && owner.metadata.controller !== controllerId) {
@@ -33,10 +36,6 @@ export function classifyRecovery(evidence: RecoveryEvidence, controllerId: strin
       publication.metadata.controller !== owner.metadata.controller && publicationKind(publication) === "change-request")) {
       return decision("ambiguous", owner, "a losing controller published a code change");
     }
-  }
-
-  if (evidence.ambiguities.length > 0 || evidence.changes.length > 1) {
-    return decision("ambiguous", owner, evidence.ambiguities[0] ?? "multiple linked change requests");
   }
 
   if (evidence.activeBoundary === "fresh" && evidence.publications.length === 0) {
