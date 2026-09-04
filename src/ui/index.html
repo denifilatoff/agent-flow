@@ -65,9 +65,11 @@
         </section>
 
         <section class="screen" id="panel-flow" role="tabpanel" aria-labelledby="tab-flow" data-screen="flow" hidden>
-          <header class="screen-head"><div><h1>Flow graph</h1><p>All states and transitions from the pinned Flow. Select a state for details.</p></div><span class="tag" id="flow-revision">Loading…</span></header>
+          <header class="screen-head"><div><h1>Flow graph</h1><p>Select a loaded scenario. Each graph shows only its reachable states.</p></div><span class="tag" id="flow-revision">Loading…</span></header>
+          <div class="scenario-choices" id="flow-scenarios" role="group" aria-label="Loaded scenarios"></div>
+          <p class="scenario-mode" id="flow-mode" aria-live="polite">Loading scenarios…</p>
           <div class="graph-layout">
-            <article class="panel graph-panel"><div class="graph-toolbar"><span>agent / human gate / provider wait / paused / final</span><span class="panel-meta">Enter or Space selects a state</span></div><div class="graph-scroll"><svg class="flow-svg" id="flow-graph" viewBox="0 0 1080 640" aria-labelledby="flow-graph-title"><title id="flow-graph-title">Agent Flow states</title></svg></div></article>
+            <article class="panel graph-panel"><div class="graph-toolbar"><span>● Start · ◎ Final · rectangles: working or waiting</span><span class="panel-meta">Select a state for all transitions, including dynamic resume.</span></div><div class="graph-scroll"><svg class="flow-svg" id="flow-graph" viewBox="0 0 1080 500" aria-labelledby="flow-graph-title"><title id="flow-graph-title">Agent Flow states</title></svg></div></article>
             <aside class="panel node-inspector"><div class="panel-head"><h2>State</h2><span class="tag" id="node-kind">Loading…</span></div><div class="panel-body" id="node-inspector"><p class="loading">Loading state…</p></div></aside>
           </div>
         </section>

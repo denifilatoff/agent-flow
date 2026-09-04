@@ -16,6 +16,7 @@
   const refreshInterval = document.getElementById("refresh-interval");
   const refreshCountdown = document.getElementById("auto-refresh-countdown");
   let dashboard = null;
+  let selectedScenario = null;
   let remaining = Number(refreshInterval.value);
   let loading = false;
   let wizardConfigured = false;
@@ -153,6 +154,8 @@
     journalPage = 0;
     updateJournalPagination(0, 0);
     replace("flow-graph", svg("title", {}, message));
+    replace("flow-scenarios", empty(message));
+    document.getElementById("flow-mode").textContent = "Scenarios unavailable";
     document.getElementById("flow-revision").textContent = "Pinned Flow unavailable";
     document.getElementById("node-kind").textContent = "Unavailable";
     setWizardEnabled(false, "The current RuntimeConfig is unavailable.");
@@ -555,63 +558,125 @@
 
   function renderGraph(flow, revision) {
     document.getElementById("flow-revision").textContent = `pinned · ${revision}`;
+    const entries = Object.entries({ [flow.metadata.activationLabel]: flow.spec.initial, ...flow.spec.activationRoutes });
+    if (!entries.some(([label]) => label === selectedScenario)) selectedScenario = entries[0][0];
+    const choices = entries.map(([label, initial]) => {
+      const button = element("button", "scenario-choice");
+      button.type = "button";
+      button.dataset.scenario = label;
+      button.setAttribute("aria-controls", "flow-graph");
+      const name = label.replace(/^agent-flow:/, "").replace(/-/g, " ");
+      button.append(element("strong", "", name.charAt(0).toUpperCase() + name.slice(1)),
+        element("span", "", `Loaded · ${label}`));
+      button.addEventListener("click", () => choose(label, initial));
+      return button;
+    });
+    function choose(label, initial) {
+      selectedScenario = label;
+      for (const button of choices) button.setAttribute("aria-pressed", String(button.dataset.scenario === label));
+      const states = reachableStates(flow, initial);
+      const mode = Object.values(states).some((state) => state.kind === "human-gate")
+        ? "Intermediate human review" : "No intermediate human review";
+      document.getElementById("flow-mode").textContent = `${entries.length} scenarios loaded · ${flow.metadata.id} · ${mode}`;
+      renderScenario({ ...flow, spec: { ...flow.spec, initial, states } }, label);
+    }
+    replace("flow-scenarios", ...choices);
+    choose(...entries.find(([label]) => label === selectedScenario));
+  }
+
+  function reachableStates(flow, initial) {
+    const visited = new Set();
+    const pending = [initial];
+    for (let i = 0; i < pending.length; i += 1) {
+      const id = pending[i];
+      if (visited.has(id) || !Object.hasOwn(flow.spec.states, id)) continue;
+      visited.add(id);
+      for (const transition of Object.values(flow.spec.states[id].on ?? {})) {
+        pending.push(transition.target);
+        if (transition.resumeTarget) pending.push(transition.resumeTarget);
+      }
+    }
+    return Object.fromEntries([...visited].map((id) => [id, flow.spec.states[id]]));
+  }
+
+  function renderScenario(flow, label) {
     const graph = document.getElementById("flow-graph");
-    const title = svg("title", { id: "flow-graph-title" }, `States for ${flow.metadata.id}`);
+    const title = svg("title", { id: "flow-graph-title" }, `States for ${label}`);
     const arrow = svg("marker", { id: "flow-arrow", viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
     arrow.append(svg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "context-stroke" }));
     const definitions = svg("defs", {});
     definitions.append(arrow);
-    const positions = graphPositions(Object.keys(flow.spec.states));
+    const positions = graphPositions(flow.spec.states);
+    const width = Math.max(800, ...Object.values(positions).map((position) => position.x + 250));
+    graph.setAttribute("viewBox", `0 0 ${width} 500`);
+    graph.setAttribute("style", `min-width: ${width}px`);
     const edges = [];
     for (const [sourceId, state] of Object.entries(flow.spec.states)) {
       const source = positions[sourceId];
       for (const [eventName, transition] of Object.entries(state.on ?? {})) {
-        const target = transition.target === "$resume" ? source : positions[transition.target];
+        const target = positions[transition.target];
         if (!target) continue;
         let edge;
         if (target === source) {
-          edge = svg("path", { class: "flow-edge", fill: "none", d: `M ${source.x + 60} ${source.y} C ${source.x + 25} ${source.y - 48}, ${source.x + 125} ${source.y - 48}, ${source.x + 90} ${source.y}`, "marker-end": "url(#flow-arrow)" });
+          edge = svg("path", { class: "flow-edge", fill: "none", d: `M ${source.x + 70} ${source.y} C ${source.x + 35} ${source.y - 48}, ${source.x + 165} ${source.y - 48}, ${source.x + 130} ${source.y}`, "marker-end": "url(#flow-arrow)" });
+        } else if (source.y === target.y && target.x < source.x) {
+          const lane = 35 + Math.min(45, (source.x - target.x) / 12);
+          edge = svg("path", { class: "flow-edge", fill: "none", d: `M ${source.x + 100} ${source.y} C ${source.x + 100} ${source.y - lane}, ${target.x + 100} ${target.y - lane}, ${target.x + 100} ${target.y}`, "marker-end": "url(#flow-arrow)" });
         } else {
           edge = svg("line", { class: "flow-edge", ...edgeEndpoints(source, target), "marker-end": "url(#flow-arrow)" });
         }
         edge.setAttribute("data-source", sourceId);
-        edge.setAttribute("data-target", transition.target === "$resume" ? sourceId : transition.target);
+        edge.setAttribute("data-target", transition.target);
         edge.append(svg("title", {}, `${sourceId}: ${eventName} → ${transition.target}`));
         edges.push(edge);
       }
     }
     const nodes = Object.entries(flow.spec.states).map(([id, state]) => graphNode(id, state, positions[id], () => selectNode(flow, id)));
-    graph.replaceChildren(title, definitions, ...edges, ...nodes);
+    const first = positions[flow.spec.initial];
+    const start = svg("g", { class: "flow-start" });
+    start.append(svg("title", {}, `Start: ${label}`), svg("circle", { cx: "36", cy: first.y + 36, r: "10" }),
+      svg("text", { x: "36", y: first.y + 65, "text-anchor": "middle" }, "Start"),
+      svg("line", { class: "flow-start-edge", ...edgeEndpoints({ x: -64, y: first.y, radius: 10 }, first), "marker-end": "url(#flow-arrow)" }));
+    graph.replaceChildren(title, definitions, start, ...edges, ...nodes);
     selectNode(flow, flow.spec.initial);
   }
 
-  function graphPositions(ids) {
-    const known = {
-      assessment: [45, 75], "assessment-review": [260, 75], planning: [475, 75], "plan-review": [690, 75], development: [905, 75],
-      review: [690, 272], "awaiting-merge": [905, 272], "needs-human": [260, 450], blocked: [690, 540], done: [905, 432], cancelled: [475, 450],
-    };
-    const useGrid = ids.some((id) => !known[id]);
-    return Object.fromEntries(ids.map((id, index) => {
-      const [x, y] = useGrid ? [45 + (index % 5) * 215, 75 + Math.floor(index / 5) * 160] : known[id];
-      return [id, { x, y }];
+  function graphPositions(states) {
+    const main = Object.entries(states).filter(([, state]) => state.kind !== "paused" && state.kind !== "final");
+    const mainTargets = new Set(main.flatMap(([, state]) => Object.values(state.on ?? {}).map((transition) => transition.target)));
+    let stage = 0;
+    let auxiliary = 0;
+    return Object.fromEntries(Object.entries(states).map(([id, state]) => {
+      const below = state.kind === "paused" || (state.kind === "final" && !mainTargets.has(id));
+      const column = below ? auxiliary++ : stage++;
+      return [id, { x: 100 + column * 240, y: below ? 350 : 100, radius: state.kind === "final" ? 24 : null }];
     }));
   }
 
   function edgeEndpoints(source, target) {
     const dx = target.x - source.x;
     const dy = target.y - source.y;
-    const scale = 1 / Math.max(Math.abs(dx) / 75, Math.abs(dy) / 33);
+    const boundary = (point) => point.radius ? point.radius / Math.hypot(dx, dy)
+      : 1 / Math.max(Math.abs(dx) / 100, Math.abs(dy) / 36);
+    const from = boundary(source);
+    const to = boundary(target);
     return {
-      x1: source.x + 75 + dx * scale,
-      y1: source.y + 33 + dy * scale,
-      x2: target.x + 75 - dx * scale,
-      y2: target.y + 33 - dy * scale,
+      x1: source.x + 100 + dx * from,
+      y1: source.y + 36 + dy * from,
+      x2: target.x + 100 - dx * to,
+      y2: target.y + 36 - dy * to,
     };
   }
 
   function graphNode(id, state, position, select) {
     const node = svg("g", { class: "flow-node", transform: `translate(${position.x} ${position.y})`, tabindex: "0", role: "button", "aria-pressed": "false", "data-node": id, "data-kind": state.kind, "aria-label": `State ${id}, ${state.kind}` });
-    node.append(svg("rect", { width: "150", height: "66" }), svg("text", { x: "14", y: "27" }, id), svg("text", { class: "sub", x: "14", y: "46" }, `${state.kind}${state.agent ? ` · ${state.agent}` : ""}`));
+    if (state.kind === "final") {
+      node.append(svg("circle", { cx: "100", cy: "36", r: "24" }),
+        svg("circle", { class: "terminal-core", cx: "100", cy: "36", r: "17" }),
+        svg("text", { x: "100", y: "86", "text-anchor": "middle" }, id));
+    } else {
+      node.append(svg("rect", { width: "200", height: "72" }), svg("text", { x: "14", y: "30" }, id), svg("text", { class: "sub", x: "14", y: "51" }, `${state.kind}${state.agent ? ` · ${state.agent}` : ""}`));
+    }
     node.addEventListener("click", select);
     node.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); }

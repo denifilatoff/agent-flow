@@ -317,7 +317,7 @@ test("renders operational links and directed graph focus from the dashboard proj
   document.getElementById("refresh-interval").value = "30";
   document.getElementById("draft-group").value = "polling";
   for (const id of [
-    "flow-graph", "flow-revision", "node-kind", "node-inspector", "waiting-panel",
+    "flow-graph", "flow-revision", "flow-scenarios", "flow-mode", "node-kind", "node-inspector", "waiting-panel",
     "configuration-source", "configuration-grid", "resources", "agents",
   ]) document.body.append(document.getElementById(id));
   const context: Record<string, unknown> = {
@@ -351,7 +351,7 @@ test("renders operational links and directed graph focus from the dashboard proj
   assert.equal(waitingLink?.attributes.get("rel"), "noreferrer noopener");
 
   const flow = {
-    metadata: { id: "development" },
+    metadata: { id: "development", activationLabel: "agent-flow:development" },
     spec: {
       initial: "assessment",
       states: {
@@ -413,12 +413,49 @@ test("renders operational links and directed graph focus from the dashboard proj
   for (const name of ["development", "development-autonomous"]) {
     const shippedFlow = parse(await readFile(`config/flows/${name}.yaml`, "utf8"));
     ui.renderGraph(shippedFlow, "b".repeat(40));
-    const nodes = graph.querySelectorAll(".flow-node");
-    assert.equal(nodes.length, Object.keys(shippedFlow.spec.states).length);
-    assert.equal(new Set(nodes.map((node) => node.attributes.get("transform"))).size, nodes.length,
-      "bugfix and development states must not overlap");
-    ui.selectNode(shippedFlow, "bug-reproduction");
-    assert.equal(document.getElementById("node-inspector").querySelectorAll("dd")[0]?.children[0]?.textContent,
-      "bug-investigator");
+    const choices = document.getElementById("flow-scenarios").querySelectorAll("button");
+    assert.equal(choices.length, 2);
+    for (const label of ["agent-flow:development", "bugfix"]) {
+      choices.find((button) => button.dataset.scenario === label)!.dispatchEvent(new TestEvent("click"));
+      const nodes = graph.querySelectorAll(".flow-node");
+      const width = graph.attributes.get("viewBox")!.split(" ")[2];
+      assert.equal(graph.attributes.get("style"), `min-width: ${width}px`);
+      assert.equal(new Set(nodes.map((node) => node.attributes.get("transform"))).size, nodes.length);
+      const ids = nodes.map((node) => node.dataset.node);
+      assert.equal(ids.includes("assessment"), label !== "bugfix");
+      assert.equal(ids.includes("bug-reproduction"), label === "bugfix");
+      assert.ok(ids.includes("done") && ids.includes("cancelled") && ids.includes("needs-human"));
+      assert.equal(graph.querySelectorAll(".flow-start")[0]?.querySelectorAll("circle").length, 1);
+      for (const node of nodes.filter((node) => node.dataset.kind === "final")) {
+        assert.equal(node.querySelectorAll("rect").length, 0);
+        assert.equal(node.querySelectorAll("circle").length, 2);
+      }
+      for (const edge of graph.querySelectorAll(".flow-edge")) {
+        assert.ok(ids.includes(edge.dataset.source) && ids.includes(edge.dataset.target));
+      }
+    }
+    ui.renderGraph(shippedFlow, "b".repeat(40));
+    assert.equal(document.getElementById("flow-scenarios").querySelectorAll("button")
+      .find((button) => button.attributes.get("aria-pressed") === "true")?.dataset.scenario, "bugfix");
+    shippedFlow.spec.activationRoutes.documentary = "write-docs";
+    shippedFlow.spec.states["write-docs"] = { kind: "agent", agent: "writer", on: { complete: { target: "archived" } } };
+    shippedFlow.spec.states.archived = { kind: "final" };
+    ui.renderGraph(shippedFlow, "c".repeat(40));
+    const third = document.getElementById("flow-scenarios").querySelectorAll("button");
+    assert.equal(third.length, 3);
+    third.find((button) => button.dataset.scenario === "documentary")!.dispatchEvent(new TestEvent("click"));
+    assert.deepEqual(graph.querySelectorAll(".flow-node").map((node) => node.dataset.node), ["write-docs", "archived"]);
+    assert.equal(graph.querySelectorAll('[data-node="archived"]')[0]?.querySelectorAll("circle").length, 2);
+    delete shippedFlow.spec.activationRoutes.documentary;
+    ui.renderGraph(shippedFlow, "d".repeat(40));
+    assert.equal(document.getElementById("flow-scenarios").querySelectorAll("button").length, 2);
+    assert.ok(graph.querySelectorAll(".flow-node").some((node) => node.dataset.node === "assessment"));
+    shippedFlow.spec.activationRoutes[shippedFlow.metadata.activationLabel] = "bug-reproduction";
+    ui.renderGraph(shippedFlow, "e".repeat(40));
+    const overridden = document.getElementById("flow-scenarios").querySelectorAll("button");
+    assert.equal(overridden.length, 2);
+    assert.equal(overridden.filter((button) => button.attributes.get("aria-pressed") === "true").length, 1);
+    assert.ok(graph.querySelectorAll(".flow-node").some((node) => node.dataset.node === "bug-reproduction"));
+    assert.ok(!graph.querySelectorAll(".flow-node").some((node) => node.dataset.node === "assessment"));
   }
 });
