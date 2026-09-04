@@ -558,7 +558,7 @@ test("returns null when no GitLab review note starts with the exact marker", asy
   assert.equal(await adapter(client).findReview(ref, 41, REVIEW_MARKER), null);
 });
 
-test("rejects duplicate GitLab review notes with the same attempt marker", async () => {
+test("rejects duplicate GitLab review notes with the same publication marker", async () => {
   const duplicate = { ...(fixture.reviewNote as Record<string, unknown>), id: 703 };
   const client = new FixtureClient().add(
     "GET",
@@ -568,8 +568,17 @@ test("rejects duplicate GitLab review notes with the same attempt marker", async
 
   await assert.rejects(
     adapter(client).findReview(ref, 41, REVIEW_MARKER),
-    /multiple GitLab review notes.*attempt marker/,
+    /multiple GitLab review notes.*publication marker/,
   );
+});
+
+test("excludes baseline GitLab reviews when locating the current result", async () => {
+  const duplicate = { ...(fixture.reviewNote as Record<string, unknown>), id: 703 };
+  const client = new FixtureClient()
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [fixture.reviewNote, duplicate] })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: fixture.mergeRequest });
+
+  assert.equal((await adapter(client).findReview(ref, 41, REVIEW_MARKER, ["702"]))?.id, "703");
 });
 
 test("preserves a self-managed GitLab relative URL root for note artifacts", async () => {

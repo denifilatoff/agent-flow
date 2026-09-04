@@ -230,8 +230,8 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           stateId: request.stateId,
           mode: request.mode,
           resultContract: request.resultContract,
-          flowInstanceId: control.flowInstanceId,
-          attemptId: attempt.attemptId,
+          configRevision: control.configRevision,
+          controllerId: request.controllerId,
           contextPath: session.contextPath,
           decisionPath: session.decisionPath,
           changeRequest: request.snapshot.changeRequest,
@@ -260,10 +260,12 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
             stateId: request.stateId,
             mode: request.mode,
             resultContract: request.resultContract,
+            configRevision: control.configRevision,
+            controllerId: request.controllerId,
+            publicationKeys: request.publicationKeys,
             flowInstanceId: control.flowInstanceId,
             attemptId: attempt.attemptId,
             ticket: request.ref,
-            startedAt: attempt.startedAt,
             sourceComment: request.sourceComment,
             pinnedChangeRequest: request.snapshot.changeRequest,
           },
@@ -449,7 +451,13 @@ async function persist(
     throw new AttemptError("CONTROL_CONFLICT", "control state changed concurrently", false);
   }
   const next = advanceControlState(control, patch, timestamp);
-  const readback = await writeControlCas(dependencies.writeControl, request.ref, control, next);
+  const readback = await writeControlCas(
+    dependencies.writeControl,
+    request.ref,
+    control,
+    next,
+    patch.attemptSeries?.current?.status === "started" ? request.publicationKeys : undefined,
+  );
   running.control = readback;
   return readback;
 }

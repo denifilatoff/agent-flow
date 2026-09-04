@@ -108,7 +108,12 @@ export interface ProviderAdapter {
   updateComment(ref: TicketRef, id: string, body: string): Promise<ProviderComment>;
   setControllerLabels(ref: TicketRef, remove: string[], add: string[]): Promise<string[]>;
   readChangeRequest(ref: TicketRef, number: number): Promise<NormalizedChangeRequest>;
-  findReview(ref: TicketRef, changeNumber: number, marker: string): Promise<NormalizedReview | null>;
+  findReview(
+    ref: TicketRef,
+    changeNumber: number,
+    marker: string,
+    excludedIds?: readonly string[],
+  ): Promise<NormalizedReview | null>;
   readReview(ref: TicketRef, changeNumber: number, id: string): Promise<NormalizedReview>;
 }
 

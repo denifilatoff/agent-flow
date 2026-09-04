@@ -25,7 +25,8 @@ import * as receiptModule from "../../src/runtime/receipts.ts";
 
 const FLOW_ID = "123e4567-e89b-42d3-a456-426614174000";
 const ATTEMPT_ID = "123e4567-e89b-42d3-a456-426614174001";
-const STARTED_AT = "2026-08-27T10:00:00.000Z";
+const CONFIG_REVISION = "a".repeat(40);
+const CONTROLLER_ID = "123e4567-e89b-42d3-a456-426614174002";
 const PUBLISHED_AT = "2026-08-27T10:01:00.000Z";
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
 const OLD_HEAD = "1111111111111111111111111111111111111111";
@@ -46,10 +47,12 @@ interface DecisionExpectationSpec {
   stateId: string;
   mode: AttemptMode;
   resultContract: ResultContract;
+  configRevision: string;
+  controllerId: string;
+  publicationKeys: readonly string[];
   flowInstanceId: string;
   attemptId: string;
   ticket: TicketRef;
-  startedAt: string;
   sourceComment: ProviderComment | null;
   pinnedChangeRequest: NormalizedChangeRequest | null;
 }
@@ -68,8 +71,8 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-function marker(artifact: "assessment" | "plan" | "question" | "review"): string {
-  return `<!-- agent-flow:v1 flow=${FLOW_ID} attempt=${ATTEMPT_ID} artifact=${artifact} -->`;
+function marker(_artifact: "assessment" | "plan" | "question" | "review"): string {
+  return `<!-- agent-flow:v1 {"config":"${CONFIG_REVISION}","controller":"${CONTROLLER_ID}"} -->`;
 }
 
 function flow(): FlowDefinition {
@@ -153,6 +156,8 @@ function change(overrides: Partial<NormalizedChangeRequest> = {}): NormalizedCha
     headSha: HEAD_SHA,
     state: "open",
     actor: ACTOR,
+    body: `${marker("assessment")}\nImplementation.`,
+    createdAt: PUBLISHED_AT,
     updatedAt: PUBLISHED_AT,
     ...overrides,
   };
@@ -213,6 +218,7 @@ class FakeProvider implements ProviderAdapter {
   actorPermission: Permission = "write";
   failure: Error | null = null;
   duplicateReview = false;
+  reviewExclusions: readonly string[] = [];
 
   constructor(kind: "github" | "gitlab" = "github", expectedTicket: TicketRef = TICKET) {
     this.kind = kind;
@@ -257,10 +263,16 @@ class FakeProvider implements ProviderAdapter {
     if (this.changeReadError) throw this.changeReadError;
     return this.record(`readChangeRequest:${number}`, this.changeRequest);
   }
-  async findReview(ref: TicketRef, number: number, reviewMarker: string): Promise<NormalizedReview | null> {
+  async findReview(
+    ref: TicketRef,
+    number: number,
+    reviewMarker: string,
+    excludedIds: readonly string[] = [],
+  ): Promise<NormalizedReview | null> {
     assert.deepEqual(ref, this.expectedTicket);
     assert.equal(number, this.changeRequest.number);
     assert.equal(reviewMarker, marker("review"));
+    this.reviewExclusions = excludedIds;
     this.calls.push(`findReview:${number}`);
     if (this.failure) throw this.failure;
     if (this.duplicateReview) throw new Error("duplicate review token=top-secret");
@@ -280,15 +292,36 @@ function expectation(overrides: Partial<DecisionExpectationSpec> = {}): Decision
     stateId: "assessment",
     mode: "stage",
     resultContract: "assessment",
+    configRevision: CONFIG_REVISION,
+    controllerId: CONTROLLER_ID,
+    publicationKeys: [],
     flowInstanceId: FLOW_ID,
     attemptId: ATTEMPT_ID,
     ticket: TICKET,
-    startedAt: STARTED_AT,
     sourceComment: null,
     pinnedChangeRequest: null,
     ...overrides,
   };
 }
+
+test("does not accept a marked comment that was present in the publication baseline", async () => {
+  const provider = new FakeProvider();
+  const progress = comment("assessment");
+  installComments(provider, [progress]);
+
+  await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
+    publicationKeys: [JSON.stringify(["github", "https://api.github.com/", "owner/repo", "comment", progress.id])],
+  }), provider), /comment/);
+});
+
+test("rejects a malformed publication baseline instead of reusing old evidence", async () => {
+  const provider = new FakeProvider();
+  installComments(provider, [comment("assessment")]);
+
+  await trustFailure(readDecision({ event: "agent-succeeded" }, expectation({
+    publicationKeys: ["not-a-publication-key"],
+  }), provider), /baseline/);
+});
 
 function installComments(provider: FakeProvider, comments: ProviderComment[]): void {
   provider.ticket = snapshot({ comments });
@@ -365,7 +398,9 @@ test("builds comment receipts from one-field agent decisions", async (context) =
         artifacts: [{ kind: "comment", id: published.id, url: published.url,
           marker: marker(artifactKind), artifactKind }],
       });
-      assert.deepEqual(provider.calls, ["readTicket", `readComment:${published.id}`, "readTicket"]);
+      assert.deepEqual(provider.calls, [
+        "readTicket", `readComment:${published.id}`, `permission:${ACTOR.login}`, "readTicket",
+      ]);
     });
   }
 });
@@ -387,7 +422,9 @@ test("builds a development receipt from the linked open change request", async (
     artifacts: [{ kind: "change-request", number: 31, url: CHANGE_URL,
       headSha: HEAD_SHA, state: "open" }],
   });
-  assert.deepEqual(provider.calls, ["readTicket", "readChangeRequest:31", "readTicket"]);
+  assert.deepEqual(provider.calls, [
+    "readTicket", "readChangeRequest:31", `permission:${ACTOR.login}`, "readTicket",
+  ]);
 });
 
 test("builds review receipts from provider-native logical verdicts", async (context) => {
@@ -413,7 +450,9 @@ test("builds review receipts from provider-native logical verdicts", async (cont
         summary,
         artifacts: [{ kind: "review", id: "701", url: REVIEW_URL, headSha: HEAD_SHA, verdict }],
       });
-      assert.deepEqual(provider.calls, ["readTicket", "findReview:31", "readReview:31:701", "readTicket"]);
+      assert.deepEqual(provider.calls, [
+        "readTicket", "findReview:31", "readReview:31:701", `permission:${ACTOR.login}`, "readTicket",
+      ]);
     });
   }
 });
@@ -479,28 +518,9 @@ test("treats malformed and unconfigured decisions as retryable", async (context)
   });
 });
 
-test("treats missing fresh evidence as retryable", async (context) => {
+test("treats missing current-iteration evidence as retryable", async (context) => {
   await context.test("comment", async () => {
     const provider = new FakeProvider();
-    installComments(provider, [comment("assessment", {
-      createdAt: "2026-08-27T09:59:59.999Z", updatedAt: "2026-08-27T09:59:59.999Z",
-    })]);
-    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation(), provider), /comment/);
-  });
-  await context.test("same-second comment before a millisecond start", async () => {
-    const provider = new FakeProvider();
-    installComments(provider, [comment("assessment", {
-      createdAt: "2026-08-27T10:00:00Z", updatedAt: "2026-08-27T10:00:00Z",
-    })]);
-    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
-      startedAt: "2026-08-27T10:00:00.500Z",
-    }), provider), /comment/);
-  });
-  await context.test("invalid comment timestamp", async () => {
-    const provider = new FakeProvider();
-    installComments(provider, [comment("assessment", {
-      createdAt: "not-a-timestamp", updatedAt: "not-a-timestamp",
-    })]);
     await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation(), provider), /comment/);
   });
   await context.test("change request", async () => {
@@ -510,46 +530,30 @@ test("treats missing fresh evidence as retryable", async (context) => {
       stateId: "development", resultContract: "development",
     }), provider), /change request/);
   });
-  await context.test("stale development change request", async () => {
+  await context.test("unmarked development change request", async () => {
     const provider = new FakeProvider();
-    const stale = change({ updatedAt: "2026-08-27T09:59:59.999Z" });
-    provider.ticket = snapshot({ changeRequest: stale });
-    provider.changeRequest = stale;
+    const unmarked = change({ body: "Implementation." });
+    provider.ticket = snapshot({ changeRequest: unmarked });
+    provider.changeRequest = unmarked;
     await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
       stateId: "development", resultContract: "development",
     }), provider), /change request/);
     assert.deepEqual(provider.calls, ["readTicket"]);
   });
-  await context.test("same-second development change request before a millisecond start", async () => {
+  await context.test("unchanged baseline development change request", async () => {
     const provider = new FakeProvider();
-    const stale = change({ updatedAt: "2026-08-27T10:00:00Z" });
-    provider.ticket = snapshot({ changeRequest: stale });
-    provider.changeRequest = stale;
+    const existing = change();
+    provider.ticket = snapshot({ changeRequest: existing });
+    provider.changeRequest = existing;
     await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
       stateId: "development",
       resultContract: "development",
-      startedAt: "2026-08-27T10:00:00.500Z",
+      pinnedChangeRequest: existing,
+      publicationKeys: [JSON.stringify([
+        "github", "https://api.github.com/", "owner/repo", "change-request", String(existing.number),
+      ])],
     }), provider), /change request/);
     assert.deepEqual(provider.calls, ["readTicket"]);
-  });
-  await context.test("development timestamp regresses during exact readback", async () => {
-    const provider = new FakeProvider();
-    provider.ticket = snapshot({ changeRequest: change({ updatedAt: "2026-08-27T10:00:00.500Z" }) });
-    provider.changeRequest = change({ updatedAt: "2026-08-27T10:00:00Z" });
-    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
-      stateId: "development",
-      resultContract: "development",
-      startedAt: "2026-08-27T10:00:00.500Z",
-    }), provider), /change request/);
-  });
-  await context.test("invalid development timestamp", async () => {
-    const provider = new FakeProvider();
-    const invalid = change({ updatedAt: "not-a-timestamp" });
-    provider.ticket = snapshot({ changeRequest: invalid });
-    provider.changeRequest = invalid;
-    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
-      stateId: "development", resultContract: "development",
-    }), provider), /change request/);
   });
   await context.test("review", async () => {
     const provider = new FakeProvider();
@@ -558,48 +562,17 @@ test("treats missing fresh evidence as retryable", async (context) => {
       stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
     }), provider), /review/);
   });
-  await context.test("stale provider review", async () => {
+  await context.test("baseline provider review", async () => {
     const provider = new FakeProvider();
-    const stale = review({ submittedAt: "2026-08-27T09:59:59.999Z" });
-    provider.foundReview = stale;
-    provider.reviewReadback = stale;
+    provider.foundReview = null;
     await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
       stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
+      publicationKeys: [JSON.stringify([
+        "github", "https://api.github.com/", "owner/repo", "review", "701",
+      ])],
     }), provider), /review/);
     assert.deepEqual(provider.calls, ["readTicket", "findReview:31"]);
-  });
-  await context.test("same-second review before a millisecond start", async () => {
-    const provider = new FakeProvider();
-    const stale = review({ submittedAt: "2026-08-27T10:00:00Z" });
-    provider.foundReview = stale;
-    provider.reviewReadback = stale;
-    await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
-      stateId: "review",
-      resultContract: "review",
-      pinnedChangeRequest: change(),
-      startedAt: "2026-08-27T10:00:00.500Z",
-    }), provider), /review/);
-    assert.deepEqual(provider.calls, ["readTicket", "findReview:31"]);
-  });
-  await context.test("review timestamp regresses during exact readback", async () => {
-    const provider = new FakeProvider();
-    provider.foundReview = review({ submittedAt: "2026-08-27T10:00:00.500Z" });
-    provider.reviewReadback = review({ submittedAt: "2026-08-27T10:00:00Z" });
-    await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
-      stateId: "review",
-      resultContract: "review",
-      pinnedChangeRequest: change(),
-      startedAt: "2026-08-27T10:00:00.500Z",
-    }), provider), /review/);
-  });
-  await context.test("invalid review timestamp", async () => {
-    const provider = new FakeProvider();
-    const invalid = review({ submittedAt: "not-a-timestamp" });
-    provider.foundReview = invalid;
-    provider.reviewReadback = invalid;
-    await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
-      stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
-    }), provider), /review/);
+    assert.deepEqual(provider.reviewExclusions, ["701"]);
   });
 });
 
@@ -662,10 +635,12 @@ test("rejects cancellation and changed provider identity", async (context) => {
 });
 
 test("rejects marker, duplicate, identity, URL, and membership contradictions", async (context) => {
-  await context.test("wrong artifact marker", async () => {
+  await context.test("wrong publication identity", async () => {
     const provider = new FakeProvider();
-    installComments(provider, [comment("plan")]);
-    await trustFailure(readDecision({ event: "agent-succeeded" }, expectation(), provider), /artifact kind/);
+    installComments(provider, [comment("assessment", {
+      body: `${marker("assessment").replace(CONFIG_REVISION, "b".repeat(40))}\nAssessment.`,
+    })]);
+    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation(), provider), /comment/);
   });
   await context.test("duplicate evidence", async () => {
     const provider = new FakeProvider();
@@ -806,7 +781,7 @@ test("rejects mismatched or unauthorized human source comments", async (context)
   await context.test("marked source", async () => {
     const provider = new FakeProvider();
     const human = source();
-    installComments(provider, [{ ...human, body: `${marker("question")}\nNot human input.` }]);
+    installComments(provider, [{ ...human, body: `Narrative text.\n${marker("question")}` }]);
     await trustFailure(run(provider, human), /unmarked/);
   });
   for (const permission of ["none", "read", "triage"] as const) {

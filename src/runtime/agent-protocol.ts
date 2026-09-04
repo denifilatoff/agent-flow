@@ -5,6 +5,7 @@ import type {
 } from "../config/types.js";
 import type { FlowEventType } from "../flow/types.js";
 import type { NormalizedChangeRequest, ProviderComment } from "../provider/types.js";
+import { renderPublication } from "../provider/publication.ts";
 
 type EventSource = "agent" | "provider" | "controller";
 
@@ -15,8 +16,8 @@ export interface RuntimePromptInput {
   stateId: string;
   mode: AttemptMode;
   resultContract: ResultContract;
-  flowInstanceId: string;
-  attemptId: string;
+  configRevision: string;
+  controllerId: string;
   contextPath: string;
   decisionPath: string;
   changeRequest: NormalizedChangeRequest | null;
@@ -99,6 +100,8 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
   lines.push(
     "Allowed decisions and required provider evidence:",
     ...events.map((event) => `${JSON.stringify({ event })} requires ${evidence(input, event)}.`),
+    "Add the publication marker only to the final result, question, review body, or change-request description. "
+      + "Do not mark progress notes.",
     "Do not edit labels beginning with `agent-flow:` or `agent-stage:`.",
   );
   return lines.join("\n");
@@ -109,33 +112,36 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
     || event === "human-question"
     || event === "human-unclear"
     || event === "human-answer-unclear") {
-    return `a marked question comment beginning exactly with ${marker(input, "question")}`;
+    return `a marked question comment containing exactly ${marker(input)}`;
   }
   if (event.startsWith("human-")) return "no new provider publication";
   if (event === "review-approved" || event === "review-changes-requested") {
     if (!input.changeRequest) throw new Error("review event requires a pinned change request");
     const head = input.changeRequest.headSha;
     const verdict = event === "review-approved" ? "approved" : "changes-requested";
-    return `a provider-native review on ${head} beginning exactly with ${marker(input, "review")} `
+    return `a provider-native review on ${head} beginning exactly with ${marker(input)} `
       + `and <!-- agent-flow-review:v1 head=${head} verdict=${verdict} -->`;
   }
   if (event === "agent-succeeded") {
     if (input.resultContract === "assessment") {
-      return `a marked assessment comment beginning exactly with ${marker(input, "assessment")}`;
+      return `a marked assessment comment containing exactly ${marker(input)}`;
     }
     if (input.resultContract === "plan") {
-      return `a marked plan comment beginning exactly with ${marker(input, "plan")}`;
+      return `a marked plan comment containing exactly ${marker(input)}`;
     }
     if (input.resultContract === "development") {
-      if (!input.changeRequest) return "creation of one linked open change request during this attempt";
+      if (!input.changeRequest) {
+        return `creation of one linked open change request whose description contains exactly ${marker(input)}`;
+      }
       const change = input.changeRequest;
       return `the exact pinned change request ${change.provider} ${change.repository}#${change.number} to remain open `
-        + "and be updated during this attempt. Do not create another change request";
+        + `and be updated during this attempt. Its description must contain exactly ${marker(input)}. `
+        + "Do not create another change request";
     }
   }
   throw new Error(`result contract ${input.resultContract} does not support ${event}`);
 }
 
-function marker(input: RuntimePromptInput, artifact: "assessment" | "plan" | "question" | "review"): string {
-  return `<!-- agent-flow:v1 flow=${input.flowInstanceId} attempt=${input.attemptId} artifact=${artifact} -->`;
+function marker(input: RuntimePromptInput): string {
+  return renderPublication({ config: input.configRevision, controller: input.controllerId });
 }

@@ -579,7 +579,7 @@ test("returns null when no GitHub review starts with the exact marker", async ()
   assert.equal(await adapter(client).findReview(ref, 31, REVIEW_MARKER), null);
 });
 
-test("rejects duplicate GitHub reviews with the same attempt marker", async () => {
+test("rejects duplicate GitHub reviews with the same publication marker", async () => {
   const duplicate = { ...(fixture.commentReview as Record<string, unknown>), id: 704 };
   const client = new FixtureClient().add(
     "GET",
@@ -590,8 +590,20 @@ test("rejects duplicate GitHub reviews with the same attempt marker", async () =
 
   await assert.rejects(
     adapter(client).findReview(ref, 31, REVIEW_MARKER),
-    /multiple GitHub reviews.*attempt marker/,
+    /multiple GitHub reviews.*publication marker/,
   );
+});
+
+test("excludes baseline GitHub reviews when locating the current result", async () => {
+  const duplicate = { ...(fixture.commentReview as Record<string, unknown>), id: 704 };
+  const client = new FixtureClient().add(
+    "GET",
+    "repos/owner/repo/pulls/31/reviews?per_page=100",
+    { data: [fixture.commentReview, duplicate] },
+  );
+  const ref = { provider: "github" as const, repository: REPOSITORY, number: 17 };
+
+  assert.equal((await adapter(client).findReview(ref, 31, REVIEW_MARKER, ["703"]))?.id, "704");
 });
 
 test("reads the logical verdict from a GitHub COMMENT review", async () => {

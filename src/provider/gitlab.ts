@@ -424,6 +424,7 @@ export function createGitLabAdapter(
       ref: TicketRef,
       changeNumber: number,
       marker: string,
+      excludedIds: readonly string[] = [],
     ): Promise<NormalizedReview | null> {
       assertTicket(ref, allowlist);
       assertPositiveInteger(changeNumber, "merge request number");
@@ -431,11 +432,14 @@ export function createGitLabAdapter(
         `${repositoryPath(ref.repository)}/merge_requests/${changeNumber}/notes?per_page=100`,
         "active",
       );
-      const matches = notes.filter((value) =>
-        optionalString(object(value, "GitLab review note").body, "GitLab review note body")
-          .split(/\r?\n/, 1)[0] === marker);
+      const excluded = new Set(excludedIds);
+      const matches = notes.filter((value) => {
+        const note = object(value, "GitLab review note");
+        return !excluded.has(identifier(note.id, "GitLab review note id"))
+          && optionalString(note.body, "GitLab review note body").split(/\r?\n/, 1)[0] === marker;
+      });
       if (matches.length > 1) {
-        throw new Error("multiple GitLab review notes have the same attempt marker");
+        throw new Error("multiple GitLab review notes match the publication marker");
       }
       if (matches[0] === undefined) return null;
       return normalizeReviewNote(matches[0], await readChangeRequest(ref, changeNumber));

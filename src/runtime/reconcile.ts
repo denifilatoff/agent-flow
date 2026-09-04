@@ -18,6 +18,7 @@ import {
   renderControlComment,
   type ParsedControlComment,
 } from "../provider/control-comment.ts";
+import { parsePublication } from "../provider/publication.ts";
 import type {
   Permission,
   ProviderAdapter,
@@ -31,7 +32,6 @@ import { writeControlCas, type ControlWriter } from "./control-state.ts";
 import { classifyRecovery, type RecoveryDecision } from "./recovery.ts";
 
 const AUTHORIZED = new Set<Permission>(["write", "maintain", "admin"]);
-const AGENT_MARKER = "<!-- agent-flow";
 
 export interface AttemptRequest {
   ref: TicketRef;
@@ -45,6 +45,8 @@ export interface AttemptRequest {
   sourceComment: ProviderComment | null;
   resultContract: ResultContract;
   inputRevision: string;
+  controllerId: string;
+  publicationKeys: readonly string[];
 }
 
 export interface AttemptLauncher {
@@ -104,6 +106,9 @@ export async function reconcileTicket(
     snapshot = evidence.snapshot;
     assertSnapshot(snapshot, ref);
     let decision = classifyRecovery(evidence, dependencies.controllerId);
+    if (dependencies.writeControl.load && dependencies.writeControl.recordRecovery) {
+      return reconcileLocal(dependencies, evidence, decision);
+    }
     const controls = recoveryControls(snapshot);
     let deferredResume = false;
     if (decision.kind === "reassess" && decision.owner) {
@@ -186,60 +191,227 @@ export async function reconcileTicket(
   }
 
   const current = active[0]!;
-  assertAllowed(current.bundle, ref);
-  const control = current.parsed.state;
-  if (control.stateId === "awaiting-merge") {
-    assertChangeIdentity(control.changeRequest, snapshot.changeRequest);
+  return reconcileControl(dependencies, snapshot, current.bundle, current.parsed.state, [], false, current);
+}
+
+async function reconcileLocal(
+  dependencies: ReconcileDependencies,
+  evidence: RecoveryEvidence,
+  decision: RecoveryDecision,
+): Promise<ReconcileOutcome> {
+  const snapshot = evidence.snapshot;
+  const ref = snapshot.ref;
+  const writer = dependencies.writeControl;
+  const controllerId = dependencies.controllerId!;
+  let stored = writer.load!(ref);
+  if (stored && stored.value.controllerId !== controllerId) {
+    throw new Error("local execution belongs to another controller identity");
   }
-  const mergedWins = control.stateId === "awaiting-merge"
-    && snapshot.changeRequest?.state === "merged";
+  let control = stored?.value.control ?? null;
+  const mergedWins = control?.stateId === "awaiting-merge" && snapshot.changeRequest?.state === "merged";
+
+  if (decision.kind === "inactive" && !mergedWins) {
+    if (control && control.stateId !== "done" && control.stateId !== "cancelled") {
+      control = await cancelLocal(dependencies, snapshot, control);
+    }
+    stored = await writer.recordRecovery!(ref, evidence, decision, control);
+    return outcome(stored.value.control, control !== null, false, false);
+  }
+  if (decision.kind === "ambiguous" || decision.kind === "foreign") {
+    if (control && control.stateId !== "done" && control.stateId !== "cancelled") {
+      await dependencies.launcher.cancel(control.flowInstanceId);
+    }
+    stored = await writer.recordRecovery!(ref, evidence, decision, control);
+    return outcome(stored.value.control, false, false, false);
+  }
+
+  let bundle: ConfigBundle;
+  if (control) {
+    bundle = await configCall(
+      "pinned configuration load failed",
+      () => dependencies.config.loadPinned(control!.configRevision),
+    );
+    assertBundle(bundle, control.configRevision);
+    if (decision.owner && decision.owner.metadata.config !== control.configRevision) {
+      const conflict: RecoveryDecision = {
+        kind: "ambiguous",
+        owner: decision.owner,
+        reason: "winning configuration does not match local execution",
+      };
+      stored = await writer.recordRecovery!(ref, evidence, conflict, control);
+      return outcome(stored.value.control, false, false, false);
+    }
+  } else {
+    bundle = decision.owner
+      ? await configCall(
+        "pinned configuration load failed",
+        () => dependencies.config.loadPinned(decision.owner!.metadata.config),
+      )
+      : await configCall("current configuration load failed", () => dependencies.config.loadCurrent());
+    assertBundle(bundle, decision.owner?.metadata.config ?? bundle.revision);
+  }
+  assertAllowed(bundle, ref);
+
+  if (!control) {
+    const stage = evidence.activeBoundary === "fresh" ? bundle.flow.spec.initial : providerStage(snapshot);
+    if (decision.kind === "resume" && evidence.activeBoundary !== "fresh" && stage !== bundle.flow.spec.initial) {
+      await writer.recordRecovery!(ref, evidence, decision, null);
+      return outcome(null, false, false);
+    }
+    const actor = snapshot.activation.actor;
+    const eventId = snapshot.activation.eventId;
+    const occurredAt = snapshot.activation.occurredAt;
+    if (!actor || !eventId || !occurredAt) {
+      await writer.recordRecovery!(ref, evidence, {
+        kind: "ambiguous", owner: decision.owner, reason: "activation evidence is unavailable",
+      }, null);
+      return outcome(null, false, false, false);
+    }
+    const permission = await providerCall(
+      "provider permission read failed",
+      () => dependencies.provider.permission(ref.repository, actor),
+    );
+    if (!AUTHORIZED.has(permission)) {
+      await writer.recordRecovery!(ref, evidence, {
+        kind: "ambiguous", owner: decision.owner, reason: "activation actor lacks write permission",
+      }, null);
+      return outcome(null, false, false, false);
+    }
+    const timestamp = now(dependencies);
+    const recovered: ControlState = {
+      apiVersion: "agent-flow/v1alpha1",
+      kind: "ControlState",
+      flowInstanceId: dependencies.newFlowInstanceId?.() ?? randomUUID(),
+      flowId: bundle.flow.metadata.id,
+      configRevision: bundle.revision,
+      sequence: 0,
+      stateId: stage,
+      resumeStateId: null,
+      activatedBy: actor,
+      activatedAt: occurredAt,
+      activationEventId: eventId,
+      updatedAt: timestamp,
+      attemptSeries: null,
+      latestReceipt: null,
+      humanGate: null,
+      changeRequest: normalizedChange(snapshot.changeRequest),
+    };
+    stored = await writer.recordRecovery!(ref, evidence, decision, recovered, decision.kind === "reassess" ? [] : undefined);
+    control = stored.value.control!;
+  }
+
+  return reconcileControl(
+    dependencies,
+    snapshot,
+    bundle,
+    control,
+    stored?.value.publicationKeys ?? evidence.publications.map(({ key }) => key),
+    true,
+    undefined,
+    evidence.publications.map(({ key }) => key),
+  );
+}
+
+async function reconcileControl(
+  dependencies: ReconcileDependencies,
+  snapshot: ProviderTicketSnapshot,
+  bundle: ConfigBundle,
+  control: ControlState,
+  publicationKeys: readonly string[],
+  local: boolean,
+  legacy?: LoadedControl,
+  observedKeys: readonly string[] = publicationKeys,
+): Promise<ReconcileOutcome> {
+  const { provider, launcher } = dependencies;
+  const ref = snapshot.ref;
+  assertAllowed(bundle, ref);
+  if (control.stateId === "awaiting-merge") assertChangeIdentity(control.changeRequest, snapshot.changeRequest);
+  const mergedWins = control.stateId === "awaiting-merge" && snapshot.changeRequest?.state === "merged";
   if ((!snapshot.activation.present || !snapshot.open) && !mergedWins) {
-    return cancel(dependencies, snapshot, current);
+    return local ? cancelLocalOutcome(dependencies, snapshot, control) : cancel(dependencies, snapshot, legacy!);
   }
 
   let next = control;
   let changed = false;
-  let machineEvent = deriveEvent(snapshot, control, current.bundle.flow);
+  let machineEvent = deriveEvent(snapshot, control, bundle.flow);
   if (!machineEvent && control.stateId === "blocked") {
     const source = await firstAuthorizedComment(provider, ref, snapshot, control);
     if (source) machineEvent = flowEvent("authorized-comment", snapshot, true);
   }
-
   if (machineEvent) {
-    const result = compileFlow(current.bundle.flow).transition({
+    const result = compileFlow(bundle.flow).transition({
       stateId: control.stateId,
       resumeStateId: control.resumeStateId,
       event: machineEvent,
     });
-    if (!result.changed) {
-      throw new Error(`invalid transition from ${control.stateId} for ${machineEvent.type}`);
-    }
+    if (!result.changed) throw new Error(`invalid transition from ${control.stateId} for ${machineEvent.type}`);
     next = advanceControlState(control, {
       stateId: result.stateId,
       resumeStateId: result.resumeStateId,
-      attemptSeries: applyAttemptActions(
-        control.attemptSeries,
-        result.actions,
-        result.stateId === control.stateId,
-      ),
+      attemptSeries: applyAttemptActions(control.attemptSeries, result.actions, result.stateId === control.stateId),
       changeRequest: normalizedChange(snapshot.changeRequest) ?? control.changeRequest,
     }, now(dependencies));
-    await writeExistingControl(dependencies, ref, control, next);
+    await writeExistingControl(dependencies, ref, control, next, observedKeys);
+    publicationKeys = observedKeys;
     changed = true;
-  } else if (control.stateId === "review"
-    && snapshot.changeRequest
+  } else if (control.stateId === "review" && snapshot.changeRequest
     && control.changeRequest?.headSha !== snapshot.changeRequest.headSha) {
     next = advanceControlState(control, { changeRequest: normalizedChange(snapshot.changeRequest) }, now(dependencies));
-    await writeExistingControl(dependencies, ref, control, next);
+    await writeExistingControl(dependencies, ref, control, next, observedKeys);
+    publicationKeys = observedKeys;
     changed = true;
   }
 
   const removeActivation = next.stateId === "done" || next.stateId === "cancelled";
-  await ownLabels(provider, ref, snapshot.labels, current.bundle, next.stateId, removeActivation);
+  await ownLabels(provider, ref, snapshot.labels, bundle, next.stateId, removeActivation);
   const started = removeActivation
     ? false
-    : await startIfNeeded(dependencies, snapshot, current.bundle, next);
+    : await startIfNeeded(dependencies, snapshot, bundle, next, publicationKeys);
   return outcome(next, changed, started);
+}
+
+function providerStage(snapshot: ProviderTicketSnapshot): string {
+  const stages = snapshot.labels.filter((label) => label.startsWith("agent-stage:"));
+  if (stages.length !== 1) throw new Error("provider stage is missing or contradictory");
+  return stages[0]!.slice("agent-stage:".length);
+}
+
+async function cancelLocalOutcome(
+  dependencies: ReconcileDependencies,
+  snapshot: ProviderTicketSnapshot,
+  control: ControlState,
+): Promise<ReconcileOutcome> {
+  const cancelled = await cancelLocal(dependencies, snapshot, control);
+  return outcome(cancelled, true, false);
+}
+
+async function cancelLocal(
+  dependencies: ReconcileDependencies,
+  snapshot: ProviderTicketSnapshot,
+  control: ControlState,
+): Promise<ControlState> {
+  await dependencies.launcher.cancel(control.flowInstanceId);
+  const latest = dependencies.writeControl.load?.(snapshot.ref)?.value.control;
+  if (!latest || latest.flowInstanceId !== control.flowInstanceId) {
+    throw new Error("local control changed during cancellation");
+  }
+  const timestamp = now(dependencies);
+  const current = latest.attemptSeries?.current;
+  const attemptSeries = current?.status === "started" && latest.attemptSeries ? {
+    ...latest.attemptSeries,
+    current: { ...current, status: "cancelled" as const, finishedAt: timestamp },
+  } : latest.attemptSeries;
+  const cancelled = advanceControlState(latest, {
+    stateId: "cancelled",
+    resumeStateId: null,
+    attemptSeries,
+    changeRequest: normalizedChange(snapshot.changeRequest) ?? latest.changeRequest,
+  }, timestamp);
+  await writeExistingControl(dependencies, snapshot.ref, latest, cancelled);
+  const bundle = await dependencies.config.loadPinned(cancelled.configRevision);
+  assertBundle(bundle, cancelled.configRevision);
+  await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, bundle, "cancelled", true);
+  return cancelled;
 }
 
 async function activate(
@@ -285,7 +457,7 @@ async function activate(
   };
   await createControl(dependencies.provider, snapshot.ref, control);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, bundle, control.stateId, false);
-  const started = await startIfNeeded(dependencies, snapshot, bundle, control);
+  const started = await startIfNeeded(dependencies, snapshot, bundle, control, []);
   return outcome(control, true, started);
 }
 
@@ -416,10 +588,11 @@ async function writeExistingControl(
   ref: TicketRef,
   expected: ControlState,
   next: ControlState,
+  publicationKeys?: readonly string[],
 ): Promise<void> {
   await providerCall(
     "provider control comment update failed",
-    () => writeControlCas(dependencies.writeControl, ref, expected, next),
+    () => writeControlCas(dependencies.writeControl, ref, expected, next, publicationKeys),
   );
 }
 
@@ -476,6 +649,7 @@ async function startIfNeeded(
   snapshot: ProviderTicketSnapshot,
   bundle: ConfigBundle,
   control: ControlState,
+  publicationKeys: readonly string[],
 ): Promise<boolean> {
   if (dependencies.launcher.isRunning(control.flowInstanceId)) return false;
 
@@ -527,6 +701,8 @@ async function startIfNeeded(
     sourceComment,
     resultContract,
     inputRevision,
+    controllerId: dependencies.controllerId ?? control.flowInstanceId,
+    publicationKeys,
   });
   return true;
 }
@@ -619,7 +795,7 @@ function humanCutoff(comments: ProviderComment[], control: ControlState): string
 }
 
 function isMarked(body: string): boolean {
-  return body.split(/\r?\n/, 1)[0]?.startsWith(AGENT_MARKER) ?? false;
+  return parsePublication(body).kind !== "unmarked";
 }
 
 function applyAttemptActions(

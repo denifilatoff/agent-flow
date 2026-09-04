@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { inspect } from "node:util";
 
@@ -36,6 +39,8 @@ import {
   type ReconcileDependencies,
 } from "../../src/runtime/reconcile.ts";
 import { deriveEvent } from "../../src/runtime/derive-event.ts";
+import { createControlWriter } from "../../src/runtime/control-state.ts";
+import { openLocalStore, providerScope } from "../../src/runtime/local-store.ts";
 
 const SHA = "a".repeat(40);
 const OLD_HEAD = "1".repeat(40);
@@ -627,6 +632,74 @@ test("reassessment does not fabricate a flow transition before local recovery is
   assert.equal(provider.updated, 0);
   assert.deepEqual(launcher.requests, []);
   assert.equal(provider.events.includes("provider:set-labels"), false);
+});
+
+test("a locally verified publication survives the publication-before-label crash window", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-reconcile-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = openLocalStore(join(directory, "execution.sqlite"));
+  t.after(() => store.close());
+  const writer = createControlWriter(
+    store,
+    providerScope("github", "https://api.github.com"),
+    FLOW_1,
+    () => NOW,
+  );
+  const provider = new FakeProvider();
+  const launcher = new FakeLauncher();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  provider.snapshot.labels.push("agent-stage:assessment", "agent-flow:managed");
+  provider.snapshot.comments.push(comment("assessment-result", `${marker}\nAssessment complete.`));
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+    key: JSON.stringify(["github", "https://api.github.com/", TICKET.repository, "comment", "assessment-result"]),
+    createdAt: "2026-08-26T11:30:00.000Z",
+    metadata: { config: SHA, controller: FLOW_1 },
+  }]);
+  await writer(TICKET, null, controlState({
+    attemptSeries: attemptSeries(),
+    latestReceipt: assessmentReceipt(),
+  }));
+  const configured = dependencies(provider, launcher);
+  configured.controllerId = FLOW_1;
+  configured.writeControl = writer;
+
+  const result = await reconcileTicket(configured, TICKET);
+
+  assert.equal(result.stateId, "assessment-review");
+  assert.equal(launcher.requests.length, 0);
+  assert.equal(writer.load!(TICKET)?.value.control?.stateId, "assessment-review");
+  assert.equal(writer.load!(TICKET)?.value.control?.attemptSeries?.consumed, 1);
+});
+
+test("a marked publication without local decision state is reassessed by the stage agent", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-reconcile-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = openLocalStore(join(directory, "execution.sqlite"));
+  t.after(() => store.close());
+  const writer = createControlWriter(
+    store,
+    providerScope("github", "https://api.github.com"),
+    FLOW_1,
+    () => NOW,
+  );
+  const provider = new FakeProvider();
+  const launcher = new FakeLauncher();
+  provider.snapshot.labels.push("agent-stage:assessment", "agent-flow:managed");
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+    key: JSON.stringify(["github", "https://api.github.com/", TICKET.repository, "comment", "progress"]),
+    createdAt: "2026-08-26T11:30:00.000Z",
+    metadata: { config: SHA, controller: FLOW_1 },
+  }]);
+  const configured = dependencies(provider, launcher);
+  configured.controllerId = FLOW_1;
+  configured.writeControl = writer;
+
+  const result = await reconcileTicket(configured, TICKET);
+
+  assert.equal(result.stateId, "assessment");
+  assert.equal(launcher.requests.length, 1);
+  assert.equal(launcher.requests[0]?.publicationKeys.length, 0);
+  assert.equal(writer.load!(TICKET)?.value.control?.latestReceipt, null);
 });
 
 test("an inactive ticket without local work does not create or launch a flow", async () => {
@@ -1349,7 +1422,12 @@ test("selects the first later unmarked authorized human comment", async () => {
     controlComment(control),
     assessment,
     comment("outsider", "LGTM", OUTSIDER, "2026-08-26T10:41:00.000Z"),
-    comment("agent", "<!-- agent-flow:v1 flow=x attempt=y artifact=question -->", MAINTAINER, "2026-08-26T10:42:00.000Z"),
+    comment(
+      "agent",
+      `Narrative text.\n<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`,
+      MAINTAINER,
+      "2026-08-26T10:42:00.000Z",
+    ),
     comment("answer", "Approved; spelling is nonblocking.", MAINTAINER, "2026-08-26T10:43:00.000Z"),
     comment("later", "This is later.", MAINTAINER, "2026-08-26T10:44:00.000Z"),
   );

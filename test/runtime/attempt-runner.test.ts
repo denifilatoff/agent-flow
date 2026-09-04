@@ -20,12 +20,14 @@ import {
 import type { AttemptRequest } from "../../src/runtime/reconcile.ts";
 
 const FLOW = "11111111-1111-4111-8111-111111111111";
+const CONTROLLER = "55555555-5555-4555-8555-555555555555";
 const SERIES = "22222222-2222-4222-8222-222222222222";
 const ATTEMPT_1 = "33333333-3333-4333-8333-333333333333";
 const ATTEMPT_2 = "44444444-4444-4444-8444-444444444444";
 const REVISION = "a".repeat(40);
 const HEAD = "b".repeat(40);
 const NOW = "2026-08-26T10:00:00.000Z";
+const PUBLICATION_KEY = JSON.stringify(["github", "https://api.github.com/", "owner/repo", "comment", "17"]);
 const OK: HarnessResult = { exitCode: 0, signal: null, timedOut: false };
 
 function bundle(maxAttempts = 3): ConfigBundle {
@@ -86,14 +88,16 @@ function request(options: { bundle?: ConfigBundle; control?: ControlState; input
   const ticket = snapshot();
   return { ref: ticket.ref, snapshot: ticket, control: options.control ?? control(), bundle: configured,
     stateId: "development", state: configured.flow.spec.states.development!, agentId: "developer", mode: "stage",
-    sourceComment: null, resultContract: "development", inputRevision: options.inputRevision ?? "input:one" };
+    sourceComment: null, resultContract: "development", inputRevision: options.inputRevision ?? "input:one",
+    controllerId: CONTROLLER, publicationKeys: [] };
 }
 
 function receipt(attemptId: string, outcome: "succeeded" | "needs-human" = "succeeded"): AgentReceipt {
   return { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt", flowInstanceId: FLOW, attemptId, outcome,
     summary: "done", artifacts: outcome === "needs-human" ? [{ kind: "comment", id: "9",
       url: "https://github.test/owner/repo/issues/7#issuecomment-9",
-      marker: `<!-- agent-flow:v1 flow=${FLOW} attempt=${attemptId} artifact=question -->`, artifactKind: "question" }] :
+      marker: `<!-- agent-flow:v1 {"config":"${REVISION}","controller":"${CONTROLLER}"} -->`,
+      artifactKind: "question" }] :
       [{ kind: "change-request", number: 8, url: "https://github.test/owner/repo/pull/8", headSha: HEAD, state: "open" }] };
 }
 
@@ -105,6 +109,7 @@ function deferred<T>() {
 
 interface Fixture {
   events: string[]; controls: ControlState[]; attempts: string[]; delays: number[]; prompts: string[];
+  publicationBaselines: Array<readonly string[] | undefined>;
   verifications: Array<{ path: string; expected: DecisionExpectation; cancelled: boolean }>;
   process: ReturnType<typeof deferred<HarnessResult>>;
   runner: ReturnType<typeof createAttemptRunner>; request: AttemptRequest;
@@ -119,6 +124,7 @@ function fixture(options: {
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
   const prompts: string[] = [];
+  const publicationBaselines: Array<readonly string[] | undefined> = [];
   const verifications: Fixture["verifications"] = [];
   const process = deferred<HarnessResult>();
   const configuredRequest = options.request ?? request();
@@ -136,7 +142,8 @@ function fixture(options: {
     if (value instanceof Promise) return value;
     return input.signal.aborted ? { exitCode: null, signal: "SIGTERM", timedOut: false } : value;
   } };
-  const writeControl = options.write ?? (async (_ref, expected, next) => {
+  const writeControl = options.write ?? (async (_ref, expected, next, publicationKeys) => {
+    publicationBaselines.push(publicationKeys);
     events.push(next.attemptSeries?.current?.status === "started" ? "control:update-started" : "control:update");
     assert.equal(expected.flowInstanceId, FLOW); assert.equal(expected.sequence, current.sequence);
     assert.equal(next.sequence, current.sequence + 1); current = structuredClone(next); controls.push(current);
@@ -170,7 +177,10 @@ function fixture(options: {
     now: () => NOW, newId: () => ids.shift()!,
   });
   if (options.onSettled) runner.onSettled?.(options.onSettled);
-  return { events, controls, attempts, delays, prompts, verifications, process, runner, request: configuredRequest };
+  return {
+    events, controls, attempts, delays, prompts, publicationBaselines, verifications, process, runner,
+    request: configuredRequest,
+  };
 }
 
 async function waitIdle(subject: Fixture): Promise<void> {
@@ -181,25 +191,29 @@ async function waitIdle(subject: Fixture): Promise<void> {
 }
 
 test("persists and reads back started before a background launch", async () => {
-  const subject = fixture(); await subject.runner.start(subject.request);
+  const attemptRequest = { ...request(), publicationKeys: [PUBLICATION_KEY] };
+  const subject = fixture({ request: attemptRequest }); await subject.runner.start(subject.request);
   assert.equal(subject.runner.isRunning(FLOW), true);
   assert.deepEqual(subject.events.slice(0, 6), ["control:update-started", "control:readback", "workspace:prepare",
     "session:create", "apm:compile", "harness:spawn"]);
   assert.equal(subject.controls[0]!.attemptSeries?.consumed, 1);
+  assert.deepEqual(subject.publicationBaselines[0], [PUBLICATION_KEY]);
   subject.process.resolve(OK); await waitIdle(subject);
   assert.match(subject.prompts[0]!, new RegExp(`/data/sessions/${ATTEMPT_1}/context\\.json`));
   assert.match(subject.prompts[0]!, new RegExp(`/data/sessions/${ATTEMPT_1}/decision\\.json`));
-  assert.match(subject.prompts[0]!, new RegExp(`flow=${FLOW} attempt=${ATTEMPT_1} artifact=question`));
+  assert.match(subject.prompts[0]!, new RegExp(`"controller":"${CONTROLLER}"`));
   assert.equal(subject.verifications[0]?.path, `/data/sessions/${ATTEMPT_1}/decision.json`);
   assert.deepEqual({
     flow: subject.verifications[0]?.expected.flow,
     stateId: subject.verifications[0]?.expected.stateId,
     mode: subject.verifications[0]?.expected.mode,
     resultContract: subject.verifications[0]?.expected.resultContract,
+    configRevision: subject.verifications[0]?.expected.configRevision,
+    controllerId: subject.verifications[0]?.expected.controllerId,
+    publicationKeys: subject.verifications[0]?.expected.publicationKeys,
     flowInstanceId: subject.verifications[0]?.expected.flowInstanceId,
     attemptId: subject.verifications[0]?.expected.attemptId,
     ticket: subject.verifications[0]?.expected.ticket,
-    startedAt: subject.verifications[0]?.expected.startedAt,
     sourceComment: subject.verifications[0]?.expected.sourceComment,
     pinnedChangeRequest: subject.verifications[0]?.expected.pinnedChangeRequest,
   }, {
@@ -207,10 +221,12 @@ test("persists and reads back started before a background launch", async () => {
     stateId: "development",
     mode: "stage",
     resultContract: "development",
+    configRevision: REVISION,
+    controllerId: CONTROLLER,
+    publicationKeys: [PUBLICATION_KEY],
     flowInstanceId: FLOW,
     attemptId: ATTEMPT_1,
     ticket: subject.request.ref,
-    startedAt: NOW,
     sourceComment: null,
     pinnedChangeRequest: subject.request.snapshot.changeRequest,
   });

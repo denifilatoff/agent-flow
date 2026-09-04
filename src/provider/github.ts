@@ -418,6 +418,7 @@ export function createGitHubAdapter(
       ref: TicketRef,
       changeNumber: number,
       marker: string,
+      excludedIds: readonly string[] = [],
     ): Promise<NormalizedReview | null> {
       assertTicket(ref, allowlist);
       assertPositiveInteger(changeNumber, "pull request number");
@@ -425,11 +426,14 @@ export function createGitHubAdapter(
         `repos/${repositoryPath(ref.repository)}/pulls/${changeNumber}/reviews?per_page=100`,
         "active",
       );
-      const matches = reviews.filter((value) =>
-        optionalString(object(value, "GitHub review").body, "GitHub review body")
-          .split(/\r?\n/, 1)[0] === marker);
+      const excluded = new Set(excludedIds);
+      const matches = reviews.filter((value) => {
+        const review = object(value, "GitHub review");
+        return !excluded.has(identifier(review.id, "GitHub review id"))
+          && optionalString(review.body, "GitHub review body").split(/\r?\n/, 1)[0] === marker;
+      });
       if (matches.length > 1) {
-        throw new Error("multiple GitHub reviews have the same attempt marker");
+        throw new Error("multiple GitHub reviews match the publication marker");
       }
       return matches[0] === undefined ? null : normalizeReview(matches[0]);
     },
