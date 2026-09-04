@@ -142,6 +142,7 @@ function assertKey(scope: string, ref: TicketRef): void {
     || providerScope(provider, scope.slice(separator + 1)) !== scope) {
     throw new Error("provider scope must use the canonical provider API URL representation");
   }
+  if (provider !== ref.provider) throw new Error("provider scope does not match ticket provider");
   if (ref.repository.length === 0 || !Number.isSafeInteger(ref.number) || ref.number < 1) {
     throw new Error("invalid local execution ticket identity");
   }

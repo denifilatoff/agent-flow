@@ -90,6 +90,20 @@ test("canonicalizes credential-free provider scopes and keeps hosts separate", a
   store.close();
 });
 
+test("rejects a provider scope that does not match the ticket provider", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-local-store-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = openLocalStore(join(directory, "execution.sqlite"));
+  const gitlabScope = providerScope("gitlab", "https://gitlab.example.test/api/v4");
+
+  assert.throws(
+    () => store.save(gitlabScope, ref, null, inactiveRecord()),
+    /provider scope does not match ticket provider/,
+  );
+  assert.throws(() => store.load(gitlabScope, ref), /provider scope does not match ticket provider/);
+  store.close();
+});
+
 test("rejects invalid payloads without creating a row", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-flow-local-store-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
