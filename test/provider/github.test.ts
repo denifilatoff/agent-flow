@@ -198,7 +198,7 @@ test("rejects incomplete GitHub recovery evidence pages", async () => {
   );
 });
 
-test("resolves a manually connected GitHub pull request as recovery evidence", async () => {
+test("marks a REST connected GitHub event without a linked pull request as ambiguous", async () => {
   const client = new FixtureClient()
     .add("GET", "repos/owner/repo", { data: fixture.repository })
     .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
@@ -215,24 +215,16 @@ test("resolves a manually connected GitHub pull request as recovery evidence", a
           id: 902,
           event: "connected",
           created_at: "2026-08-25T10:00:01Z",
-          subject: {
-            type: "pull_request",
-            url: "https://api.github.example.test/repos/owner/repo/pulls/31",
-          },
         },
       ],
     })
     .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] })
-    .add("GET", "repos/owner/repo/pulls/31", { data: fixture.pull })
-    .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", { data: [] })
-    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } })
-    .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "push" } });
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } });
 
   const evidence = await adapter(client).readRecoveryEvidence({ provider: "github", repository: REPOSITORY, number: 17 });
 
-  assert.equal(evidence.changes.length, 1);
-  assert.equal(evidence.changes[0]?.number, 31);
-  assert.equal(evidence.ambiguities.some((value) => value.includes("connected")), false);
+  assert.deepEqual(evidence.changes, []);
+  assert.ok(evidence.ambiguities.includes("unresolved connected GitHub pull request: 902"));
 });
 
 test("ignores an unmarked pending GitHub review without a submission time", async () => {

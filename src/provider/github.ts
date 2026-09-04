@@ -557,29 +557,9 @@ function findChangeRequestNumbers(
       continue;
     }
     if (event.event !== "connected") continue;
-    const subject = nullableObject(event.subject);
-    if (subject?.type !== "pull_request") continue;
-    const number = pullRequestNumber(subject.url, repositoryUrl);
-    if (number === null) {
-      ambiguities.push(`unresolved connected GitHub pull request: ${identifier(event.id, "GitHub timeline event id")}`);
-      continue;
-    }
-    candidates.add(number);
+    ambiguities.push(`unresolved connected GitHub pull request: ${identifier(event.id, "GitHub timeline event id")}`);
   }
   return { numbers: [...candidates].sort((left, right) => left - right), ambiguities };
-}
-
-function pullRequestNumber(value: unknown, repositoryUrl: URL): number | null {
-  if (typeof value !== "string") return null;
-  try {
-    const url = new URL(value);
-    const prefix = `${repositoryUrl.pathname.replace(/\/$/, "")}/pulls/`;
-    if (url.origin !== repositoryUrl.origin || !url.pathname.startsWith(prefix) || url.search || url.hash) return null;
-    const number = Number(url.pathname.slice(prefix.length));
-    return Number.isSafeInteger(number) && number > 0 ? number : null;
-  } catch {
-    return null;
-  }
 }
 
 function sameRepositoryUrl(value: unknown, expected: URL): boolean {
