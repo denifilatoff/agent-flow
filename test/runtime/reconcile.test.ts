@@ -22,6 +22,7 @@ import type {
   ProviderComment,
   ProviderRepository,
   ProviderTicketSnapshot,
+  RecoveryEvidence,
   TicketRef,
 } from "../../src/provider/types.ts";
 import {
@@ -271,6 +272,7 @@ class FakeProvider implements ProviderAdapter {
   readError: Error | null = null;
   created = 0;
   updated = 0;
+  recoveryEvidence: RecoveryEvidence | null = null;
 
   async verifyAuth(): Promise<Actor> { return MAINTAINER; }
   async discover(_repository: string, _window: DiscoveryWindow, _cursor?: string): Promise<DiscoveryPage> {
@@ -282,6 +284,19 @@ class FakeProvider implements ProviderAdapter {
     this.events.push("provider:read-ticket");
     if (this.readError) throw this.readError;
     return structuredClone(this.snapshot);
+  }
+  async readRecoveryEvidence(_ref: TicketRef): Promise<RecoveryEvidence> {
+    this.events.push("provider:read-recovery");
+    return structuredClone(this.recoveryEvidence ?? {
+      snapshot: this.snapshot,
+      publications: [],
+      changes: [],
+      reviews: [],
+      ambiguities: [],
+      complete: true,
+      activeBoundary: "known",
+      legacyActive: false,
+    });
   }
   async permission(_repository: string, actor: Actor): Promise<Permission> {
     this.events.push(`provider:permission:${actor.login}`);
@@ -350,6 +365,24 @@ class FakeLauncher implements AttemptLauncher {
   isRunning(flowInstanceId: string): boolean {
     return this.running.has(flowInstanceId);
   }
+}
+
+function recoveryEvidence(
+  provider: FakeProvider,
+  publications: RecoveryEvidence["publications"],
+  patch: Partial<RecoveryEvidence> = {},
+): RecoveryEvidence {
+  return {
+    snapshot: provider.snapshot,
+    publications,
+    changes: [],
+    reviews: [],
+    ambiguities: [],
+    complete: true,
+    activeBoundary: "known",
+    legacyActive: false,
+    ...patch,
+  };
 }
 
 function dependencies(provider = new FakeProvider(), launcher = new FakeLauncher()): ReconcileDependencies {
@@ -473,6 +506,162 @@ test("ignores an activation by an actor below write permission", async () => {
   assert.equal(provider.updated, 0);
   assert.deepEqual(launcher.requests, []);
   assert.ok(!provider.snapshot.labels.includes("agent-flow:managed"));
+});
+
+test("foreign ownership cancels local work and performs no provider mutation", async () => {
+  const provider = new FakeProvider();
+  const launcher = new FakeLauncher();
+  installControl(provider, controlState());
+  launcher.running.add(FLOW_1);
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+      key: "foreign-comment",
+      createdAt: "2026-08-26T11:30:00.000Z",
+      metadata: { config: SHA, controller: FLOW_2 },
+    }]);
+  const recorded: string[] = [];
+  const configured = dependencies(provider, launcher);
+  configured.controllerId = FLOW_1;
+  configured.recordRecovery = async (_ref, _evidence, decision) => { recorded.push(decision.kind); };
+
+  const outcome = await reconcileTicket(configured, TICKET);
+
+  assert.equal(outcome.runnable, false);
+  assert.equal(outcome.started, false);
+  assert.deepEqual(launcher.cancelled, [FLOW_1]);
+  assert.deepEqual(recorded, ["foreign"]);
+  assert.equal(provider.events.includes("provider:read-ticket"), false);
+  assert.equal(provider.events.includes("provider:create-control"), false);
+  assert.equal(provider.events.includes("provider:update-control"), false);
+  assert.equal(provider.events.includes("provider:set-labels"), false);
+});
+
+test("foreign ownership still cancels local work when recording fails", async () => {
+  const provider = new FakeProvider();
+  const launcher = new FakeLauncher();
+  installControl(provider, controlState());
+  launcher.running.add(FLOW_1);
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+      key: "foreign-comment",
+      createdAt: "2026-08-26T11:30:00.000Z",
+      metadata: { config: SHA, controller: FLOW_2 },
+    }]);
+  const configured = dependencies(provider, launcher);
+  configured.controllerId = FLOW_1;
+  configured.recordRecovery = async () => { throw new Error("local store unavailable"); };
+
+  await assert.rejects(reconcileTicket(configured, TICKET), /local store unavailable/);
+
+  assert.deepEqual(launcher.cancelled, [FLOW_1]);
+  assert.equal(provider.events.includes("provider:set-labels"), false);
+});
+
+test("a missing winning configuration pauses without falling back to current configuration", async () => {
+  const provider = new FakeProvider();
+  const launcher = new FakeLauncher();
+  provider.snapshot.labels.push("agent-stage:assessment");
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+      key: "own-comment",
+      createdAt: "2026-08-26T11:30:00.000Z",
+      metadata: { config: SHA, controller: FLOW_1 },
+    }]);
+  let currentLoads = 0;
+  const configured = dependencies(provider, launcher);
+  configured.controllerId = FLOW_1;
+  configured.config = {
+    loadCurrent: async () => { currentLoads += 1; return BUNDLE; },
+    loadPinned: async () => { throw new Error("missing pinned revision"); },
+  };
+
+  const outcome = await reconcileTicket(configured, TICKET);
+
+  assert.equal(outcome.runnable, false);
+  assert.equal(outcome.started, false);
+  assert.equal(currentLoads, 0);
+  assert.deepEqual(launcher.requests, []);
+  assert.equal(provider.events.includes("provider:set-labels"), false);
+});
+
+test("a stage missing from the winning flow pauses without a provider mutation", async () => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels.push("agent-stage:review");
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+      key: "own-comment",
+      createdAt: "2026-08-26T11:30:00.000Z",
+      metadata: { config: SHA, controller: FLOW_1 },
+    }]);
+  const broken = structuredClone(BUNDLE);
+  delete broken.flow.spec.states.review;
+  const recorded: string[] = [];
+  const configured = dependencies(provider);
+  configured.controllerId = FLOW_1;
+  configured.config = {
+    loadCurrent: async () => { throw new Error("current configuration must not load"); },
+    loadPinned: async () => broken,
+  };
+  configured.recordRecovery = async (_ref, _evidence, decision) => { recorded.push(decision.kind); };
+
+  const outcome = await reconcileTicket(configured, TICKET);
+
+  assert.equal(outcome.runnable, false);
+  assert.deepEqual(recorded, ["ambiguous"]);
+  assert.equal(provider.events.includes("provider:set-labels"), false);
+});
+
+test("reassessment does not fabricate a flow transition before local recovery is available", async () => {
+  const provider = new FakeProvider();
+  const launcher = new FakeLauncher();
+  provider.snapshot.labels.push("agent-stage:assessment");
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+      key: "own-comment",
+      createdAt: "2026-08-26T11:30:00.000Z",
+      metadata: { config: SHA, controller: FLOW_1 },
+    }]);
+  const configured = dependencies(provider, launcher);
+  configured.controllerId = FLOW_1;
+
+  const outcome = await reconcileTicket(configured, TICKET);
+
+  assert.equal(outcome.runnable, true);
+  assert.equal(outcome.started, false);
+  assert.equal(provider.created, 0);
+  assert.equal(provider.updated, 0);
+  assert.deepEqual(launcher.requests, []);
+  assert.equal(provider.events.includes("provider:set-labels"), false);
+});
+
+test("an inactive ticket without local work does not create or launch a flow", async () => {
+  const provider = new FakeProvider();
+  const launcher = new FakeLauncher();
+  provider.snapshot.open = false;
+  provider.snapshot.labels.push("agent-stage:assessment");
+  provider.recoveryEvidence = recoveryEvidence(provider, []);
+  const configured = dependencies(provider, launcher);
+  configured.controllerId = FLOW_1;
+
+  const outcome = await reconcileTicket(configured, TICKET);
+
+  assert.equal(outcome.runnable, false);
+  assert.equal(outcome.started, false);
+  assert.equal(provider.created, 0);
+  assert.deepEqual(launcher.requests, []);
+  assert.equal(provider.events.includes("provider:set-labels"), false);
+});
+
+test("resume does not reset a recovered non-entry stage to the flow initial state", async () => {
+  const provider = new FakeProvider();
+  const launcher = new FakeLauncher();
+  provider.snapshot.labels.push("agent-stage:review");
+  provider.recoveryEvidence = recoveryEvidence(provider, []);
+  const configured = dependencies(provider, launcher);
+  configured.controllerId = FLOW_1;
+
+  const outcome = await reconcileTicket(configured, TICKET);
+
+  assert.equal(outcome.runnable, true);
+  assert.equal(outcome.started, false);
+  assert.equal(provider.created, 0);
+  assert.deepEqual(launcher.requests, []);
+  assert.equal(provider.events.includes("provider:set-labels"), false);
 });
 
 for (const scenario of [

@@ -66,7 +66,8 @@ export function createController(dependencies: ControllerDependencies): Controll
     run: async (ref) => {
       const result = await dependencies.reconcile(ref);
       if (result.flowInstanceId) flowInstances.add(result.flowInstanceId);
-      if (result.flowInstanceId && result.stateId !== "done" && result.stateId !== "cancelled") {
+      if (result.runnable && result.flowInstanceId
+        && result.stateId !== "done" && result.stateId !== "cancelled") {
         activeTickets.set(ticketKey(ref), ref);
       } else {
         activeTickets.delete(ticketKey(ref));

@@ -15,8 +15,8 @@ function key(ref: TicketRef): string {
   return `${ref.provider}:${ref.repository}#${ref.number}`;
 }
 
-function outcome(ref: TicketRef): ReconcileOutcome {
-  return { flowInstanceId: key(ref), stateId: "assessment", changed: false, started: false };
+function outcome(ref: TicketRef, runnable = true): ReconcileOutcome {
+  return { flowInstanceId: key(ref), stateId: "assessment", changed: false, started: false, runnable };
 }
 
 function launcher(): AttemptLauncher & { cancelled: string[] } {
@@ -417,6 +417,35 @@ test("advances successful repository cursors independently from failed repositor
 
   assert.deepEqual(windows.get("owner/one"), ["2026-08-25T10:00:00.000Z", "2026-08-25T10:05:00.000Z"]);
   assert.deepEqual(windows.get("owner/two"), ["2026-08-25T10:00:00.000Z", "2026-08-25T10:00:00.000Z"]);
+});
+
+test("drops a non-runnable ticket from active polling", async () => {
+  const calls: TicketRef[] = [];
+  const abort = new AbortController();
+  let interval = 0;
+  const controller = createController({
+    providers: [{ adapter: {
+      kind: "github",
+      async bootstrap() { return [GITHUB_ONE]; },
+      async discover() { return { tickets: [], nextCursor: null }; },
+    }, repositories: [GITHUB_ONE.repository] }],
+    concurrency: 1,
+    reconcile: async (ref) => {
+      calls.push(ref);
+      return outcome(ref, calls.length === 1);
+    },
+    launcher: launcher(),
+    delay: async () => {
+      interval += 1;
+      if (interval === 2) abort.abort();
+    },
+  });
+
+  await controller.bootstrap();
+  await controller.reconcileNow(GITHUB_ONE);
+  await controller.run(abort.signal);
+
+  assert.equal(calls.length, 2);
 });
 
 test("reconcileNow rejects refs outside configured repositories", async () => {

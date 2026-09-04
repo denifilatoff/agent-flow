@@ -23,10 +23,12 @@ import type {
   ProviderAdapter,
   ProviderComment,
   ProviderTicketSnapshot,
+  RecoveryEvidence,
   TicketRef,
 } from "../provider/types.js";
 import { deriveEvent } from "./derive-event.ts";
 import { writeControlCas, type ControlWriter } from "./control-state.ts";
+import { classifyRecovery, type RecoveryDecision } from "./recovery.ts";
 
 const AUTHORIZED = new Set<Permission>(["write", "maintain", "admin"]);
 const AGENT_MARKER = "<!-- agent-flow";
@@ -62,6 +64,12 @@ export interface ReconcileDependencies {
   config: ReconcileConfigSource;
   launcher: AttemptLauncher;
   writeControl: ControlWriter;
+  controllerId?: string;
+  recordRecovery?(
+    ref: TicketRef,
+    evidence: RecoveryEvidence,
+    decision: RecoveryDecision,
+  ): Promise<void>;
   now?: () => string;
   newFlowInstanceId?: () => string;
 }
@@ -71,6 +79,7 @@ export interface ReconcileOutcome {
   stateId: string | null;
   changed: boolean;
   started: boolean;
+  runnable: boolean;
 }
 
 interface LoadedControl {
@@ -86,7 +95,69 @@ export async function reconcileTicket(
   const { provider, launcher } = dependencies;
   if (provider.kind !== ref.provider) throw new Error("provider adapter does not match the ticket");
 
-  const snapshot = await providerCall("provider ticket read failed", () => provider.readTicket(ref));
+  let snapshot: ProviderTicketSnapshot;
+  if (dependencies.controllerId) {
+    const evidence = await providerCall(
+      "provider recovery evidence read failed",
+      () => provider.readRecoveryEvidence(ref),
+    );
+    snapshot = evidence.snapshot;
+    assertSnapshot(snapshot, ref);
+    let decision = classifyRecovery(evidence, dependencies.controllerId);
+    const controls = recoveryControls(snapshot);
+    let deferredResume = false;
+    if (decision.kind === "reassess" && decision.owner) {
+      try {
+        const bundle = await dependencies.config.loadPinned(decision.owner.metadata.config);
+        assertBundle(bundle, decision.owner.metadata.config);
+        assertAllowed(bundle, ref);
+        const stage = snapshot.labels.find((label) => label.startsWith("agent-stage:"))!
+          .slice("agent-stage:".length);
+        if (!bundle.flow.spec.states[stage]) throw new Error("provider stage does not exist in the winning flow");
+      } catch {
+        decision = {
+          kind: "ambiguous",
+          owner: decision.owner,
+          reason: "winning configuration or flow is unavailable",
+        };
+      }
+    } else if (decision.kind === "resume" && evidence.activeBoundary === "known" && controls.length === 0) {
+      try {
+        const bundle = await dependencies.config.loadCurrent();
+        assertBundle(bundle, bundle.revision);
+        assertAllowed(bundle, ref);
+        const stage = snapshot.labels.find((label) => label.startsWith("agent-stage:"))!
+          .slice("agent-stage:".length);
+        if (!bundle.flow.spec.states[stage]) throw new Error("provider stage does not exist in the selected flow");
+        deferredResume = stage !== bundle.flow.spec.initial;
+      } catch {
+        decision = { kind: "ambiguous", owner: null, reason: "configuration or flow is unavailable" };
+      }
+    }
+    if (decision.kind === "inactive" && controls.length === 0) {
+      await dependencies.recordRecovery?.(ref, evidence, decision);
+      return outcome(null, false, false, false);
+    }
+    if (decision.kind === "reassess") {
+      await dependencies.recordRecovery?.(ref, evidence, decision);
+      return outcome(controls[0] ?? null, false, false);
+    }
+    if (decision.kind === "ambiguous" || decision.kind === "foreign") {
+      for (const control of controls) {
+        if (control.stateId !== "done" && control.stateId !== "cancelled") {
+          await launcher.cancel(control.flowInstanceId);
+        }
+      }
+      await dependencies.recordRecovery?.(ref, evidence, decision);
+      return outcome(controls[0] ?? null, false, false, false);
+    }
+    if (deferredResume) {
+      await dependencies.recordRecovery?.(ref, evidence, decision);
+      return outcome(null, false, false);
+    }
+  } else {
+    snapshot = await providerCall("provider ticket read failed", () => provider.readTicket(ref));
+  }
   assertSnapshot(snapshot, ref);
   const parsed = listControlComments(snapshot.comments);
   const loaded = await loadControls(parsed, dependencies.config);
@@ -325,6 +396,13 @@ function assertSnapshot(snapshot: ProviderTicketSnapshot, ref: TicketRef): void 
     || snapshot.repository.name !== ref.repository) {
     throw new Error("provider ticket snapshot does not match the requested ticket");
   }
+}
+
+function recoveryControls(snapshot: ProviderTicketSnapshot): ControlState[] {
+  return snapshot.comments
+    .map(({ body }) => parseControlComment(body))
+    .filter((control): control is ControlState => control !== null)
+    .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
 async function createControl(provider: ProviderAdapter, ref: TicketRef, control: ControlState): Promise<void> {
@@ -599,12 +677,18 @@ function flowEvent(
   };
 }
 
-function outcome(control: ControlState | null, changed: boolean, started: boolean): ReconcileOutcome {
+function outcome(
+  control: ControlState | null,
+  changed: boolean,
+  started: boolean,
+  runnable = true,
+): ReconcileOutcome {
   return {
     flowInstanceId: control?.flowInstanceId ?? null,
     stateId: control?.stateId ?? null,
     changed,
     started,
+    runnable,
   };
 }
 
