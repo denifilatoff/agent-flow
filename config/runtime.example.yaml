@@ -1,0 +1,72 @@
+apiVersion: agent-flow/v1alpha1
+kind: RuntimeConfig
+configuration:
+  repository: https://github.com/example/agent-stack.git
+  revision: 0123456789abcdef0123456789abcdef01234567
+  stack: config/stack.yaml
+provider:
+  type: github
+  apiUrl: https://api.github.com
+  repositories:
+    - example-owner/example-repository
+  tokenFile: /run/secrets/agent-flow/provider-token
+execution:
+  agents:
+    architect:
+      harness: claude
+      model: example-architect-model
+      reasoning: high
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 2700
+    planner:
+      harness: claude
+      model: example-planner-model
+      reasoning: high
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 2700
+    developer:
+      harness: codex
+      model: example-developer-model
+      reasoning: high
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 7200
+    reviewer:
+      harness: codex
+      model: example-reviewer-model
+      reasoning: high
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 2700
+    bug-investigator:
+      harness: claude
+      model: example-investigator-model
+      reasoning: high
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 2700
+    bugfixer:
+      harness: codex
+      model: example-bugfixer-model
+      reasoning: high
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 7200
+  harnesses:
+    claude:
+      authFile: /run/secrets/agent-flow/claude-auth
+    codex:
+      authFile: /run/secrets/agent-flow/codex-auth
+polling:
+  intervalSeconds: 300
+  maxCallsPerMinute: 20
+  quotaReservePercent: 25
+runtime:
+  concurrency: 4
+  dataDirectory: /var/lib/agent-flow
+  http:
+    address: 0.0.0.0
+    port: 8080
+    authFile: /run/secrets/agent-flow/operator-password

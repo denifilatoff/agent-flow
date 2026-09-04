@@ -62,6 +62,7 @@ export interface ProviderTicketSnapshot {
   updatedAt: string;
   activation: {
     present: boolean;
+    label: string | null;
     eventId: string | null;
     actor: Actor | null;
     occurredAt: string | null;
@@ -91,7 +92,12 @@ export interface ProviderAdapter {
   readComment(ref: TicketRef, id: string): Promise<ProviderComment>;
   createComment(ref: TicketRef, body: string): Promise<ProviderComment>;
   updateComment(ref: TicketRef, id: string, body: string): Promise<ProviderComment>;
-  setControllerLabels(ref: TicketRef, remove: string[], add: string[]): Promise<string[]>;
+  setControllerLabels(
+    ref: TicketRef,
+    remove: string[],
+    add: string[],
+    pinnedActivationLabels?: readonly string[],
+  ): Promise<string[]>;
   readChangeRequest(ref: TicketRef, number: number): Promise<NormalizedChangeRequest>;
   findReview(ref: TicketRef, changeNumber: number, marker: string): Promise<NormalizedReview | null>;
   readReview(ref: TicketRef, changeNumber: number, id: string): Promise<NormalizedReview>;

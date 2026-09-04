@@ -409,9 +409,9 @@ test("uses glab for a GitLab repository", async (t) => {
 });
 
 test("passes canonical provider credentials to Git without allowing prompts", async (t) => {
-  for (const [provider, host, helper] of [
-    ["github", "github.com", "gh auth git-credential"],
-    ["gitlab", "gitlab.com", "glab auth git-credential"],
+  for (const [provider, host, helper, name] of [
+    ["github", "github.com", "gh auth git-credential", "GH_TOKEN"],
+    ["gitlab", "gitlab.com", "glab auth git-credential", "GITLAB_TOKEN"],
   ] as const) {
     const { root, data, run, cloneCommands, cloneEnvironments } = await fixture();
     t.after(() => rm(root, { recursive: true, force: true }));
@@ -427,6 +427,7 @@ test("passes canonical provider credentials to Git without allowing prompts", as
       repository,
       { provider, repository: repository.name, number: 9 },
       FLOW_1,
+      { provider, name, value: "provider-token", apiUrl: `https://${host}` },
     );
 
     assert.deepEqual(cloneCommands[0]?.args.slice(-5), [
@@ -437,6 +438,8 @@ test("passes canonical provider credentials to Git without allowing prompts", as
       `credential.https://${host}.helper=!${helper}`,
     ]);
     assert.equal(cloneEnvironments[0]?.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(cloneEnvironments[0]?.[name], "provider-token");
+    assert.equal(cloneCommands[0]?.args.includes("provider-token"), false);
   }
 });
 

@@ -31,6 +31,7 @@ const CONTEXT: AttemptContext = {
     updatedAt: "2026-08-26T00:00:00.000Z",
     activation: {
       present: true,
+      label: "agent-flow:development",
       eventId: "1",
       actor: { login: "maintainer", providerId: "41" },
       occurredAt: "2026-08-26T00:00:00.000Z",

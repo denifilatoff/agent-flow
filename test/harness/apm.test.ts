@@ -76,7 +76,7 @@ test("runs frozen install and Claude compilation in the copied package", async (
   assert.match(result.instructions, /Publish the assessment/);
   assert.equal(result.runtimeDirectory, join(await realpath(outputDirectory), "source"));
   assert.deepEqual(commands, [
-    { file: "apm", args: ["install", "--frozen", "--target", "claude"], cwd: result.runtimeDirectory },
+    { file: "apm", args: ["install", "--frozen"], cwd: result.runtimeDirectory },
     { file: "apm", args: ["compile", "--target", "claude"], cwd: result.runtimeDirectory },
   ]);
   await assert.rejects(access(join(packageDirectory, ".claude")), { code: "ENOENT" });
@@ -247,6 +247,8 @@ test("compiles every package with domain-only role instructions", async (t) => {
     ["planner", ["claude", "codex"], /complete implementation plan/],
     ["developer", ["codex"], /smallest change/],
     ["reviewer", ["codex"], /pinned head/],
+    ["bug-investigator", ["claude", "codex"], /diagnostic artifact/],
+    ["bugfixer", ["codex"], /smallest regression/],
   ] as const;
   for (const [agentId, targets, expected] of packages) {
     for (const target of targets) {

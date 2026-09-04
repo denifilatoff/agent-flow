@@ -3,29 +3,13 @@ kind: AgentCatalog
 agents:
   architect:
     package: agent-packages/architect
-    target: claude
-    retry:
-      maxAttempts: 3
-      delaySeconds: 30
-      timeoutSeconds: 2700
   planner:
     package: agent-packages/planner
-    target: claude
-    retry:
-      maxAttempts: 3
-      delaySeconds: 30
-      timeoutSeconds: 2700
   developer:
     package: agent-packages/developer
-    target: codex
-    retry:
-      maxAttempts: 3
-      delaySeconds: 30
-      timeoutSeconds: 7200
   reviewer:
     package: agent-packages/reviewer
-    target: codex
-    retry:
-      maxAttempts: 3
-      delaySeconds: 30
-      timeoutSeconds: 2700
+  bug-investigator:
+    package: agent-packages/bug-investigator
+  bugfixer:
+    package: agent-packages/bugfixer

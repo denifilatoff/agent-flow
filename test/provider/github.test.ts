@@ -53,14 +53,14 @@ class FixtureClient implements RateLimitedHttpClient {
   }
 }
 
-function adapter(client: FixtureClient) {
+function adapter(client: FixtureClient, activationLabels?: readonly string[]) {
   return createGitHubAdapter(
     {
       apiUrl: "https://api.github.example.test",
-      tokenEnv: "GITHUB_TOKEN",
       repositories: [REPOSITORY],
     },
     client,
+    activationLabels,
   );
 }
 
@@ -119,6 +119,7 @@ test("discovers changed issues and normalizes one snapshot", async () => {
   assert.equal(ticket.title, "Fix the edge case");
   assert.equal(ticket.description, "Handle the documented edge case without changing existing behavior.");
   assert.equal(ticket.activation.present, true);
+  assert.equal(ticket.activation.label, "agent-flow:development");
   assert.equal(ticket.activation.eventId, "803");
   assert.equal(ticket.activation.actor?.login, "maintainer");
   assert.deepEqual(ticket.labels, ["bug", "agent-flow:development", "agent-stage:review"]);
@@ -200,6 +201,43 @@ test("bootstraps the union of managed and activation labels across pages", async
   assert.ok(client.calls.every(({ priority }) => priority === "background"));
 });
 
+test("uses a configured bugfix label for bootstrap and activation", async () => {
+  const managedPath = "repos/owner/repo/issues?state=all&labels=agent-flow%3Amanaged&per_page=100";
+  const bugfixPath = "repos/owner/repo/issues?state=all&labels=bugfix&per_page=100";
+  const issue = {
+    ...(fixture.issue as Record<string, unknown>),
+    labels: [{ name: "bugfix" }],
+  };
+  const event = {
+    id: 900,
+    event: "labeled",
+    created_at: "2026-08-25T10:00:00Z",
+    actor: { id: 7, login: "maintainer" },
+    label: { name: "bugfix" },
+  };
+  const client = new FixtureClient()
+    .add("GET", managedPath, { data: [] })
+    .add("GET", bugfixPath, { data: [{ number: 17 }] })
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: issue }, { data: { ...issue, labels: [] } })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", { data: [event] })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] })
+    .add("DELETE", "repos/owner/repo/issues/17/labels/bugfix", { data: [] });
+  const github = adapter(client, ["bugfix"]);
+
+  assert.deepEqual(await github.bootstrap(REPOSITORY), [
+    { provider: "github", repository: REPOSITORY, number: 17 },
+  ]);
+  const ticket = await github.readTicket({ provider: "github", repository: REPOSITORY, number: 17 });
+  assert.equal(ticket.activation.present, true);
+  assert.equal(ticket.activation.eventId, "900");
+  assert.equal(ticket.activation.actor?.login, "maintainer");
+  assert.deepEqual(
+    await github.setControllerLabels(ticket.ref, ["bugfix"], []),
+    [],
+  );
+});
+
 test("maps permissions and performs comment CRUD", async () => {
   const client = new FixtureClient()
     .add("GET", "repos/owner/repo/collaborators/maintainer/permission", {
@@ -218,6 +256,23 @@ test("maps permissions and performs comment CRUD", async () => {
   assert.deepEqual(client.calls[2]!.body, { body: "created" });
   assert.deepEqual(client.calls[3]!.body, { body: "updated" });
   assert.ok(client.calls.every(({ priority }) => priority === "active"));
+});
+
+test("removes an activation label pinned by an older flow revision", async () => {
+  const issue = { ...(fixture.issue as Record<string, unknown>), labels: [] };
+  const client = new FixtureClient()
+    .add("DELETE", "repos/owner/repo/issues/17/labels/legacy-bugfix", { data: [] })
+    .add("GET", "repos/owner/repo/issues/17", { data: issue });
+
+  assert.deepEqual(
+    await adapter(client).setControllerLabels(
+      { provider: "github", repository: REPOSITORY, number: 17 },
+      ["legacy-bugfix"],
+      [],
+      ["legacy-bugfix"],
+    ),
+    [],
+  );
 });
 
 test("updates controller labels without replacing concurrently added repository labels", async () => {

@@ -1,0 +1,236 @@
+lockfile_version: '1'
+generated_at: '2026-08-27T16:19:18.918828+00:00'
+apm_version: 0.28.0
+dependencies:
+- repo_url: github/awesome-copilot
+  name: bug-receipt
+  host: github.com
+  resolved_commit: 634b92f887487fc61cddc2f61d77830e09e8f589
+  resolved_ref: 634b92f887487fc61cddc2f61d77830e09e8f589
+  version: unknown
+  virtual_path: skills/bug-receipt
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/bug-receipt
+  - .agents/skills/bug-receipt/SKILL.md
+  - .agents/skills/bug-receipt/assets/receipt.template.json
+  - .agents/skills/bug-receipt/references/receipt-contract.md
+  - .agents/skills/bug-receipt/references/receipt.schema.json
+  - .agents/skills/bug-receipt/scripts/validate-receipt.mjs
+  - .claude/skills/bug-receipt
+  - .claude/skills/bug-receipt/SKILL.md
+  - .claude/skills/bug-receipt/assets/receipt.template.json
+  - .claude/skills/bug-receipt/references/receipt-contract.md
+  - .claude/skills/bug-receipt/references/receipt.schema.json
+  - .claude/skills/bug-receipt/scripts/validate-receipt.mjs
+  deployed_file_hashes:
+    .agents/skills/bug-receipt/SKILL.md: sha256:8d3803c8b10504a11b279ca5872b108cb09f549adf4bf8898ed3cceac5a3b991
+    .agents/skills/bug-receipt/assets/receipt.template.json: sha256:4bf7b12744df5738b89ba50c4aef9a9b036771492872206c744d9ef7ab49ec73
+    .agents/skills/bug-receipt/references/receipt-contract.md: sha256:94889929e1b696402b735f5fed242166b652297ecd54dba68499b32a1e61eca9
+    .agents/skills/bug-receipt/references/receipt.schema.json: sha256:d1ddbe5ddbeb380992ec8e15406254a598a9bffa44aa96d6f5d7be83bedd12b6
+    .agents/skills/bug-receipt/scripts/validate-receipt.mjs: sha256:e8f1fa247ee4a448f850ecaa577b9df2c5bc2bad5ac3944edcaae8effb209b66
+    .claude/skills/bug-receipt/SKILL.md: sha256:8d3803c8b10504a11b279ca5872b108cb09f549adf4bf8898ed3cceac5a3b991
+    .claude/skills/bug-receipt/assets/receipt.template.json: sha256:4bf7b12744df5738b89ba50c4aef9a9b036771492872206c744d9ef7ab49ec73
+    .claude/skills/bug-receipt/references/receipt-contract.md: sha256:94889929e1b696402b735f5fed242166b652297ecd54dba68499b32a1e61eca9
+    .claude/skills/bug-receipt/references/receipt.schema.json: sha256:d1ddbe5ddbeb380992ec8e15406254a598a9bffa44aa96d6f5d7be83bedd12b6
+    .claude/skills/bug-receipt/scripts/validate-receipt.mjs: sha256:e8f1fa247ee4a448f850ecaa577b9df2c5bc2bad5ac3944edcaae8effb209b66
+  content_hash: sha256:fbda2096c57791ee2d22728463520c5b69850428a7ef5f339c0780199fe08d19
+- repo_url: github/awesome-copilot
+  name: bug-reproduction-brief
+  host: github.com
+  resolved_commit: 634b92f887487fc61cddc2f61d77830e09e8f589
+  resolved_ref: 634b92f887487fc61cddc2f61d77830e09e8f589
+  version: unknown
+  virtual_path: skills/bug-reproduction-brief
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/bug-reproduction-brief
+  - .agents/skills/bug-reproduction-brief/SKILL.md
+  - .claude/skills/bug-reproduction-brief
+  - .claude/skills/bug-reproduction-brief/SKILL.md
+  deployed_file_hashes:
+    .agents/skills/bug-reproduction-brief/SKILL.md: sha256:522ad2948c498f6dcee6d48773387058d2cba3c45ba9e093ed35210601d141b6
+    .claude/skills/bug-reproduction-brief/SKILL.md: sha256:522ad2948c498f6dcee6d48773387058d2cba3c45ba9e093ed35210601d141b6
+  content_hash: sha256:d0b06abce04f9a0ac492a1b465db632dd34076f4d0f48ad8c28b29f38996be7b
+deployments:
+- kind: project-relative
+  target: claude
+  value: .claude/agents/bug-investigator.md
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:58a1e8d96d188c46bbbe02b0200bb18bd2e81bf30b1e2a75223b305addf5a3d6
+- kind: project-relative
+  target: claude
+  value: .claude/rules/bug-investigator.md
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:a14896ba9280a9e58d736f96e9fc8a9c15e48e066b38bc13bb928073c9c2c95a
+- kind: project-relative
+  target: claude
+  value: .claude/skills/bug-receipt
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/bug-receipt/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: sha256:8d3803c8b10504a11b279ca5872b108cb09f549adf4bf8898ed3cceac5a3b991
+- kind: project-relative
+  target: claude
+  value: .claude/skills/bug-receipt/assets/receipt.template.json
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: sha256:4bf7b12744df5738b89ba50c4aef9a9b036771492872206c744d9ef7ab49ec73
+- kind: project-relative
+  target: claude
+  value: .claude/skills/bug-receipt/references/receipt-contract.md
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: sha256:94889929e1b696402b735f5fed242166b652297ecd54dba68499b32a1e61eca9
+- kind: project-relative
+  target: claude
+  value: .claude/skills/bug-receipt/references/receipt.schema.json
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: sha256:d1ddbe5ddbeb380992ec8e15406254a598a9bffa44aa96d6f5d7be83bedd12b6
+- kind: project-relative
+  target: claude
+  value: .claude/skills/bug-receipt/scripts/validate-receipt.mjs
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: sha256:e8f1fa247ee4a448f850ecaa577b9df2c5bc2bad5ac3944edcaae8effb209b66
+- kind: project-relative
+  target: claude
+  value: .claude/skills/bug-reproduction-brief
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-reproduction-brief
+  active_owner: github/awesome-copilot/skills/bug-reproduction-brief
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/bug-reproduction-brief/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-reproduction-brief
+  active_owner: github/awesome-copilot/skills/bug-reproduction-brief
+  content_hash: sha256:522ad2948c498f6dcee6d48773387058d2cba3c45ba9e093ed35210601d141b6
+- kind: project-relative
+  target: codex
+  value: .agents/skills/bug-receipt
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/bug-receipt/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: sha256:8d3803c8b10504a11b279ca5872b108cb09f549adf4bf8898ed3cceac5a3b991
+- kind: project-relative
+  target: codex
+  value: .agents/skills/bug-receipt/assets/receipt.template.json
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: sha256:4bf7b12744df5738b89ba50c4aef9a9b036771492872206c744d9ef7ab49ec73
+- kind: project-relative
+  target: codex
+  value: .agents/skills/bug-receipt/references/receipt-contract.md
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: sha256:94889929e1b696402b735f5fed242166b652297ecd54dba68499b32a1e61eca9
+- kind: project-relative
+  target: codex
+  value: .agents/skills/bug-receipt/references/receipt.schema.json
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: sha256:d1ddbe5ddbeb380992ec8e15406254a598a9bffa44aa96d6f5d7be83bedd12b6
+- kind: project-relative
+  target: codex
+  value: .agents/skills/bug-receipt/scripts/validate-receipt.mjs
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-receipt
+  active_owner: github/awesome-copilot/skills/bug-receipt
+  content_hash: sha256:e8f1fa247ee4a448f850ecaa577b9df2c5bc2bad5ac3944edcaae8effb209b66
+- kind: project-relative
+  target: codex
+  value: .agents/skills/bug-reproduction-brief
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-reproduction-brief
+  active_owner: github/awesome-copilot/skills/bug-reproduction-brief
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/bug-reproduction-brief/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - github/awesome-copilot/skills/bug-reproduction-brief
+  active_owner: github/awesome-copilot/skills/bug-reproduction-brief
+  content_hash: sha256:522ad2948c498f6dcee6d48773387058d2cba3c45ba9e093ed35210601d141b6
+- kind: project-relative
+  target: codex
+  value: .codex/agents/bug-investigator.toml
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:d9977048679e50285338ca41dcd30d9df1f69fdcf6d98db1809b4bc589fda261
+local_deployed_files:
+- .claude/agents/bug-investigator.md
+- .claude/rules/bug-investigator.md
+- .codex/agents/bug-investigator.toml
+local_deployed_file_hashes:
+  .claude/agents/bug-investigator.md: sha256:58a1e8d96d188c46bbbe02b0200bb18bd2e81bf30b1e2a75223b305addf5a3d6
+  .claude/rules/bug-investigator.md: sha256:a14896ba9280a9e58d736f96e9fc8a9c15e48e066b38bc13bb928073c9c2c95a
+  .codex/agents/bug-investigator.toml: sha256:d9977048679e50285338ca41dcd30d9df1f69fdcf6d98db1809b4bc589fda261

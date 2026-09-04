@@ -33,6 +33,7 @@ without weakening these invariants.
 - Agents publish final artifacts and outcomes to the provider. They do not publish complete session transcripts.
 - Each flow instance has one machine-marked control comment. The controller updates it in place with the current state,
   retry consumption, attempt metadata, and the latest controller-verified attempt result.
+- The entire control record is encoded inside an HTML comment. GitHub and GitLab do not show it in the rendered ticket.
 - The control comment contains the flow instance identity and pinned configuration revision. Its SHA field changes only
   during an explicit migration.
 - The current XState state is exposed as exactly one controller-owned `agent-stage:<state-id>` label for provider
@@ -58,17 +59,21 @@ without weakening these invariants.
 
 ### Activation and cancellation
 
-- The exact `agent-flow:development` label starts a development flow.
+- The exact `agent-flow:development` label starts the development branch. The exact `bugfix` label starts the bugfix
+  branch directly; the controller does not infer or validate the ticket type.
 - Only a provider user with `write` or `maintain` access may start or resume a flow.
+- If more than one activation label is present, the latest matching label event selects the route. The accepted label
+  is pinned with the flow instance, so another route's label event cannot authorize it and later startup-config changes
+  cannot cancel an already-running instance.
 - On the first accepted activation, the controller adds `agent-flow:managed`. This discovery label is permanent and
   remains after completion, cancellation, and later flow instances.
-- When a flow reaches `done`, the controller removes `agent-flow:development` and leaves `agent-flow:managed` and
-  `agent-stage:done` on the ticket.
+- When a flow reaches `done`, the controller removes every configured activation label and leaves `agent-flow:managed`
+  and `agent-stage:done` on the ticket.
 - Reapplying the activation label after a completed or cancelled run creates a new flow instance.
 - Removing the activation label cancels the active agent process when the controller observes the removal and prevents
   new attempts from starting.
-- Closing a ticket with an active flow also cancels the instance, stops the active agent process, and removes
-  `agent-flow:development`. Reopening the ticket does not resume the cancelled instance; a new run requires the
+- Closing a ticket with an active flow also cancels the instance, stops the active agent process, and removes its
+  configured activation labels. Reopening the ticket does not resume the cancelled instance; a new run requires an
   activation label to be applied again.
 - If the same provider update contains a merged pull or merge request that completes a flow in `awaiting-merge`, the
   controller applies `done` rather than treating the resulting ticket closure as cancellation.
@@ -209,6 +214,21 @@ attempt without advancing the machine.
 - A question puts the ticket into `needs-human`. An exhausted retry budget puts it into `blocked` without starting
   another agent.
 
+### Bugfix flow
+
+- The `bugfix` label routes directly to `bug-reproduction`; no issue type or second classification signal is checked.
+- The bug investigator applies the pinned `bug-reproduction-brief` skill and publishes diagnostic evidence without
+  editing code.
+- The conservative flow waits for human approval of that reproduction before repair; the autonomous flow continues
+  directly.
+- The bugfixer consumes that reproduction, adds a regression check, fixes the responsible code path, and creates or
+  updates the linked change request.
+- The existing reviewer reviews the pinned head. Approval advances to independent verification; requested changes
+  return to the bugfixer.
+- The bug investigator applies the pinned `bug-receipt` skill to the reviewed head. Only `VERIFIED` advances to manual
+  merge; `PARTIAL` or `BLOCKED` requests human input.
+- If the change-request head moves during verification, the flow returns to review before accepting new verification.
+
 ### Retries and human input
 
 - Retry policy is configured per agent type and includes a finite attempt limit, attempt timeout, and delay.
@@ -241,55 +261,40 @@ human gates, and names from the controller's fixed set of actions and guards. Th
 shell commands, or another executable extension mechanism. The controller validates the YAML and converts it to an
 XState machine before activating a flow.
 
-The stage sequence is:
+The diagrams show the primary agent paths. Human input, retry exhaustion, and cancellation remain part of the flow
+policy described below, but they are omitted here to keep the supported development scenarios clear.
+
+### Feature development transitions
 
 ```mermaid
 stateDiagram-v2
-    state "assessment-review" as AssessmentReview
-    state "plan-review" as PlanReview
-    state "needs-human" as NeedsHuman
     state "awaiting-merge" as AwaitingMerge
 
-    [*] --> Inactive
-    Inactive --> Assessment: authorized activation label
-    Assessment --> AssessmentReview: assessment published
-    AssessmentReview --> Planning: approved
-    AssessmentReview --> Assessment: changes requested
-    Planning --> PlanReview: plan published
-    PlanReview --> Development: approved
-    PlanReview --> Planning: changes requested
+    [*] --> Assessment: development label
+    Assessment --> Planning: assessment published
+    Planning --> Development: plan published
     Development --> Review: PR or MR updated
     Review --> Development: changes requested
     Review --> AwaitingMerge: review accepted
     AwaitingMerge --> Done: PR or MR merged
+```
 
-    Assessment --> NeedsHuman: question
-    Planning --> NeedsHuman: question
-    Development --> NeedsHuman: question
-    Review --> NeedsHuman: question
-    NeedsHuman --> Assessment: authorized answer
-    NeedsHuman --> Planning: authorized answer
-    NeedsHuman --> Development: authorized answer
-    NeedsHuman --> Review: authorized answer
+### Bugfix transitions
 
-    Assessment --> Blocked: retries exhausted
-    Planning --> Blocked: retries exhausted
-    Development --> Blocked: retries exhausted
-    Review --> Blocked: retries exhausted
-    Blocked --> Assessment: authorized comment resets retries
-    Blocked --> Planning: authorized comment resets retries
-    Blocked --> Development: authorized comment resets retries
-    Blocked --> Review: authorized comment resets retries
+```mermaid
+stateDiagram-v2
+    state "bug-reproduction" as BugReproduction
+    state "bug-verification" as BugVerification
+    state "awaiting-merge" as AwaitingMerge
 
-    Assessment --> Cancelled: activation label removed
-    AssessmentReview --> Cancelled: activation label removed
-    Planning --> Cancelled: activation label removed
-    PlanReview --> Cancelled: activation label removed
-    Development --> Cancelled: activation label removed
-    Review --> Cancelled: activation label removed
-    NeedsHuman --> Cancelled: activation label removed
-    Blocked --> Cancelled: activation label removed
-    AwaitingMerge --> Cancelled: activation label removed
+    [*] --> BugReproduction: bugfix label
+    BugReproduction --> Bugfix: diagnostic published
+    Bugfix --> Review: PR or MR updated
+    Review --> Bugfix: changes requested
+    Review --> BugVerification: review accepted
+    BugVerification --> Review: PR or MR head changed
+    BugVerification --> AwaitingMerge: bug receipt verified
+    AwaitingMerge --> Done: PR or MR merged
 ```
 
 The cancellation transitions also apply when the ticket closes. A merged change that completes `awaiting-merge` takes
@@ -301,6 +306,7 @@ budget. An authorized answer after retry exhaustion also resets that state's ret
 Provider labels expose the selected flow and the current machine state:
 
 - `agent-flow:development` activates the development flow;
+- `bugfix` activates the bugfix branch;
 - `agent-flow:managed` marks tickets with flow history;
 - exactly one `agent-stage:<state-id>` label maps directly to the current state ID from the pinned YAML flow.
 
@@ -338,6 +344,14 @@ agent-packages/
     apm.yml
     .apm/
       <agent-primitives>
+  bug-investigator/
+    apm.yml
+    .apm/
+      <agent-primitives>
+  bugfixer/
+    apm.yml
+    .apm/
+      <agent-primitives>
 ```
 
 The names and flow file format are illustrative. The invariant is one `apm.yml` per agent type, one logical entry
@@ -348,11 +362,11 @@ the default agent behavior; external APM artifacts are optional, narrow dependen
 
 | Canonical fact | Provider representation |
 | --- | --- |
-| Flow activation | Authorized `agent-flow:development` label change |
+| Flow activation | Authorized `agent-flow:development` or `bugfix` label change |
 | Ticket has flow history | Permanent controller-owned `agent-flow:managed` label |
 | Flow instance and configuration version | One mutable control comment with instance identity and config SHA |
 | Current state | Exactly one controller-owned `agent-stage:<state-id>` label |
-| Assessment and plan | Full machine-marked ticket comments |
+| Assessment, plan, and diagnostic | Full machine-marked ticket comments |
 | Agent question | Machine-marked ticket comment plus `agent-stage:needs-human` |
 | Human answer | First later authorized, unmarked ticket comment |
 | Human gate verdict | Minimal model decision verified against the authorized human comment |
@@ -361,7 +375,7 @@ the default agent behavior; external APM artifacts are optional, narrow dependen
 | Review result | Provider review or marked comment tied to the reviewed head SHA |
 | Linked change request closed without merge | `agent-stage:needs-human` while the ticket remains open |
 | Ticket closed during an active flow | Cancellation unless a merged change completes `awaiting-merge` |
-| Completion | Provider merge state, no `agent-flow:development`, and `agent-stage:done` |
+| Completion | Provider merge state, no configured activation label, and `agent-stage:done` |
 
 Provider adapters normalize these facts. The XState machine must not depend directly on GitHub-specific or
 GitLab-specific payload shapes.
@@ -433,9 +447,9 @@ GitHub uses the Issues API `since` filter; GitLab uses `updated_after`. The cont
 requests, and other details only for tickets returned as changed. It uses a small overlap between incremental windows
 to avoid missing updates at a timestamp boundary and relies on idempotent reconciliation to discard duplicates.
 
-After restart, bootstrap queries `agent-flow:managed` to recover tickets with flow history and
-`agent-flow:development` to find activations that have not yet been accepted. It does not search comment bodies or
-enumerate every possible stage label.
+After restart, bootstrap queries `agent-flow:managed` to recover tickets with flow history and every activation label
+configured in the startup bundle to find activations that have not yet been accepted. It does not search comment
+bodies or enumerate every possible stage label.
 
 Repository scans are serialized and continue into the next interval when the configured budget is not enough to
 finish one sweep. A bootstrap after restart may therefore be slow. Correctness does not depend on finishing every

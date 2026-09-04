@@ -20,13 +20,14 @@ import type {
 export type GitLabConfig = ProviderConfig;
 
 const HEADERS = { accept: "application/json" };
-const ACTIVATION_LABEL = "agent-flow:development";
+const DEFAULT_ACTIVATION_LABELS = ["agent-flow:development"];
 const REVIEW_METADATA =
   /^<!-- agent-flow-review:v1 head=([0-9a-f]{40}) verdict=(approved|changes-requested|commented) -->$/;
 
 export function createGitLabAdapter(
   config: GitLabConfig,
   client: RateLimitedHttpClient,
+  activationLabels: readonly string[] = DEFAULT_ACTIVATION_LABELS,
 ): ProviderAdapter {
   const allowlist = new Set(config.repositories);
   const apiBase = new URL(config.apiUrl);
@@ -172,7 +173,7 @@ export function createGitLabAdapter(
     async bootstrap(repository: string): Promise<TicketRef[]> {
       const route = `${repositoryPath(repository)}/issues`;
       const found = new Map<number, TicketRef>();
-      for (const label of ["agent-flow:managed", ACTIVATION_LABEL]) {
+      for (const label of ["agent-flow:managed", ...activationLabels]) {
         const query = new URLSearchParams({
           scope: "all",
           state: "all",
@@ -205,9 +206,12 @@ export function createGitLabAdapter(
       });
       const comments = (await listAll(`${path}/notes?${commentQuery}`, "active"))
         .map((note) => normalizeNote(note, issueUrl));
-      const activationEvent = labels.includes(ACTIVATION_LABEL)
-        ? [...events].reverse().find((event) => isLabelEvent(event, "add", ACTIVATION_LABEL))
-        : undefined;
+      const activeLabels = activationLabels.filter((label) => labels.includes(label));
+      const activationEvent = [...events].reverse().find((event) =>
+        activeLabels.some((label) => isLabelEvent(event, "add", label)));
+      const activationLabel = activationEvent
+        ? activeLabels.find((label) => isLabelEvent(activationEvent, "add", label)) ?? null
+        : null;
       const activation = activationEvent
         ? object(activationEvent, "GitLab activation event")
         : null;
@@ -227,7 +231,8 @@ export function createGitLabAdapter(
         labels,
         updatedAt: string(issue, "updated_at"),
         activation: {
-          present: labels.includes(ACTIVATION_LABEL),
+          present: activeLabels.length > 0,
+          label: activationLabel,
           eventId: activation ? identifier(activation.id, "GitLab activation event id") : null,
           actor: activation ? normalizeActor(activation.user, "GitLab activation actor") : null,
           occurredAt: activation ? string(activation, "created_at") : null,
@@ -283,9 +288,16 @@ export function createGitLabAdapter(
       return normalizeNote(response.data, issueWebUrl(webBase, ref, id));
     },
 
-    async setControllerLabels(ref: TicketRef, remove: string[], add: string[]): Promise<string[]> {
+    async setControllerLabels(
+      ref: TicketRef,
+      remove: string[],
+      add: string[],
+      pinnedActivationLabels: readonly string[] = [],
+    ): Promise<string[]> {
       for (const label of [...remove, ...add]) {
-        if (!isControllerLabel(label)) throw new Error(`label is not controller-owned: ${label}`);
+        if (!isControllerLabel(label, [...activationLabels, ...pinnedActivationLabels])) {
+          throw new Error(`label is not controller-owned: ${label}`);
+        }
       }
       const path = ticketPath(ref);
       const additions = [...new Set(add)];
@@ -572,9 +584,9 @@ function gitLabWebBase(apiBase: URL): URL {
   return webBase;
 }
 
-function isControllerLabel(label: string): boolean {
+function isControllerLabel(label: string, activationLabels: readonly string[]): boolean {
   return label === "agent-flow:managed"
-    || label === ACTIVATION_LABEL
+    || activationLabels.includes(label)
     || label.startsWith("agent-stage:");
 }
 

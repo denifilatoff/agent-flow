@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadConfigBundle } from "../../src/config/load.ts";
+import { parseYaml, validateDocument } from "../../src/config/schema-validator.ts";
 import type { FlowDefinition } from "../../src/config/types.ts";
 import {
   allowedAgentEvents,
@@ -10,13 +10,12 @@ import {
   type RuntimePromptInput,
 } from "../../src/runtime/agent-protocol.ts";
 
-const REVISION = "0123456789abcdef0123456789abcdef01234567";
 const FLOW_ID = "11111111-1111-4111-8111-111111111111";
 const ATTEMPT_ID = "22222222-2222-4222-8222-222222222222";
 const HEAD_SHA = "abcdef0123456789abcdef0123456789abcdef01";
 
 async function shippedFlow(): Promise<FlowDefinition> {
-  return (await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION)).flow;
+  return validateDocument("Flow", await parseYaml("config/flows/development.yaml"));
 }
 
 function promptInput(flow: FlowDefinition, overrides: Partial<RuntimePromptInput> = {}): RuntimePromptInput {
@@ -142,6 +141,13 @@ test("renders event-specific evidence and the pinned change identity", async () 
   assert.match(plan, /plan comment/);
   assert.match(plan, /artifact=plan/);
 
+  const diagnostic = renderRuntimePrompt(promptInput(flow, {
+    stateId: "bug-reproduction",
+    resultContract: "diagnostic",
+  }));
+  assert.match(diagnostic, /diagnostic comment/);
+  assert.match(diagnostic, /artifact=diagnostic/);
+
   const initialDevelopment = renderRuntimePrompt(promptInput(flow, {
     stateId: "development",
     resultContract: "development",
@@ -174,6 +180,15 @@ test("renders event-specific evidence and the pinned change identity", async () 
   assert.match(review, /https:\/\/github\.test\/owner\/repo\/pull\/8/);
   assert.match(review, /artifact=review/);
 
+  const verification = renderRuntimePrompt(promptInput(flow, {
+    stateId: "bug-verification",
+    resultContract: "verification",
+    changeRequest,
+  }));
+  assert.match(verification, /BUG RECEIPT · VERIFIED/);
+  assert.match(verification, new RegExp(HEAD_SHA));
+  assert.match(verification, /artifact=diagnostic/);
+
   const paused = renderRuntimePrompt(promptInput(flow, {
     stateId: "needs-human",
     resultContract: "review",
@@ -193,6 +208,18 @@ test("rejects a review prompt without a pinned change request", async () => {
   assert.throws(
     () => renderRuntimePrompt(promptInput(flow, { stateId: "review", resultContract: "review" })),
     /review event requires a pinned change request/,
+  );
+});
+
+test("rejects a verification prompt without a pinned change request", async () => {
+  const flow = await shippedFlow();
+
+  assert.throws(
+    () => renderRuntimePrompt(promptInput(flow, {
+      stateId: "bug-verification",
+      resultContract: "verification",
+    })),
+    /verification requires a pinned change request/,
   );
 });
 

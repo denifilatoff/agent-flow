@@ -28,7 +28,15 @@ export function deriveEvent(
 ): DerivedProviderEvent {
   if (!control || !flow.spec.states[control.stateId]) return null;
 
-  if (control.stateId === "awaiting-merge" && snapshot.changeRequest) {
+  const state = flow.spec.states[control.stateId]!;
+  if (state.kind !== "provider-wait"
+    && Object.hasOwn(state.on ?? {}, "change-request-updated")
+    && snapshot.changeRequest
+    && control.changeRequest?.headSha !== snapshot.changeRequest.headSha) {
+    return event("change-request-updated", snapshot, control);
+  }
+
+  if (state.kind === "provider-wait" && snapshot.changeRequest) {
     if (snapshot.changeRequest.state === "merged") {
       return event("change-request-merged", snapshot, control);
     }

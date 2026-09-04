@@ -38,9 +38,9 @@ Every YAML or JSON contract except the local one-field `AgentDecision` has `apiV
 fixed `kind`. The controller rejects unknown fields and unsupported versions before reconciliation starts.
 
 - `schemas/v1/flow.schema.json` defines states, agent references, context inputs, transitions, guards, and actions.
-- `schemas/v1/agent-catalog.schema.json` maps agent IDs to APM packages, harness targets, timeouts, and retry policy.
-- `schemas/v1/controller-config.schema.json` defines providers, the repository allowlist, polling limits, and local
-  runtime paths.
+- `schemas/v1/stack.schema.json` defines the flow, catalog, schemas, and contracts owned by one Git revision.
+- `schemas/v1/agent-catalog.schema.json` maps logical agent IDs to APM packages.
+- `schemas/v1/runtime-config.schema.json` defines deployment-specific provider, execution, polling, and runtime values.
 - `schemas/v1/control-state.schema.json` defines the JSON payload inside the ticket's mutable control comment.
 - `schemas/v1/agent-decision.schema.json` defines the minimal local JSON decision returned by a completed agent attempt.
 - `schemas/v1/agent-receipt.schema.json` defines the controller-built, provider-verified attempt record stored in the
@@ -49,8 +49,8 @@ fixed `kind`. The controller rejects unknown fields and unsupported versions bef
 The initial schemas use `v1alpha1` because the prototype may change them incompatibly. A running flow still pins the
 configuration repository commit SHA, so a schema change cannot alter an existing instance without explicit migration.
 
-`config/agents.yaml` is the mixed Claude/Codex catalog. For a local acceptance run that uses the authenticated Codex
-harness for every stage, set `configuration.catalog` to `config/agents-codex.yaml`.
+`config/agents.yaml` contains no harness or model choices. The mounted runtime configuration binds every required agent
+ID to a harness, model, reasoning level, retry policy, and timeout.
 
 ## Fixed flow vocabulary
 
@@ -144,9 +144,11 @@ not both model-owned and configured on the current state.
 
 After a successful harness exit, the controller reads the decision and discovers its evidence through the provider:
 
-- `agent-succeeded` requires the stage's marked assessment or plan comment. A development attempt without a linked
-  change request creates one linked open change request during the current attempt. A retry with a pinned change
-  request keeps that exact request open and updates it during the current attempt instead of creating another;
+- `agent-succeeded` requires the stage's marked assessment, plan, or diagnostic comment. Verification requires a
+  diagnostic whose second line is exactly `BUG RECEIPT · VERIFIED`; the linked change request must remain open at the
+  pinned head throughout readback. A development attempt without a linked change request creates one linked open
+  change request during the current attempt. A retry with a pinned change request keeps that exact request open and
+  updates it during the current attempt instead of creating another;
 - `agent-needs-human` requires one marked question comment;
 - `review-approved` and `review-changes-requested` require one native review on the pinned head whose logical verdict
   agrees with the decision;
@@ -175,17 +177,22 @@ JSON Schema validates file shape. Before polling, the controller also verifies t
 
 ## Control comment
 
-The controller owns one mutable ticket comment per flow instance. Its first line is the exact marker:
+The controller owns one mutable ticket comment per flow instance. The comment is a hidden machine record:
 
 ```text
-<!-- agent-flow-control:v1 -->
+<!-- agent-flow-control:v1
+<base64-encoded-control-state>
+-->
 ```
 
-The marker is followed by one fenced JSON object validated by `control-state.schema.json`. The controller edits this
-comment in place and increments `sequence` for each accepted change. It records the pinned config SHA, current state,
-resume state, accepted activation event ID, current attempt series, latest validated receipt, human gate result, and
-linked change request. A terminal flow starts again only for a different authorized activation event ID; timestamps do
-not determine reactivation because provider and controller clocks may differ.
+The payload is the Base64 encoding of one compact JSON object validated by `control-state.schema.json`. GitHub and
+GitLab hide the complete record when they render the comment. The controller also reads the legacy visible fenced-JSON
+format so an existing flow migrates on its next state update. The controller edits this comment in place and increments
+`sequence` for each accepted change. It records the pinned config SHA, current state, resume state, accepted activation
+label and event ID, current attempt series, latest validated receipt, human gate result, and linked change request. A
+terminal flow starts again only for a different authorized activation event ID; timestamps do not determine
+reactivation because provider and controller clocks may differ. Legacy records without the activation label use the
+pinned flow's default activation label.
 
 The controller writes an attempt with status `started` and reads the comment back before launching a harness. A restart
 therefore cannot restore a consumed retry. Older attempt series do not need to remain in the control comment because
@@ -258,21 +265,22 @@ flow reaches a terminal state and no harness process is running.
 
 ## Docker contract
 
-The image contains Node.js, Git, `gh`, `glab`, APM, Codex, and Claude. Set `AGENT_FLOW_CONFIG_REPOSITORY` to an absolute
-local path or a credential-free `https://` or `file://` Git URL. A URL is mirrored under `/data` once during startup;
-the next service restart fetches remote changes. Git uses the mounted `gh` credentials for `github.com` and the mounted
-`glab` credentials for `gitlab.com`. A custom HTTPS host requires a preconfigured Git credential helper. Secrets must
-not appear in the URL. Set `AGENT_FLOW_CONFIG_REVISION` to an existing 40-character commit SHA to start from that
-revision instead of the prepared repository's HEAD. A materialized revision retains the Git objects needed to verify
-and load its files after the source history is rewritten. The container runs as one controller process and mounts:
+The image contains Node.js, Git, `gh`, `glab`, APM, Codex, and Claude. The container reads one mounted runtime YAML file
+from `/etc/agent-flow/runtime.yaml`. That file selects an exact 40-character configuration commit, its stack manifest,
+the provider repository allowlist, and the execution bindings. The controller scopes the mounted provider token to a
+matching configuration Git host and keeps verified revision materializations for offline recovery.
 
-- the configuration repository at `/config` for the default local-path mode;
-- persistent repositories, worktrees, and sessions at `/data`;
-- provider and harness authentication directories through explicit Compose mounts.
+The container runs as one controller process and mounts:
+
+- runtime configuration at `/etc/agent-flow/runtime.yaml` as one read-only file;
+- provider and harness credentials under `/run/secrets/agent-flow/` as individual read-only files;
+- persistent Git caches, materialized revisions, worktrees, and sessions at `/var/lib/agent-flow/`;
+- temporary harness homes under `/tmp/agent-flow/`.
 
 The controller performs a startup preflight for every harness and provider enabled by the pinned catalog. Missing
 binaries, authentication, or writable mounts fail startup before polling begins.
 
-The prototype exposes a health endpoint on port `8080`. `/health/live` reports process liveness. `/health/ready`
-returns success only after configuration validation, provider authentication, filesystem checks, and harness preflight
-complete.
+The prototype exposes a health endpoint on the runtime-configured address and port. `/health/live` reports process
+liveness. `/health/ready` returns success only while the controller may start work. `/api/status` reports the pinned
+configuration revision, runtime digest, validation and restart state, active attempt count, and safe restart status.
+These endpoints are read-only and never return secret values or paths.

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { ConfigBundle } from "../config/load.js";
+import { validateBundleDocument, type ConfigBundle } from "../config/load.ts";
 import type {
   AttemptSeries,
   ControlChangeRequest,
@@ -62,6 +62,7 @@ export interface ReconcileDependencies {
   config: ReconcileConfigSource;
   launcher: AttemptLauncher;
   writeControl: ControlWriter;
+  isAllowed?(ref: TicketRef): boolean;
   now?: () => string;
   newFlowInstanceId?: () => string;
 }
@@ -69,6 +70,11 @@ export interface ReconcileDependencies {
 export interface ReconcileOutcome {
   flowInstanceId: string | null;
   stateId: string | null;
+  configRevision: string | null;
+  stateKind: FlowState["kind"] | null;
+  repositoryUrl: string;
+  ticketUrl: string;
+  actionUrl: string;
   changed: boolean;
   started: boolean;
 }
@@ -107,41 +113,68 @@ export async function reconcileTicket(
           latest.bundle,
           latest.parsed.state.stateId,
           true,
+          latest.parsed.state.activationLabel,
         );
       }
-      return outcome(latest?.parsed.state ?? null, false, false);
+      return outcome(latest?.parsed.state ?? null, latest?.bundle ?? null, snapshot, false, false, latest?.terminal);
     }
     return activate(dependencies, snapshot, loaded);
   }
 
   const current = active[0]!;
-  assertAllowed(current.bundle, ref);
+  assertAllowed(dependencies, ref);
   const control = current.parsed.state;
-  if (control.stateId === "awaiting-merge") {
-    assertChangeIdentity(control.changeRequest, snapshot.changeRequest);
+  const activationLabel = control.activationLabel ?? current.bundle.flow.metadata.activationLabel;
+  const activeSnapshot = {
+    ...snapshot,
+    activation: {
+      present: snapshot.labels.includes(activationLabel),
+      label: activationLabel,
+      eventId: control.activationEventId,
+      actor: control.activatedBy,
+      occurredAt: control.activatedAt,
+    },
+  };
+  const configuredState = current.bundle.flow.spec.states[control.stateId];
+  if (configuredState?.kind === "provider-wait") {
+    assertChangeIdentity(control.changeRequest, activeSnapshot.changeRequest);
   }
-  const mergedWins = control.stateId === "awaiting-merge"
-    && snapshot.changeRequest?.state === "merged";
-  if ((!snapshot.activation.present || !snapshot.open) && !mergedWins) {
-    return cancel(dependencies, snapshot, current);
+  const mergedWins = configuredState?.kind === "provider-wait"
+    && activeSnapshot.changeRequest?.state === "merged";
+  if ((!activeSnapshot.activation.present || !activeSnapshot.open) && !mergedWins) {
+    return cancel(dependencies, activeSnapshot, current);
   }
 
   let next = control;
   let changed = false;
-  let machineEvent = deriveEvent(snapshot, control, current.bundle.flow);
+  let machineEvent = deriveEvent(activeSnapshot, control, current.bundle.flow);
   if (!machineEvent && control.stateId === "blocked") {
     const source = await firstAuthorizedComment(provider, ref, snapshot, control);
-    if (source) machineEvent = flowEvent("authorized-comment", snapshot, true);
+    if (source) machineEvent = flowEvent("authorized-comment", activeSnapshot, true);
   }
 
   if (machineEvent) {
-    const result = compileFlow(current.bundle.flow).transition({
+    const machine = compileFlow(current.bundle.flow);
+    let result = machine.transition({
       stateId: control.stateId,
       resumeStateId: control.resumeStateId,
       event: machineEvent,
     });
     if (!result.changed) {
       throw new Error(`invalid transition from ${control.stateId} for ${machineEvent.type}`);
+    }
+    if (machineEvent.type === "authorized-comment" || machineEvent.type === "human-answer-accepted") {
+      const resumed = { ...control, stateId: result.stateId, resumeStateId: result.resumeStateId };
+      const resumedEvent = deriveEvent(activeSnapshot, resumed, current.bundle.flow);
+      if (resumedEvent?.type === "change-request-updated") {
+        const rerouted = machine.transition({
+          stateId: resumed.stateId,
+          resumeStateId: resumed.resumeStateId,
+          event: resumedEvent,
+        });
+        if (!rerouted.changed) throw new Error(`invalid transition from ${resumed.stateId} for ${resumedEvent.type}`);
+        result = { ...rerouted, actions: [...result.actions, ...rerouted.actions] };
+      }
     }
     next = advanceControlState(control, {
       stateId: result.stateId,
@@ -151,14 +184,16 @@ export async function reconcileTicket(
         result.actions,
         result.stateId === control.stateId,
       ),
-      changeRequest: normalizedChange(snapshot.changeRequest) ?? control.changeRequest,
+      changeRequest: current.bundle.flow.spec.states[result.stateId]?.kind === "paused"
+        ? control.changeRequest
+        : normalizedChange(activeSnapshot.changeRequest) ?? control.changeRequest,
     }, now(dependencies));
     await writeExistingControl(dependencies, ref, control, next);
     changed = true;
-  } else if (control.stateId === "review"
-    && snapshot.changeRequest
-    && control.changeRequest?.headSha !== snapshot.changeRequest.headSha) {
-    next = advanceControlState(control, { changeRequest: normalizedChange(snapshot.changeRequest) }, now(dependencies));
+  } else if (configuredState?.resultContract === "review"
+    && activeSnapshot.changeRequest
+    && control.changeRequest?.headSha !== activeSnapshot.changeRequest.headSha) {
+    next = advanceControlState(control, { changeRequest: normalizedChange(activeSnapshot.changeRequest) }, now(dependencies));
     await writeExistingControl(dependencies, ref, control, next);
     changed = true;
   }
@@ -167,8 +202,8 @@ export async function reconcileTicket(
   await ownLabels(provider, ref, snapshot.labels, current.bundle, next.stateId, removeActivation);
   const started = removeActivation
     ? false
-    : await startIfNeeded(dependencies, snapshot, current.bundle, next);
-  return outcome(next, changed, started);
+    : await startIfNeeded(dependencies, activeSnapshot, current.bundle, next);
+  return outcome(next, current.bundle, activeSnapshot, changed, started);
 }
 
 async function activate(
@@ -179,17 +214,25 @@ async function activate(
   const actor = snapshot.activation.actor;
   const eventId = snapshot.activation.eventId;
   const occurredAt = snapshot.activation.occurredAt;
-  if (!actor || !eventId || !occurredAt) return outcome(history.at(-1)?.parsed.state ?? null, false, false);
+  const activationLabel = snapshot.activation.label;
+  const previous = history.at(-1);
+  if (!actor || !eventId || !occurredAt || !activationLabel) {
+    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, snapshot, false, false, previous?.terminal);
+  }
   const permission = await providerCall(
     "provider permission read failed",
     () => dependencies.provider.permission(snapshot.ref.repository, actor),
   );
-  if (!AUTHORIZED.has(permission)) return outcome(history.at(-1)?.parsed.state ?? null, false, false);
+  if (!AUTHORIZED.has(permission)) {
+    return outcome(previous?.parsed.state ?? null, previous?.bundle ?? null, snapshot, false, false, previous?.terminal);
+  }
 
   const bundle = await configCall("current configuration load failed", () => dependencies.config.loadCurrent());
   assertBundle(bundle, bundle.revision);
-  assertAllowed(bundle, snapshot.ref);
-  if (!snapshot.labels.includes(bundle.flow.metadata.activationLabel)) {
+  assertAllowed(dependencies, snapshot.ref);
+  const route = bundle.flow.spec.activationRoutes?.[activationLabel];
+  if (!snapshot.labels.includes(activationLabel)
+    || (activationLabel !== bundle.flow.metadata.activationLabel && !route)) {
     throw new Error("activation snapshot does not match controller labels");
   }
 
@@ -201,11 +244,12 @@ async function activate(
     flowId: bundle.flow.metadata.id,
     configRevision: bundle.revision,
     sequence: 0,
-    stateId: bundle.flow.spec.initial,
+    stateId: route ?? bundle.flow.spec.initial,
     resumeStateId: null,
     activatedBy: actor,
     activatedAt: occurredAt,
     activationEventId: eventId,
+    activationLabel,
     updatedAt: timestamp,
     attemptSeries: null,
     latestReceipt: null,
@@ -215,7 +259,7 @@ async function activate(
   await createControl(dependencies.provider, snapshot.ref, control);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, bundle, control.stateId, false);
   const started = await startIfNeeded(dependencies, snapshot, bundle, control);
-  return outcome(control, true, started);
+  return outcome(control, bundle, snapshot, true, started);
 }
 
 async function cancel(
@@ -275,7 +319,7 @@ async function cancel(
   }, timestamp);
   await writeExistingControl(dependencies, snapshot.ref, latest, control);
   await ownLabels(dependencies.provider, snapshot.ref, snapshot.labels, current.bundle, "cancelled", true);
-  return outcome(control, true, false);
+  return outcome(control, current.bundle, snapshot, true, false);
 }
 
 async function loadControls(
@@ -285,6 +329,11 @@ async function loadControls(
   const bundles = new Map<string, ConfigBundle>();
   const result: LoadedControl[] = [];
   for (const item of parsed) {
+    if (item.state.stateId === "done" || item.state.stateId === "cancelled") {
+      const bundle = await configCall("current configuration load failed", () => config.loadCurrent());
+      result.push({ parsed: item, bundle, terminal: true });
+      continue;
+    }
     let bundle = bundles.get(item.state.configRevision);
     if (!bundle) {
       bundle = await configCall(
@@ -294,6 +343,7 @@ async function loadControls(
       assertBundle(bundle, item.state.configRevision);
       bundles.set(item.state.configRevision, bundle);
     }
+    validateBundleDocument(bundle, "ControlState", item.state);
     if (bundle.flow.metadata.id !== item.state.flowId) throw new Error("control flow does not match pinned configuration");
     const state = bundle.flow.spec.states[item.state.stateId];
     if (!state) throw new Error("control state does not exist in pinned flow");
@@ -311,8 +361,8 @@ function assertBundle(bundle: ConfigBundle, revision: string): void {
   }
 }
 
-function assertAllowed(bundle: ConfigBundle, ref: TicketRef): void {
-  if (!bundle.controller.providers[ref.provider]?.repositories.includes(ref.repository)) {
+function assertAllowed(dependencies: ReconcileDependencies, ref: TicketRef): void {
+  if (dependencies.isAllowed && !dependencies.isAllowed(ref)) {
     throw new Error("ticket repository is not in the pinned allowlist");
   }
 }
@@ -367,13 +417,18 @@ async function ownLabels(
   bundle: ConfigBundle,
   stateId: string,
   removeActivation: boolean,
+  pinnedActivationLabel?: string,
 ): Promise<void> {
   const stage = `agent-stage:${stateId}`;
   const managed = bundle.flow.metadata.managedLabel;
-  const activation = bundle.flow.metadata.activationLabel;
+  const activation = [
+    bundle.flow.metadata.activationLabel,
+    ...Object.keys(bundle.flow.spec.activationRoutes ?? {}),
+    ...pinnedActivationLabel ? [pinnedActivationLabel] : [],
+  ];
   const remove = labels.filter((label) =>
     (label.startsWith("agent-stage:") && label !== stage)
-    || (removeActivation && label === activation));
+    || (removeActivation && activation.includes(label)));
   const add = [
     ...labels.includes(managed) ? [] : [managed],
     ...labels.includes(stage) ? [] : [stage],
@@ -381,14 +436,14 @@ async function ownLabels(
   const current = remove.length || add.length
     ? await providerCall(
       "provider controller label update failed",
-      () => provider.setControllerLabels(ref, remove, add),
+      () => provider.setControllerLabels(ref, remove, add, activation),
     )
     : labels;
   const stages = current.filter((label) => label.startsWith("agent-stage:"));
   if (!current.includes(managed)
     || stages.length !== 1
     || stages[0] !== stage
-    || (removeActivation && current.includes(activation))) {
+    || (removeActivation && activation.some((label) => current.includes(label)))) {
     throw new Error("controller label readback mismatch");
   }
 }
@@ -418,7 +473,7 @@ async function startIfNeeded(
       agentId = resume.agent;
       if (!sourceComment) {
         if (hasAcceptedQuestion(control)) return false;
-        if (snapshot.changeRequest?.state !== "closed" || control.resumeStateId !== "review") return false;
+        if (snapshot.changeRequest?.state !== "closed" || resume.resultContract !== "review") return false;
         resultContract = resume.resultContract;
       } else {
         mode = "human-input";
@@ -599,13 +654,42 @@ function flowEvent(
   };
 }
 
-function outcome(control: ControlState | null, changed: boolean, started: boolean): ReconcileOutcome {
+function outcome(
+  control: ControlState | null,
+  bundle: ConfigBundle | null,
+  snapshot: ProviderTicketSnapshot,
+  changed: boolean,
+  started: boolean,
+  terminal = false,
+): ReconcileOutcome {
+  if (control && !terminal && bundle?.revision !== control.configRevision) {
+    throw new Error("control configuration does not match its pinned bundle");
+  }
+  const stateKind = control ? terminal ? "final" : bundle?.flow.spec.states[control.stateId]?.kind : null;
+  if (control && !stateKind) throw new Error("control state does not exist in pinned flow");
+  const repositoryUrl = repositoryWebUrl(snapshot.repository);
+  const ticketUrl = `${repositoryUrl}${snapshot.ref.provider === "gitlab" ? "/-/issues/" : "/issues/"}${snapshot.ref.number}`;
   return {
     flowInstanceId: control?.flowInstanceId ?? null,
     stateId: control?.stateId ?? null,
+    configRevision: control?.configRevision ?? null,
+    stateKind: stateKind ?? null,
+    repositoryUrl,
+    ticketUrl,
+    actionUrl: stateKind === "provider-wait" && control?.changeRequest?.url
+      ? control.changeRequest.url
+      : ticketUrl,
     changed,
     started,
   };
+}
+
+function repositoryWebUrl(repository: ProviderTicketSnapshot["repository"]): string {
+  const url = new URL(repository.cloneUrl);
+  url.hash = "";
+  url.search = "";
+  url.pathname = url.pathname.replace(/\.git\/?$/, "").replace(/\/$/, "");
+  return url.href.replace(/\/$/, "");
 }
 
 function now(dependencies: ReconcileDependencies): string {

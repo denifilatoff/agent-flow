@@ -1,5 +1,71 @@
 lockfile_version: '1'
-generated_at: '2026-08-26T00:39:38.102242+00:00'
+generated_at: '2026-08-27T20:04:12.897837+00:00'
 apm_version: 0.28.0
-dependencies: []
-deployments: []
+dependencies:
+- repo_url: addyosmani/agent-skills
+  name: incremental-implementation
+  host: github.com
+  resolved_commit: f63ec56a3cc936408d792956ae583c3c96a825bd
+  resolved_ref: f63ec56a3cc936408d792956ae583c3c96a825bd
+  version: unknown
+  virtual_path: skills/incremental-implementation
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/incremental-implementation
+  - .agents/skills/incremental-implementation/SKILL.md
+  deployed_file_hashes:
+    .agents/skills/incremental-implementation/SKILL.md: sha256:3a3581e7084a0dc85af420afcc91211a159d3dc46f3d81075a4d53c566b70b80
+  content_hash: sha256:bd40e91eac68b83ba0204dd57b4bd35511cb900f937a7127b79f2396b2bb305d
+- repo_url: addyosmani/agent-skills
+  name: test-driven-development
+  host: github.com
+  resolved_commit: f63ec56a3cc936408d792956ae583c3c96a825bd
+  resolved_ref: f63ec56a3cc936408d792956ae583c3c96a825bd
+  version: unknown
+  virtual_path: skills/test-driven-development
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/test-driven-development
+  - .agents/skills/test-driven-development/SKILL.md
+  deployed_file_hashes:
+    .agents/skills/test-driven-development/SKILL.md: sha256:440fb3c9b76f4f1b0b564dfbaec19d370beab0167a3e2ab048ce59c5a865ecef
+  content_hash: sha256:a8fef2b010af8402fd2979bdb2e5e39e5baa1ca14b5cdec366ee75df5e1dec68
+deployments:
+- kind: project-relative
+  target: codex
+  value: .agents/skills/incremental-implementation
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/incremental-implementation
+  active_owner: addyosmani/agent-skills/skills/incremental-implementation
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/incremental-implementation/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/incremental-implementation
+  active_owner: addyosmani/agent-skills/skills/incremental-implementation
+  content_hash: sha256:3a3581e7084a0dc85af420afcc91211a159d3dc46f3d81075a4d53c566b70b80
+- kind: project-relative
+  target: codex
+  value: .agents/skills/test-driven-development
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/test-driven-development
+  active_owner: addyosmani/agent-skills/skills/test-driven-development
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/test-driven-development/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/test-driven-development
+  active_owner: addyosmani/agent-skills/skills/test-driven-development
+  content_hash: sha256:440fb3c9b76f4f1b0b564dfbaec19d370beab0167a3e2ab048ce59c5a865ecef

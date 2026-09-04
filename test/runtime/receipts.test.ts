@@ -68,7 +68,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-function marker(artifact: "assessment" | "plan" | "question" | "review"): string {
+function marker(artifact: "assessment" | "plan" | "diagnostic" | "question" | "review"): string {
   return `<!-- agent-flow:v1 flow=${FLOW_ID} attempt=${ATTEMPT_ID} artifact=${artifact} -->`;
 }
 
@@ -89,6 +89,12 @@ function flow(): FlowDefinition {
           "agent-succeeded": transition, "agent-needs-human": transition,
         } },
         planning: { kind: "agent", resultContract: "plan", on: {
+          "agent-succeeded": transition, "agent-needs-human": transition,
+        } },
+        diagnostic: { kind: "agent", resultContract: "diagnostic", on: {
+          "agent-succeeded": transition, "agent-needs-human": transition,
+        } },
+        verification: { kind: "agent", resultContract: "verification", on: {
           "agent-succeeded": transition, "agent-needs-human": transition,
         } },
         development: { kind: "agent", resultContract: "development", on: {
@@ -117,7 +123,7 @@ function flow(): FlowDefinition {
 }
 
 function comment(
-  artifact: "assessment" | "plan" | "question" = "assessment",
+  artifact: "assessment" | "plan" | "diagnostic" | "question" = "assessment",
   overrides: Partial<ProviderComment> = {},
 ): ProviderComment {
   const question = artifact === "question";
@@ -191,7 +197,13 @@ function snapshot(overrides: Partial<ProviderTicketSnapshot> = {}): ProviderTick
     open: true,
     labels: ["agent-flow:development"],
     updatedAt: PUBLISHED_AT,
-    activation: { present: true, eventId: "1", actor: ACTOR, occurredAt: "2026-08-27T09:00:00.000Z" },
+    activation: {
+      present: true,
+      label: "agent-flow:development",
+      eventId: "1",
+      actor: ACTOR,
+      occurredAt: "2026-08-27T09:00:00.000Z",
+    },
     comments: [],
     changeRequest: change(),
     ...overrides,
@@ -347,6 +359,7 @@ test("builds comment receipts from one-field agent decisions", async (context) =
   for (const [stateId, resultContract, artifactKind] of [
     ["assessment", "assessment", "assessment"],
     ["planning", "plan", "plan"],
+    ["diagnostic", "diagnostic", "diagnostic"],
   ] as const) {
     await context.test(resultContract, async () => {
       const provider = new FakeProvider();
@@ -390,6 +403,64 @@ test("builds a development receipt from the linked open change request", async (
   assert.deepEqual(provider.calls, ["readTicket", "readChangeRequest:31", "readTicket"]);
 });
 
+test("accepts only a VERIFIED bug receipt at the pinned change head", async () => {
+  const provider = new FakeProvider();
+  const verified = comment("diagnostic", {
+    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
+  });
+  installComments(provider, [verified]);
+
+  const receipt = await readDecision(
+    { event: "agent-succeeded" },
+    expectation({
+      stateId: "verification",
+      resultContract: "verification",
+      pinnedChangeRequest: change(),
+    }),
+    provider,
+  );
+
+  assert.equal(receipt.artifacts[0]?.kind, "comment");
+  assert.equal(receipt.artifacts[0]?.artifactKind, "diagnostic");
+
+  const partialProvider = new FakeProvider();
+  const partial = comment("diagnostic", {
+    body: `${marker("diagnostic")}\nBUG RECEIPT · PARTIAL\n\nProblem    Missing proof.`,
+  });
+  installComments(partialProvider, [partial]);
+  await trustFailure(readDecision(
+    { event: "agent-succeeded" },
+    expectation({
+      stateId: "verification",
+      resultContract: "verification",
+      pinnedChangeRequest: change(),
+    }),
+    partialProvider,
+  ), /VERIFIED/);
+});
+
+test("rejects a verification receipt when the change head moves during readback", async () => {
+  const provider = new FakeProvider();
+  const verified = comment("diagnostic", {
+    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
+  });
+  installComments(provider, [verified]);
+  provider.ticketReads = [provider.ticket, snapshot({
+    comments: [verified],
+    changeRequest: change({ headSha: OLD_HEAD }),
+  })];
+
+  await trustFailure(readDecision(
+    { event: "agent-succeeded" },
+    expectation({
+      stateId: "verification",
+      resultContract: "verification",
+      pinnedChangeRequest: change(),
+    }),
+    provider,
+  ), /head SHA/);
+});
+
 test("builds review receipts from provider-native logical verdicts", async (context) => {
   for (const [event, verdict, summary] of [
     ["review-approved", "approved", "Review approved the change."],
@@ -421,13 +492,17 @@ test("builds review receipts from provider-native logical verdicts", async (cont
 test("builds needs-human receipts for every agent result contract", async (context) => {
   for (const [stateId, resultContract] of [
     ["assessment", "assessment"], ["planning", "plan"],
+    ["diagnostic", "diagnostic"],
+    ["verification", "verification"],
     ["development", "development"], ["review", "review"],
   ] as const) {
     await context.test(resultContract, async () => {
       const provider = new FakeProvider();
       installComments(provider, [comment("question")]);
       const receipt = await readDecision({ event: "agent-needs-human" }, expectation({
-        stateId, resultContract, pinnedChangeRequest: resultContract === "review" ? change() : null,
+        stateId,
+        resultContract,
+        pinnedChangeRequest: resultContract === "review" || resultContract === "verification" ? change() : null,
       }), provider);
       assert.equal(receipt.outcome, "needs-human");
       assert.equal(receipt.summary, "Agent requested human input.");
