@@ -86,6 +86,22 @@ test("clones a remote configuration source and fetches its new HEAD only on a la
   assert.equal((await loadPinnedConfig(second.repository, data, firstSha)).revision, firstSha);
 });
 
+test("rejects a pre-Stack pinned revision with upgrade recovery instructions", async (t) => {
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "agent-flow-upgrade-data-"));
+  t.after(async () => Promise.all([rm(repo.path, { recursive: true, force: true }), rm(data, { recursive: true, force: true })]));
+  await exec("git", ["-C", repo.path, "rm", "config/stack.yaml"]);
+  await exec("git", ["-C", repo.path, "commit", "-m", "pre-Stack configuration"]);
+  const revision = await repo.head();
+  await assert.rejects(loadPinnedConfig(repo.path, data, revision), (error: Error) => {
+    assert.match(error.message, new RegExp(revision));
+    assert.match(error.message, /previous controller/);
+    assert.match(error.message, /docs\/upgrading.md/);
+    return true;
+  });
+  assert.equal(await repo.head(), revision);
+});
+
 test("uses an exact cached revision when the configuration remote is unavailable", async (t) => {
   const repo = await TestRepository.create();
   const data = await mkdtemp(join(tmpdir(), "agent-flow-config-data-"));

@@ -163,7 +163,7 @@ export async function reconcileTicket(
     if (!result.changed) {
       throw new Error(`invalid transition from ${control.stateId} for ${machineEvent.type}`);
     }
-    if (machineEvent.type === "authorized-comment") {
+    if (machineEvent.type === "authorized-comment" || machineEvent.type === "human-answer-accepted") {
       const resumed = { ...control, stateId: result.stateId, resumeStateId: result.resumeStateId };
       const resumedEvent = deriveEvent(activeSnapshot, resumed, current.bundle.flow);
       if (resumedEvent?.type === "change-request-updated") {
@@ -184,7 +184,9 @@ export async function reconcileTicket(
         result.actions,
         result.stateId === control.stateId,
       ),
-      changeRequest: normalizedChange(activeSnapshot.changeRequest) ?? control.changeRequest,
+      changeRequest: current.bundle.flow.spec.states[result.stateId]?.kind === "paused"
+        ? control.changeRequest
+        : normalizedChange(activeSnapshot.changeRequest) ?? control.changeRequest,
     }, now(dependencies));
     await writeExistingControl(dependencies, ref, control, next);
     changed = true;

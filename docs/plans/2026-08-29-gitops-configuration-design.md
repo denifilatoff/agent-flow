@@ -317,6 +317,9 @@ CD is an operational decision and is intentionally outside this design.
 
 ## Migration from the current prototype
 
+Before deploying this format, finish or cancel all pre-Stack instances with the previous controller, as described in
+the [upgrade procedure](../upgrading.md). The implementation steps below do not migrate existing provider records.
+
 1. Add the Git stack manifest and make the logical agent catalog contain package references only.
 2. Replace the current mixed controller configuration with the runtime schema and fixed mount path.
 3. Move harness selection and retry settings from Git agent catalogs into runtime agent bindings.

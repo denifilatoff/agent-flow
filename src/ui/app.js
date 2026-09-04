@@ -294,6 +294,9 @@
   function journalCard(entry, discovery) {
     const { ticket, session } = entry;
     const card = element("details", "event-card");
+    card.journalEntry = entry;
+    card.dataset.key = JSON.stringify(session ? [session.flowUuid, session.attemptUuid]
+      : [ticket?.provider, ticket?.repository, ticket?.number]);
     const identity = ticket
       ? ticket.ticketUrl ? externalLink(ticketIdentity(ticket), ticket.ticketUrl) : ticketIdentity(ticket)
       : "Ticket identifier unavailable";
@@ -416,9 +419,21 @@
     const start = journalPage * journalPageSize;
     const visible = matches.slice(start, start + journalPageSize);
     const journal = document.getElementById("journal");
-    journal.replaceChildren(...(visible.length
-      ? visible.map((entry) => journalCard(entry, journalDiscovery))
-      : [empty(journalEntries.length ? "No journal entries match this search." : journalEmptyMessage)]));
+    const existing = new Map([...journal.children].map((card) => [card.dataset.key, card]));
+    const cards = visible.length
+      ? visible.map((entry) => {
+        const fresh = journalCard(entry, journalDiscovery);
+        const previous = existing.get(fresh.dataset.key);
+        if (!previous?.open || !entry.session) return fresh;
+        Object.assign(previous.journalEntry.session, entry.session);
+        previous.replaceChild(fresh.children[0], previous.children[0]);
+        previous.dataset.search = fresh.dataset.search;
+        return previous;
+      })
+      : [empty(journalEntries.length ? "No journal entries match this search." : journalEmptyMessage)];
+    if (cards.length !== journal.children.length || cards.some((card, index) => card !== journal.children[index])) {
+      journal.replaceChildren(...cards);
+    }
     updateJournalPagination(start, matches.length);
   }
 

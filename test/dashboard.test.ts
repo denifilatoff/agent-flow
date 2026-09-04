@@ -85,6 +85,24 @@ test("projects the real runtime and pinned configuration without paths to secret
   for (const forbidden of ["tokenFile", "authFile", "dataDirectory", "/run/secrets/", root]) {
     assert.equal(serialized.includes(forbidden), false, `dashboard exposed ${forbidden}`);
   }
+  for (const scenario of [
+    { provider: "gitlab", api: "https://gitlab.com/api/v4", repository: "https://github.com/example/agent-stack", suffix: "/blob/" },
+    { provider: "github", api: "https://api.github.com", repository: "https://gitlab.com/example/agent-stack", suffix: "/-/blob/" },
+    { provider: "gitlab", api: "https://code.example.test/api/v4", repository: "https://code.example.test/example/stack", suffix: "/-/blob/" },
+    { provider: "github", api: "https://api.github.com", repository: "https://unknown.example.test/example/stack", suffix: null },
+  ] as const) {
+    runtime.effective().provider.type = scenario.provider;
+    runtime.effective().provider.apiUrl = scenario.api;
+    runtime.effective().configuration.repository = scenario.repository;
+    const { provenance } = (await createDashboardSnapshot(runtime, ready)).configuration;
+    assert.equal(provenance.repositoryUrl, scenario.repository);
+    assert.equal(provenance.stackUrl, scenario.suffix
+      ? `${scenario.repository}${scenario.suffix}${bundle.revision}/config/stack.yaml` : null);
+    if (!scenario.suffix) {
+      assert.equal(provenance.revisionUrl, null);
+      assert.ok(Object.values(provenance.agentPackageUrls).every((url) => url === null));
+    }
+  }
 });
 
 test("stops session discovery after its global budget while advertising only safe files", async (t) => {

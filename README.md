@@ -9,7 +9,8 @@ current design and invariants.
 
 ## Run with Docker Compose
 
-Update `config/controller.example.yaml` with the repositories to process, authorize the required local CLIs, and run:
+For an existing pre-Stack deployment, follow the [upgrade procedure](docs/upgrading.md) first.
+Update `config/runtime.example.yaml` with the repositories to process, authorize the required local CLIs, and run:
 
 ```bash
 docker compose up --build

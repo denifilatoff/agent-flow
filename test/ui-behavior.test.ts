@@ -75,6 +75,15 @@ class TestElement {
     this.append(...nodes);
   }
 
+  replaceChild(next: TestElement, previous: TestElement) {
+    const index = this.children.indexOf(previous);
+    assert.ok(index >= 0);
+    this.children[index] = next;
+    next.parent = this;
+    previous.parent = null;
+    return previous;
+  }
+
   hasChildNodes() {
     return this.children.length > 0 || this.textContent.length > 0;
   }
@@ -209,7 +218,7 @@ test("keeps session reader selection stable across slow responses", async () => 
   context.window = context;
   const instrumented = script.replace(
     "  renderWizard();\n  void loadDashboard();",
-    "  renderWizard();\n  globalThis.__uiTest = { journalCard };",
+    "  renderWizard();\n  globalThis.__uiTest = { journalCard, renderJournal };",
   );
   vm.runInNewContext(instrumented, context);
   const journalCard = (context as { __uiTest?: { journalCard: Function } }).__uiTest?.journalCard;
@@ -222,8 +231,14 @@ test("keeps session reader selection stable across slow responses", async () => 
     files: ["harness.log", "decision.json", "context.json"],
   };
   const discovery = { available: true, truncated: false };
-  const card = journalCard({ ticket: { provider: "github", repository: "owner/repo", number: 42 }, session }, discovery);
-  journal.append(card);
+  const renderJournal = (context as { __uiTest?: { renderJournal: Function } }).__uiTest!.renderJournal;
+  const snapshot = {
+    controller: { tickets: [{ provider: "github", repository: "owner/repo", number: 42, flowInstanceId: session.flowUuid }] },
+    sessions: { ...discovery, entries: [session] },
+  };
+  renderJournal(snapshot);
+  const card = journal.querySelectorAll(".event-card")[0];
+  card.open = true;
   const tabs = card.querySelectorAll('[role="tab"]');
   const harnessTab = tabs.find((tab) => tab.dataset.sessionTab === "harness");
   const decisionTab = tabs.find((tab) => tab.dataset.sessionTab === "decision");
@@ -237,6 +252,12 @@ test("keeps session reader selection stable across slow responses", async () => 
   assert.equal(document.activeElement, decisionTab, "arrow navigation must stay within the session tablist");
   assert.equal(arrow.defaultPrevented, true);
   assert.deepEqual(requests.map((path) => path.split("/").at(-1)), ["harness.log", "decision.json"]);
+
+  renderJournal(structuredClone(snapshot));
+  assert.ok(journal.querySelectorAll(".event-card")[0] === card, "refresh must retain the open session card");
+  assert.equal(card.open, true);
+  assert.equal(card.querySelectorAll('[role="tabpanel"]')[0], panel);
+  assert.equal(document.activeElement, decisionTab);
 
   decision.resolve();
   await new Promise(setImmediate);

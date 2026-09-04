@@ -49,9 +49,18 @@ async function pinnedFile(root: string, path: string): Promise<string> {
 
 export async function loadConfigBundle(root: string, stackPath: string, revision: string): Promise<ConfigBundle> {
   const canonicalRoot = await realpath(resolve(root));
+  let stackFile: string;
+  try {
+    stackFile = await pinnedFile(canonicalRoot, stackPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new Error(`Configuration revision ${revision} has no Stack at ${stackPath}. `
+      + "Check the stack path. For pre-Stack instances, restore the previous controller and finish or cancel them "
+      + "before upgrading; see docs/upgrading.md. Pinned revisions must not be rewritten.", { cause: error });
+  }
   const stack = validateDocument<StackDefinition>(
     "Stack",
-    await parseYaml(await pinnedFile(canonicalRoot, stackPath)),
+    await parseYaml(stackFile),
   );
   for (const path of requiredContracts) {
     if (!stack.spec.contracts.includes(path)) throw new Error(`stack contract ${path} is required`);

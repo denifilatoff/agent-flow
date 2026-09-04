@@ -1462,6 +1462,50 @@ test("routes a moved verification head back through review when unblocked", asyn
   assert.equal(launcher.requests[0]?.control.changeRequest?.headSha, NEW_HEAD);
 });
 
+test("reviews a moved verification head after an accepted human answer", async () => {
+  for (const headSha of [OLD_HEAD, NEW_HEAD]) {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({
+      stateId: "needs-human", resumeStateId: "bug-verification", activationLabel: "bugfix",
+      attemptSeries: attemptSeries({ agentId: "bug-investigator", stateId: "needs-human" }),
+      latestReceipt: humanReceipt("approved", "answer"), changeRequest: controlChange(),
+    }));
+    provider.snapshot.labels = ["bugfix"];
+    provider.snapshot.changeRequest = changeRequest({ headSha });
+    const launcher = new FakeLauncher();
+    const result = await reconcileTicket(dependencies(provider, launcher), TICKET);
+    assert.equal(result.stateId, headSha === NEW_HEAD ? "bug-review" : "bug-verification");
+    assert.equal(launcher.requests[0]?.agentId, headSha === NEW_HEAD ? "reviewer" : "bug-investigator");
+  }
+});
+
+test("preserves the reviewed head through clarification before resuming verification", async () => {
+  for (const verdict of ["unclear", "question"] as const) {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({
+      stateId: "needs-human", resumeStateId: "bug-verification", activationLabel: "bugfix",
+      attemptSeries: attemptSeries({ agentId: "bug-investigator", stateId: "needs-human" }),
+      latestReceipt: humanReceipt(verdict, "answer1"), changeRequest: controlChange(),
+    }));
+    provider.snapshot.labels = ["bugfix"];
+    provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD });
+    const launcher = new FakeLauncher();
+    const deps = dependencies(provider, launcher);
+    await reconcileTicket(deps, TICKET);
+    const stored = provider.snapshot.comments.find((comment) => parseControlComment(comment.body))!;
+    const paused = parseControlComment(stored.body)!;
+    assert.equal(paused.changeRequest?.headSha, OLD_HEAD);
+    stored.body = renderControlComment({
+      ...paused,
+      attemptSeries: attemptSeries({ agentId: "bug-investigator", stateId: "needs-human" }),
+      latestReceipt: humanReceipt("approved", "answer2"),
+    });
+    const result = await reconcileTicket(deps, TICKET);
+    assert.equal(result.stateId, "bug-review");
+    assert.equal(launcher.requests.at(-1)?.agentId, "reviewer");
+  }
+});
+
 test("rejects an event that the current XState state cannot accept", async () => {
   const provider = new FakeProvider();
   installControl(provider, controlState({

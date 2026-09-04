@@ -68,6 +68,7 @@ export async function createDashboardSnapshot(runtime: RuntimeManager, ready: Re
       provenance: configurationProvenance(
         effective.configuration.repository,
         effective.provider.type,
+        effective.provider.apiUrl,
         ready.bundle,
         effective.configuration.stack,
       ),
@@ -83,13 +84,17 @@ export async function createDashboardSnapshot(runtime: RuntimeManager, ready: Re
 function configurationProvenance(
   repository: string,
   provider: "github" | "gitlab",
+  apiUrl: string,
   bundle: ReadyDependencies["bundle"],
   stackPath: string,
 ) {
   const repositoryUrl = repositoryWebUrl(repository);
-  if (!repositoryUrl) {
+  const host = repositoryUrl ? new URL(repositoryUrl).hostname : null;
+  const repositoryProvider = host === "github.com" ? "github" : host === "gitlab.com" ? "gitlab"
+    : host === new URL(apiUrl).hostname ? provider : null;
+  if (!repositoryUrl || !repositoryProvider) {
     return {
-      repositoryUrl: null,
+      repositoryUrl,
       revisionUrl: null,
       stackUrl: null,
       flowUrl: null,
@@ -97,8 +102,8 @@ function configurationProvenance(
       agentPackageUrls: Object.fromEntries(Object.keys(bundle.catalog.agents).map((agent) => [agent, null])),
     };
   }
-  const tree = provider === "gitlab" ? "/-/tree/" : "/tree/";
-  const blob = provider === "gitlab" ? "/-/blob/" : "/blob/";
+  const tree = repositoryProvider === "gitlab" ? "/-/tree/" : "/tree/";
+  const blob = repositoryProvider === "gitlab" ? "/-/blob/" : "/blob/";
   const pathUrl = (kind: string, path: string) =>
     `${repositoryUrl}${kind}${bundle.revision}/${path.split("/").map(encodeURIComponent).join("/")}`;
   return {
