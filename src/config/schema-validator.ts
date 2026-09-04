@@ -17,6 +17,7 @@ const schemaFiles = [
   "control-state.schema.json",
   "controller-config.schema.json",
   "flow.schema.json",
+  "local-execution.schema.json",
 ] as const;
 
 const schemaIds: Record<SchemaKind, string> = {
@@ -26,6 +27,7 @@ const schemaIds: Record<SchemaKind, string> = {
   ControlState: "https://agent-flow.dev/schemas/v1/control-state.schema.json",
   AgentDecision: "https://agent-flow.dev/schemas/v1/agent-decision.schema.json",
   AgentReceipt: "https://agent-flow.dev/schemas/v1/agent-receipt.schema.json",
+  LocalExecution: "https://agent-flow.dev/schemas/v1/local-execution.schema.json",
 };
 
 export type DocumentValidator = <T>(kind: SchemaKind, value: unknown) => T;

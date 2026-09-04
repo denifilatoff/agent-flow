@@ -1,4 +1,4 @@
-export type SchemaKind = "Flow" | "AgentCatalog" | "ControllerConfig" | "ControlState" | "AgentReceipt" | "AgentDecision";
+export type SchemaKind = "Flow" | "AgentCatalog" | "ControllerConfig" | "ControlState" | "AgentReceipt" | "AgentDecision" | "LocalExecution";
 export type HarnessTarget = "codex" | "claude";
 export type ResultContract = "assessment" | "plan" | "development" | "review" | "human-gate" | "none";
 
@@ -135,6 +135,16 @@ export interface ControlState {
   latestReceipt: AgentReceipt | null;
   humanGate: ControlHumanGate | null;
   changeRequest: ControlChangeRequest | null;
+}
+
+export interface LocalExecution {
+  controllerId: string;
+  observedAt: string;
+  owner: { controllerId: string; publicationKey: string } | null;
+  disposition: "ready" | "waiting" | "foreign" | "ambiguous" | "inactive";
+  reason: string | null;
+  publicationKeys: string[];
+  control: ControlState | null;
 }
 
 export interface Actor {

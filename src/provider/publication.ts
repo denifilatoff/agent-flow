@@ -4,6 +4,10 @@ const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
 const SHA = /^[0-9a-f]{40}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+export function isCanonicalUuid(value: string): boolean {
+  return UUID.test(value);
+}
+
 export interface PublicationMetadata {
   config: string;
   controller: string;
@@ -25,7 +29,7 @@ function metadata(value: unknown): PublicationMetadata | null {
   if (keys.length !== 2 || !keys.includes("config") || !keys.includes("controller")) return null;
   const candidate = value as Record<string, unknown>;
   if (typeof candidate.config !== "string" || !SHA.test(candidate.config)) return null;
-  if (typeof candidate.controller !== "string" || !UUID.test(candidate.controller)) return null;
+  if (typeof candidate.controller !== "string" || !isCanonicalUuid(candidate.controller)) return null;
   return { config: candidate.config, controller: candidate.controller };
 }
 
