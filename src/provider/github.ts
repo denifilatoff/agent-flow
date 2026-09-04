@@ -135,7 +135,7 @@ export function createGitHubAdapter(
     const activationEvent = labels.includes(ACTIVATION_LABEL)
       ? activationEvents.toReversed().find(({ kind }) => kind === "add")
       : undefined;
-    const changeNumbers = findChangeRequestNumbers(
+    const links = findChangeRequestNumbers(
       timeline,
       new URL(`repos/${repositoryPath(ref.repository)}`, apiBase),
     );
@@ -158,7 +158,8 @@ export function createGitHubAdapter(
         changeRequest: null,
       },
       activationEvents,
-      changeNumbers,
+      changeNumbers: links.numbers,
+      linkAmbiguities: links.ambiguities,
     };
   }
 
@@ -253,7 +254,7 @@ export function createGitHubAdapter(
           "active",
         ),
       })));
-      const ambiguities: string[] = [];
+      const ambiguities: string[] = [...data.linkAmbiguities];
       const boundary = activeBoundary(data.snapshot, data.activationEvents, ambiguities);
       const permissionCache = new Map<string, boolean>();
       const authorized = async (actor: Actor): Promise<boolean> => {
@@ -275,6 +276,7 @@ export function createGitHubAdapter(
       }
       const publications: Publication[] = [];
       let legacyActive = false;
+      const canonicalRepository = data.snapshot.repository.name;
       const addPublication = async (
         kind: "comment" | "change-request" | "review",
         id: string,
@@ -283,7 +285,7 @@ export function createGitHubAdapter(
         updatedAt: string | null,
         actor: Actor,
       ): Promise<void> => {
-        const key = publicationKey("github", apiScope, ref.repository, kind, id);
+        const key = publicationKey("github", apiScope, canonicalRepository, kind, id);
         if (!withinActiveBoundary(data.snapshot, boundary, createdAt)) return;
         const parsed = parsePublication(body);
         if (parsed.kind === "legacy") {
@@ -316,18 +318,23 @@ export function createGitHubAdapter(
       for (const { change, values } of reviewRows) {
         for (const value of values) {
           const row = object(value, "GitHub review");
-          const id = identifier(row.id, "GitHub review id");
           const body = optionalString(row.body, "GitHub review body");
-          const submittedAt = string(row, "submitted_at");
-          const actor = normalizeActor(row.user, "GitHub review actor");
           const parsed = parsePublication(body);
+          if (parsed.kind === "unmarked") continue;
+          const id = identifier(row.id, "GitHub review id");
+          const submittedAt = optionalString(row.submitted_at, "GitHub review submitted_at");
+          if (!submittedAt) {
+            ambiguities.push(`review submission time is unavailable: ${publicationKey("github", apiScope, canonicalRepository, "review", id)}`);
+            continue;
+          }
+          const actor = normalizeActor(row.user, "GitHub review actor");
           if (parsed.kind === "current") {
             try {
               const review = normalizeReview(row);
               reviews.push(review);
               await addPublication("review", id, body, submittedAt, null, actor);
             } catch (error) {
-              ambiguities.push(`invalid review evidence: ${publicationKey("github", apiScope, ref.repository, "review", id)}: ${error instanceof Error ? error.message : "unknown error"}`);
+              ambiguities.push(`invalid review evidence: ${publicationKey("github", apiScope, canonicalRepository, "review", id)}: ${error instanceof Error ? error.message : "unknown error"}`);
             }
           } else {
             await addPublication("review", id, body, submittedAt, null, actor);
@@ -532,20 +539,47 @@ function normalizeLabels(value: unknown): string[] {
   });
 }
 
-function findChangeRequestNumbers(timeline: unknown[], repositoryUrl: URL): number[] {
+function findChangeRequestNumbers(
+  timeline: unknown[],
+  repositoryUrl: URL,
+): { numbers: number[]; ambiguities: string[] } {
   const candidates = new Set<number>();
+  const ambiguities: string[] = [];
   for (const value of timeline) {
     const event = object(value, "GitHub timeline event");
-    if (event.event !== "cross-referenced") continue;
-    const source = nullableObject(event.source);
-    const issue = nullableObject(source?.issue);
-    if (!issue || issue.pull_request === undefined) continue;
-    if (!sameRepositoryUrl(issue.repository_url, repositoryUrl)) continue;
-    const number = integer(issue, "number");
-    assertPositiveInteger(number, "pull request number");
+    if (event.event === "cross-referenced") {
+      const source = nullableObject(event.source);
+      const issue = nullableObject(source?.issue);
+      if (!issue || issue.pull_request === undefined || !sameRepositoryUrl(issue.repository_url, repositoryUrl)) continue;
+      const number = integer(issue, "number");
+      assertPositiveInteger(number, "pull request number");
+      candidates.add(number);
+      continue;
+    }
+    if (event.event !== "connected") continue;
+    const subject = nullableObject(event.subject);
+    if (subject?.type !== "pull_request") continue;
+    const number = pullRequestNumber(subject.url, repositoryUrl);
+    if (number === null) {
+      ambiguities.push(`unresolved connected GitHub pull request: ${identifier(event.id, "GitHub timeline event id")}`);
+      continue;
+    }
     candidates.add(number);
   }
-  return [...candidates].sort((left, right) => left - right);
+  return { numbers: [...candidates].sort((left, right) => left - right), ambiguities };
+}
+
+function pullRequestNumber(value: unknown, repositoryUrl: URL): number | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    const prefix = `${repositoryUrl.pathname.replace(/\/$/, "")}/pulls/`;
+    if (url.origin !== repositoryUrl.origin || !url.pathname.startsWith(prefix) || url.search || url.hash) return null;
+    const number = Number(url.pathname.slice(prefix.length));
+    return Number.isSafeInteger(number) && number > 0 ? number : null;
+  } catch {
+    return null;
+  }
 }
 
 function sameRepositoryUrl(value: unknown, expected: URL): boolean {

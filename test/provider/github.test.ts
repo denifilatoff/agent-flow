@@ -198,6 +198,143 @@ test("rejects incomplete GitHub recovery evidence pages", async () => {
   );
 });
 
+test("resolves a manually connected GitHub pull request as recovery evidence", async () => {
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", {
+      data: [
+        {
+          id: 901,
+          event: "labeled",
+          created_at: "2026-08-25T10:00:00Z",
+          actor: { id: 7, login: "maintainer" },
+          label: { name: "agent-flow:development" },
+        },
+        {
+          id: 902,
+          event: "connected",
+          created_at: "2026-08-25T10:00:01Z",
+          subject: {
+            type: "pull_request",
+            url: "https://api.github.example.test/repos/owner/repo/pulls/31",
+          },
+        },
+      ],
+    })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/pulls/31", { data: fixture.pull })
+    .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } })
+    .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "push" } });
+
+  const evidence = await adapter(client).readRecoveryEvidence({ provider: "github", repository: REPOSITORY, number: 17 });
+
+  assert.equal(evidence.changes.length, 1);
+  assert.equal(evidence.changes[0]?.number, 31);
+  assert.equal(evidence.ambiguities.some((value) => value.includes("connected")), false);
+});
+
+test("ignores an unmarked pending GitHub review without a submission time", async () => {
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", {
+      data: [
+        {
+          id: 901,
+          event: "labeled",
+          created_at: "2026-08-25T10:00:00Z",
+          actor: { id: 7, login: "maintainer" },
+          label: { name: "agent-flow:development" },
+        },
+        {
+          id: 902,
+          event: "cross-referenced",
+          source: { issue: { number: 31, repository_url: "https://api.github.example.test/repos/owner/repo", pull_request: {} } },
+        },
+      ],
+    })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/pulls/31", { data: fixture.pull })
+    .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", {
+      data: [{ id: 705, state: "PENDING", body: "Draft review", user: { id: 9, login: "reviewer" } }],
+    })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } })
+    .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "push" } });
+
+  const evidence = await adapter(client).readRecoveryEvidence({ provider: "github", repository: REPOSITORY, number: 17 });
+
+  assert.deepEqual(evidence.reviews, []);
+  assert.equal(evidence.ambiguities.some((value) => value.includes("review")), false);
+});
+
+test("marks a marked pending GitHub review without a submission time as ambiguous", async () => {
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", {
+      data: [
+        {
+          id: 901,
+          event: "labeled",
+          created_at: "2026-08-25T10:00:00Z",
+          actor: { id: 7, login: "maintainer" },
+          label: { name: "agent-flow:development" },
+        },
+        {
+          id: 902,
+          event: "cross-referenced",
+          source: { issue: { number: 31, repository_url: "https://api.github.example.test/repos/owner/repo", pull_request: {} } },
+        },
+      ],
+    })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/pulls/31", { data: fixture.pull })
+    .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", {
+      data: [{ id: 705, state: "PENDING", body: "<!-- agent-flow:review -->\nApproved", user: { id: 9, login: "reviewer" } }],
+    })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } })
+    .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "push" } });
+
+  const evidence = await adapter(client).readRecoveryEvidence({ provider: "github", repository: REPOSITORY, number: 17 });
+
+  assert.deepEqual(evidence.reviews, []);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("review submission time is unavailable")));
+});
+
+test("uses the canonical GitHub repository name in recovery publication keys", async () => {
+  const repository = { ...(fixture.repository as Record<string, unknown>), full_name: "Owner/Repo" };
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", {
+      data: [
+        {
+          id: 901,
+          event: "labeled",
+          created_at: "2026-08-25T10:00:00Z",
+          actor: { id: 7, login: "maintainer" },
+          label: { name: "agent-flow:development" },
+        },
+        {
+          id: 902,
+          event: "cross-referenced",
+          source: { issue: { number: 31, repository_url: "https://api.github.example.test/repos/owner/repo", pull_request: {} } },
+        },
+      ],
+    })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/pulls/31", { data: fixture.pull })
+    .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } })
+    .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "push" } });
+
+  const evidence = await adapter(client).readRecoveryEvidence({ provider: "github", repository: REPOSITORY, number: 17 });
+
+  assert.equal(JSON.parse(evidence.publications[0]!.key)[2], "Owner/Repo");
+});
+
 test("rejects a discovery cursor that targets another repository", async () => {
   await assert.rejects(
     adapter(new FixtureClient()).discover(

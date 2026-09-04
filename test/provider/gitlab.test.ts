@@ -218,6 +218,65 @@ test("rejects incomplete GitLab recovery evidence pages", async () => {
   await assert.rejects(adapter(client).readRecoveryEvidence(ref), /page failed/);
 });
 
+test("marks a changed GitLab review note as ambiguous instead of electing it at creation time", async () => {
+  const changedReview = {
+    ...(fixture.recoveryReviewNote as Record<string, unknown>),
+    updated_at: "2026-08-25T10:06:00.000Z",
+  };
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
+      data: fixture.labelEventsFirst,
+      next: `${PROJECT}/issues/23/resource_label_events?per_page=100&page=2`,
+    })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100&page=2`, { data: fixture.labelEventsSecond })
+    .add("GET", `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: fixture.relatedMergeRequests })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: fixture.mergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [changedReview] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } })
+    .add("GET", `${PROJECT}/members/all/9`, { data: { id: 9, username: "reviewer", access_level: 40 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.reviews.length, 1);
+  assert.equal(evidence.publications.some(({ key }) => key.includes("review")), false);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("publication provenance")));
+});
+
+test("reports a removed GitLab publisher as unauthorized recovery evidence", async () => {
+  const publisherComment = {
+    ...(fixture.recoveryComment as Record<string, unknown>),
+    author: { id: 10, username: "former-developer" },
+  };
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
+      data: [{
+        id: 802,
+        action: "add",
+        label: { name: "agent-flow:development" },
+        user: { id: 7, username: "maintainer" },
+        created_at: "2026-08-25T10:00:00.000Z",
+      }],
+    })
+    .add("GET", `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`, { data: [publisherComment] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/10`, {
+      data: null,
+      error: new ProviderHttpError("member not found", 404, false, null, {}),
+    });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.publications.some(({ key }) => key.includes("comment")), false);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("publication author is not authorized")));
+});
+
 test("binds discovery cursors to the exact project and window", async () => {
   const query =
     "scope=all&state=all&updated_after=2026-08-25T09%3A59%3A59.000Z&per_page=100&page=2";

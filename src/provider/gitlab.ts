@@ -107,6 +107,25 @@ export function createGitLabAdapter(
     return normalizeMergeRequest(response.data, ref.repository);
   }
 
+  async function readPermission(repository: string, actor: Actor): Promise<Permission> {
+    assertIdentifier(actor.providerId, "GitLab actor id");
+    let response: ProviderResponse<unknown>;
+    try {
+      response = await request(
+        `${repositoryPath(repository)}/members/all/${actor.providerId}`,
+        "active",
+      );
+    } catch (error) {
+      if (error instanceof ProviderHttpError && error.status === 404) return "none";
+      throw error;
+    }
+    const member = object(response.data, "GitLab project member");
+    if (identifier(member.id, "GitLab project member id") !== actor.providerId) {
+      throw new Error("GitLab project member identity mismatch");
+    }
+    return permission(integer(member, "access_level"));
+  }
+
   async function readSnapshotData(ref: TicketRef) {
     const path = ticketPath(ref);
     const project = await readProject(ref.repository);
@@ -269,12 +288,7 @@ export function createGitLabAdapter(
       const authorized = async (actor: Actor): Promise<boolean> => {
         const cached = permissionCache.get(actor.providerId);
         if (cached !== undefined) return cached;
-        const response = await request(`${repositoryPath(ref.repository)}/members/all/${actor.providerId}`, "active");
-        const member = object(response.data, "GitLab project member");
-        if (identifier(member.id, "GitLab project member id") !== actor.providerId) {
-          throw new Error("GitLab project member identity mismatch");
-        }
-        const allowed = ["write", "maintain", "admin"].includes(permission(integer(member, "access_level")));
+        const allowed = ["write", "maintain", "admin"].includes(await readPermission(ref.repository, actor));
         permissionCache.set(actor.providerId, allowed);
         return allowed;
       };
@@ -328,18 +342,19 @@ export function createGitLabAdapter(
           const id = identifier(row.id, "GitLab review note id");
           const body = optionalString(row.body, "GitLab review note body");
           const submittedAt = string(row, "created_at");
+          const updatedAt = string(row, "updated_at");
           const actor = normalizeActor(row.author, "GitLab review note actor");
           const parsed = parsePublication(body);
           if (parsed.kind === "current") {
             try {
               const review = normalizeReviewNote(row, change);
               reviews.push(review);
-              await addPublication("review", id, body, submittedAt, null, actor);
+              await addPublication("review", id, body, submittedAt, updatedAt, actor);
             } catch (error) {
               ambiguities.push(`invalid review evidence: ${publicationKey("gitlab", apiScope, ref.repository, "review", id)}: ${error instanceof Error ? error.message : "unknown error"}`);
             }
           } else {
-            await addPublication("review", id, body, submittedAt, null, actor);
+            await addPublication("review", id, body, submittedAt, updatedAt, actor);
           }
         }
       }
@@ -357,22 +372,7 @@ export function createGitLabAdapter(
     },
 
     async permission(repository: string, actor: Actor): Promise<Permission> {
-      assertIdentifier(actor.providerId, "GitLab actor id");
-      let response: ProviderResponse<unknown>;
-      try {
-        response = await request(
-          `${repositoryPath(repository)}/members/all/${actor.providerId}`,
-          "active",
-        );
-      } catch (error) {
-        if (error instanceof ProviderHttpError && error.status === 404) return "none";
-        throw error;
-      }
-      const member = object(response.data, "GitLab project member");
-      if (identifier(member.id, "GitLab project member id") !== actor.providerId) {
-        throw new Error("GitLab project member identity mismatch");
-      }
-      return permission(integer(member, "access_level"));
+      return readPermission(repository, actor);
     },
 
     async readComment(ref: TicketRef, id: string): Promise<ProviderComment> {
