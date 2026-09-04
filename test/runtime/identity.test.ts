@@ -46,7 +46,7 @@ test("rejects a symlinked identity instead of reading outside the data directory
   await writeFile(outside, "11111111-1111-4111-8111-111111111111\n");
   await symlink(outside, join(directory, "controller-id"));
 
-  await assert.rejects(loadControllerId(directory), /symbolic link/);
+  await assert.rejects(loadControllerId(directory), /controller ID path must not be a symbolic link/);
 });
 
 test("keeps the controller identity after the SQLite file is reset", async (t) => {

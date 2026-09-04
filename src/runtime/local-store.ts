@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { validateDocument } from "../config/schema-validator.ts";
 import type { LocalExecution } from "../config/types.js";
-import type { TicketRef } from "../provider/types.js";
+import type { ProviderKind, TicketRef } from "../provider/types.js";
 
 export interface StoredExecution {
   revision: number;
@@ -13,6 +13,17 @@ export interface LocalStore {
   load(scope: string, ref: TicketRef): StoredExecution | null;
   save(scope: string, ref: TicketRef, expected: number | null, value: LocalExecution): StoredExecution;
   close(): void;
+}
+
+export function providerScope(provider: ProviderKind, apiBaseUrl: string): string {
+  const api = new URL(apiBaseUrl);
+  if (api.protocol !== "http:" && api.protocol !== "https:") {
+    throw new Error("provider API URL must use HTTP or HTTPS");
+  }
+  if (api.username || api.password) throw new Error("provider API URL must be credential-free");
+  if (api.search || api.hash) throw new Error("provider API URL must not include a query or fragment");
+  const path = api.pathname.replace(/\/+$/, "");
+  return `${provider}:${api.origin}${path}`;
 }
 
 interface ExecutionRow {
@@ -73,6 +84,11 @@ export function openLocalStore(path: string): LocalStore {
 
         database.exec("BEGIN IMMEDIATE");
         try {
+          if (expected !== null) {
+            const current = load.get(scope, ref.repository, ref.number) as ExecutionRow | undefined;
+            if (!current || current.revision !== expected) throw new Error("stale local execution write");
+            stored(current);
+          }
           const result = expected === null
             ? insert.run(scope, ref.repository, ref.number, payload)
             : update.run(revision, payload, scope, ref.repository, ref.number, expected);
@@ -120,7 +136,12 @@ function initialize(database: DatabaseSync): void {
 }
 
 function assertKey(scope: string, ref: TicketRef): void {
-  if (scope.length === 0) throw new Error("provider scope must not be empty");
+  const separator = scope.indexOf(":");
+  const provider = scope.slice(0, separator);
+  if ((provider !== "github" && provider !== "gitlab") || separator < 1
+    || providerScope(provider, scope.slice(separator + 1)) !== scope) {
+    throw new Error("provider scope must use the canonical provider API URL representation");
+  }
   if (ref.repository.length === 0 || !Number.isSafeInteger(ref.number) || ref.number < 1) {
     throw new Error("invalid local execution ticket identity");
   }

@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { validateDocument } from "../../src/config/schema-validator.ts";
 import type { ControlState, LocalExecution } from "../../src/config/types.ts";
-import { openLocalStore } from "../../src/runtime/local-store.ts";
+import { openLocalStore, providerScope } from "../../src/runtime/local-store.ts";
 
 const controllerId = "11111111-1111-4111-8111-111111111111";
 const ref = { provider: "github" as const, repository: "owner/repository", number: 17 };
@@ -65,6 +65,31 @@ test("persists a record and applies compare-and-swap revisions", async (t) => {
   reopened.close();
 });
 
+test("canonicalizes credential-free provider scopes and keeps hosts separate", async (t) => {
+  const canonical = providerScope("github", "HTTPS://GitHub.example.test:443/api/v3/");
+  assert.equal(canonical, "github:https://github.example.test/api/v3");
+  assert.equal(providerScope("github", "https://github.example.test/api/v3/./"), canonical);
+  assert.notEqual(providerScope("github", "https://other.example.test/api/v3"), canonical);
+  assert.throws(
+    () => providerScope("github", "https://operator:secret@github.example.test/api/v3"),
+    /credential-free/,
+  );
+
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-local-store-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = openLocalStore(join(directory, "execution.sqlite"));
+  assert.equal(store.save(canonical, ref, null, inactiveRecord()).revision, 0);
+  assert.equal(
+    store.save(providerScope("github", "https://other.example.test/api/v3"), ref, null, inactiveRecord()).revision,
+    0,
+  );
+  assert.throws(
+    () => store.load("github:https://github.example.test/api/v3/", ref),
+    /canonical provider/,
+  );
+  store.close();
+});
+
 test("rejects invalid payloads without creating a row", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-flow-local-store-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -111,6 +136,28 @@ test("rejects corrupt payloads and unsupported schema versions", async (t) => {
   unsupported.exec("PRAGMA user_version = 2");
   unsupported.close();
   assert.throws(() => openLocalStore(versionPath), /unsupported local store schema version: 2/);
+});
+
+test("refuses to overwrite a corrupt row during a compare-and-swap update", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-local-store-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "execution.sqlite");
+  const store = openLocalStore(path);
+  store.save(scope, ref, null, inactiveRecord());
+  store.close();
+
+  const database = new DatabaseSync(path);
+  database.exec("PRAGMA ignore_check_constraints = ON");
+  database.prepare("UPDATE ticket_execution SET payload = ?").run("{bad json");
+  database.close();
+
+  const corrupt = openLocalStore(path);
+  assert.throws(() => corrupt.save(scope, ref, 0, inactiveRecord()), /invalid local execution payload/);
+  corrupt.close();
+
+  const preserved = new DatabaseSync(path);
+  assert.equal(preserved.prepare("SELECT payload FROM ticket_execution").get().payload, "{bad json");
+  preserved.close();
 });
 
 test("validates the LocalExecution data contract", () => {
