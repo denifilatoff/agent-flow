@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { createGitHubAdapter } from "../../src/provider/github.ts";
 import { ProviderHttpError } from "../../src/provider/http.ts";
+import { electOwner } from "../../src/provider/publication.ts";
 import type {
   ProviderRequest,
   ProviderResponse,
@@ -126,8 +127,75 @@ test("discovers changed issues and normalizes one snapshot", async () => {
   assert.equal(ticket.changeRequest?.number, 31);
   assert.equal(ticket.changeRequest?.headSha, HEAD_SHA);
   assert.equal(ticket.changeRequest?.state, "merged");
+  assert.equal(ticket.changeRequest?.body.includes("agent-flow:v1"), true);
+  assert.equal(ticket.changeRequest?.createdAt, "2026-08-25T10:00:05Z");
   assert.equal(client.calls[0]!.priority, "background");
   assert.ok(client.calls.slice(1).every(({ priority }) => priority === "active"));
+});
+
+test("reads complete recovery evidence from paginated comments, linked pulls, and reviews", async () => {
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", { data: fixture.timelineFirst, next: "repos/owner/repo/issues/17/timeline?page=2" })
+    .add("GET", "repos/owner/repo/issues/17/timeline?page=2", {
+      data: [
+        ...(fixture.timelineSecond as unknown[]),
+        {
+          id: 805,
+          event: "cross-referenced",
+          created_at: "2026-08-25T10:00:11Z",
+          actor: { id: 8, login: "developer" },
+          source: { type: "issue", issue: { number: 32, repository_url: "https://api.github.example.test/repos/owner/repo", pull_request: {} } },
+        },
+      ],
+    })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", {
+      data: fixture.commentsFirst,
+      next: "repos/owner/repo/issues/17/comments?page=2",
+    })
+    .add("GET", "repos/owner/repo/issues/17/comments?page=2", { data: [fixture.recoveryComment] })
+    .add("GET", "repos/owner/repo/pulls/31", { data: fixture.pull })
+    .add("GET", "repos/owner/repo/pulls/32", { data: fixture.secondPull })
+    .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", { data: [fixture.recoveryReview] })
+    .add("GET", "repos/owner/repo/pulls/32/reviews?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } })
+    .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "push" } })
+    .add("GET", "repos/owner/repo/collaborators/reviewer/permission", { data: { permission: "maintain" } });
+
+  const evidence = await adapter(client).readRecoveryEvidence({ provider: "github", repository: REPOSITORY, number: 17 });
+
+  assert.equal(evidence.complete, true);
+  assert.equal(evidence.activeBoundary, "fresh");
+  assert.equal(evidence.legacyActive, false);
+  assert.equal(evidence.snapshot.changeRequest, null);
+  assert.equal(evidence.changes.length, 2);
+  assert.equal(evidence.reviews.length, 1);
+  assert.ok(evidence.publications.some(({ key }) => key.includes("change-request")));
+  assert.ok(evidence.publications.some(({ key }) => key.includes("comment")));
+  assert.ok(evidence.publications.some(({ key }) => key.includes("review")));
+  assert.ok(electOwner(evidence.publications)?.key.includes("change-request"));
+  assert.ok(evidence.ambiguities.some((value) => value.includes("multiple linked")));
+  assert.ok(client.calls.some(({ path }) => path.endsWith("collaborators/developer/permission")));
+  assert.ok(client.calls.some(({ path }) => path.endsWith("collaborators/reviewer/permission")));
+  assert.ok(client.calls.every(({ priority }) => priority === "active"));
+});
+
+test("rejects incomplete GitHub recovery evidence pages", async () => {
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", {
+      data: fixture.commentsFirst,
+      next: "repos/owner/repo/issues/17/comments?page=2",
+    })
+    .add("GET", "repos/owner/repo/issues/17/comments?page=2", { data: null, error: new Error("page failed") });
+
+  await assert.rejects(
+    adapter(client).readRecoveryEvidence({ provider: "github", repository: REPOSITORY, number: 17 }),
+    /page failed/,
+  );
 });
 
 test("rejects a discovery cursor that targets another repository", async () => {

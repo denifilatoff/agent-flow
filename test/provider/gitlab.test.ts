@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { createGitLabAdapter } from "../../src/provider/gitlab.ts";
 import { ProviderHttpError } from "../../src/provider/http.ts";
+import { electOwner } from "../../src/provider/publication.ts";
 import type {
   ProviderRequest,
   ProviderResponse,
@@ -158,8 +159,63 @@ test("uses updated_after and normalizes an issue snapshot", async () => {
   assert.equal(ticket.changeRequest?.number, 41);
   assert.equal(ticket.changeRequest?.state, "open");
   assert.equal(ticket.changeRequest?.headSha, HEAD_SHA);
+  assert.equal(ticket.changeRequest?.body.includes("agent-flow:v1"), true);
+  assert.equal(ticket.changeRequest?.createdAt, "2026-08-25T10:00:05.000Z");
   assert.equal(client.calls[0]!.priority, "background");
   assert.ok(client.calls.slice(1).every(({ priority }) => priority === "active"));
+});
+
+test("reads complete recovery evidence from paginated notes, linked merge requests, and reviews", async () => {
+  const notePath = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: fixture.labelEventsFirst, next: `${PROJECT}/issues/23/resource_label_events?per_page=100&page=2` })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100&page=2`, { data: fixture.labelEventsSecond })
+    .add("GET", notePath, { data: fixture.commentsFirst, next: `${notePath}&page=2` })
+    .add("GET", `${notePath}&page=2`, { data: [fixture.recoveryComment] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, {
+      data: [
+        ...(fixture.relatedMergeRequests as unknown[]),
+        { id: 4200, iid: 42, project_id: 100, references: { full: "group/project!42" } },
+      ],
+    })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: fixture.mergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/42`, { data: fixture.secondMergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [fixture.recoveryReviewNote] })
+    .add("GET", `${PROJECT}/merge_requests/42/notes?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } })
+    .add("GET", `${PROJECT}/members/all/9`, { data: { id: 9, username: "reviewer", access_level: 40 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.complete, true);
+  assert.equal(evidence.activeBoundary, "fresh");
+  assert.equal(evidence.legacyActive, false);
+  assert.equal(evidence.snapshot.changeRequest, null);
+  assert.equal(evidence.changes.length, 2);
+  assert.equal(evidence.reviews.length, 1);
+  assert.ok(evidence.publications.some(({ key }) => key.includes("change-request")));
+  assert.ok(evidence.publications.some(({ key }) => key.includes("comment")));
+  assert.ok(evidence.publications.some(({ key }) => key.includes("review")));
+  assert.ok(electOwner(evidence.publications)?.key.includes("change-request"));
+  assert.ok(evidence.ambiguities.some((value) => value.includes("multiple linked")));
+  assert.ok(client.calls.some(({ path }) => path.endsWith("members/all/6")));
+  assert.ok(client.calls.some(({ path }) => path.endsWith("members/all/9")));
+  assert.ok(client.calls.every(({ priority }) => priority === "active"));
+});
+
+test("rejects incomplete GitLab recovery evidence pages", async () => {
+  const notePath = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: [] })
+    .add("GET", notePath, { data: fixture.commentsFirst, next: `${notePath}&page=2` })
+    .add("GET", `${notePath}&page=2`, { data: null, error: new Error("page failed") });
+
+  await assert.rejects(adapter(client).readRecoveryEvidence(ref), /page failed/);
 });
 
 test("binds discovery cursors to the exact project and window", async () => {

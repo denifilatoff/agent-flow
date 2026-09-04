@@ -1,5 +1,6 @@
 import type { ProviderConfig } from "../config/types.js";
 import { ProviderHttpError } from "./http.ts";
+import { parsePublication, type Publication } from "./publication.ts";
 import type {
   Actor,
   DiscoveryPage,
@@ -9,6 +10,7 @@ import type {
   Permission,
   ProviderAdapter,
   ProviderComment,
+  RecoveryEvidence,
   ProviderRepository,
   ProviderResponse,
   ProviderTicketSnapshot,
@@ -31,6 +33,7 @@ export function createGitLabAdapter(
   const allowlist = new Set(config.repositories);
   const apiBase = new URL(config.apiUrl);
   if (!apiBase.pathname.endsWith("/")) apiBase.pathname += "/";
+  const apiScope = canonicalApiScope(apiBase);
   const webBase = gitLabWebBase(apiBase);
 
   function repositoryPath(repository: string): string {
@@ -102,6 +105,62 @@ export function createGitLabAdapter(
       "active",
     );
     return normalizeMergeRequest(response.data, ref.repository);
+  }
+
+  async function readSnapshotData(ref: TicketRef) {
+    const path = ticketPath(ref);
+    const project = await readProject(ref.repository);
+    const repository = normalizeProject(project, ref.repository, webBase);
+    const issue = object((await request(path, "active")).data, "GitLab issue");
+    const open = normalizeIssueState(issue);
+    const labels = normalizeLabels(issue.labels);
+    const events = await listAll(`${path}/resource_label_events?per_page=100`, "active");
+    const activationEvents: Array<{ kind: "add" | "remove"; id: string; createdAt: string; actor: Actor }> = [];
+    for (const event of events) {
+      const item = object(event, "GitLab label event");
+      if (isLabelEvent(item, "add", ACTIVATION_LABEL) || isLabelEvent(item, "remove", ACTIVATION_LABEL)) {
+        activationEvents.push({
+          kind: item.action === "add" ? "add" as const : "remove" as const,
+          id: identifier(item.id, "GitLab activation event id"),
+          createdAt: string(item, "created_at"),
+          actor: normalizeActor(item.user, "GitLab activation actor"),
+        });
+      }
+    }
+    const activationEvent = labels.includes(ACTIVATION_LABEL)
+      ? activationEvents.toReversed().find(({ kind }) => kind === "add")
+      : undefined;
+    const issueUrl = string(issue, "web_url");
+    const commentQuery = new URLSearchParams({
+      activity_filter: "only_comments",
+      order_by: "created_at",
+      sort: "asc",
+      per_page: "100",
+    });
+    const comments = (await listAll(`${path}/notes?${commentQuery}`, "active"))
+      .map((note) => normalizeNote(note, issueUrl));
+    const related = await listAll(`${path}/related_merge_requests?per_page=100`, "active");
+    return {
+      snapshot: {
+        ref,
+        repository,
+        title: string(issue, "title"),
+        description: optionalString(issue.description, "GitLab issue description"),
+        open,
+        labels,
+        updatedAt: string(issue, "updated_at"),
+        activation: {
+          present: labels.includes(ACTIVATION_LABEL),
+          eventId: activationEvent?.id ?? null,
+          actor: activationEvent?.actor ?? null,
+          occurredAt: activationEvent?.createdAt ?? null,
+        },
+        comments,
+        changeRequest: null,
+      },
+      activationEvents,
+      changeNumbers: findChangeRequestNumbers(related, integer(project, "id"), ref.repository),
+    };
   }
 
   return {
@@ -189,53 +248,111 @@ export function createGitLabAdapter(
     readRepository,
 
     async readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot> {
-      const path = ticketPath(ref);
-      const project = await readProject(ref.repository);
-      const repository = normalizeProject(project, ref.repository, webBase);
-      const issue = object((await request(path, "active")).data, "GitLab issue");
-      const open = normalizeIssueState(issue);
-      const labels = normalizeLabels(issue.labels);
-      const events = await listAll(`${path}/resource_label_events?per_page=100`, "active");
-      const issueUrl = string(issue, "web_url");
-      const commentQuery = new URLSearchParams({
-        activity_filter: "only_comments",
-        order_by: "created_at",
-        sort: "asc",
-        per_page: "100",
-      });
-      const comments = (await listAll(`${path}/notes?${commentQuery}`, "active"))
-        .map((note) => normalizeNote(note, issueUrl));
-      const activationEvent = labels.includes(ACTIVATION_LABEL)
-        ? [...events].reverse().find((event) => isLabelEvent(event, "add", ACTIVATION_LABEL))
-        : undefined;
-      const activation = activationEvent
-        ? object(activationEvent, "GitLab activation event")
-        : null;
-      const related = await listAll(`${path}/related_merge_requests?per_page=100`, "active");
-      const changeNumber = findChangeRequestNumber(
-        related,
-        integer(project, "id"),
-        ref.repository,
-      );
-
+      const data = await readSnapshotData(ref);
+      const changeNumber = uniqueChangeNumber(data.changeNumbers, "GitLab issue has multiple related merge requests");
       return {
-        ref,
-        repository,
-        title: string(issue, "title"),
-        description: optionalString(issue.description, "GitLab issue description"),
-        open,
-        labels,
-        updatedAt: string(issue, "updated_at"),
-        activation: {
-          present: labels.includes(ACTIVATION_LABEL),
-          eventId: activation ? identifier(activation.id, "GitLab activation event id") : null,
-          actor: activation ? normalizeActor(activation.user, "GitLab activation actor") : null,
-          occurredAt: activation ? string(activation, "created_at") : null,
-        },
-        comments,
-        changeRequest: changeNumber === null
-          ? null
-          : await readChangeRequest(ref, changeNumber),
+        ...data.snapshot,
+        changeRequest: changeNumber === null ? null : await readChangeRequest(ref, changeNumber),
+      };
+    },
+
+    async readRecoveryEvidence(ref: TicketRef): Promise<RecoveryEvidence> {
+      const data = await readSnapshotData(ref);
+      const changes = await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number)));
+      const reviewRows = await Promise.all(changes.map(async (change) => ({
+        change,
+        values: await listAll(`${repositoryPath(ref.repository)}/merge_requests/${change.number}/notes?per_page=100`, "active"),
+      })));
+      const ambiguities: string[] = [];
+      const boundary = activeBoundary(data.snapshot, data.activationEvents, ambiguities);
+      const permissionCache = new Map<string, boolean>();
+      const authorized = async (actor: Actor): Promise<boolean> => {
+        const cached = permissionCache.get(actor.providerId);
+        if (cached !== undefined) return cached;
+        const response = await request(`${repositoryPath(ref.repository)}/members/all/${actor.providerId}`, "active");
+        const member = object(response.data, "GitLab project member");
+        if (identifier(member.id, "GitLab project member id") !== actor.providerId) {
+          throw new Error("GitLab project member identity mismatch");
+        }
+        const allowed = ["write", "maintain", "admin"].includes(permission(integer(member, "access_level")));
+        permissionCache.set(actor.providerId, allowed);
+        return allowed;
+      };
+      if (data.snapshot.activation.present) {
+        if (!data.snapshot.activation.actor) ambiguities.push("activation author is unavailable");
+        else if (!await authorized(data.snapshot.activation.actor)) ambiguities.push("activation author is not authorized");
+      }
+      const publications: Publication[] = [];
+      let legacyActive = false;
+      const addPublication = async (
+        kind: "comment" | "change-request" | "review",
+        id: string,
+        body: string,
+        createdAt: string,
+        updatedAt: string | null,
+        actor: Actor,
+      ): Promise<void> => {
+        const key = publicationKey("gitlab", apiScope, ref.repository, kind, id);
+        if (!withinActiveBoundary(data.snapshot, boundary, createdAt)) return;
+        const parsed = parsePublication(body);
+        if (parsed.kind === "legacy") {
+          legacyActive = true;
+          return;
+        }
+        if (parsed.kind === "invalid") {
+          ambiguities.push(`invalid publication marker: ${key}`);
+          return;
+        }
+        if (parsed.kind !== "current") return;
+        const metadata = parsed.metadata;
+        if (updatedAt !== null && updatedAt !== createdAt) {
+          ambiguities.push(`publication provenance is unavailable: ${key}`);
+          return;
+        }
+        if (!await authorized(actor)) {
+          ambiguities.push(`publication author is not authorized: ${key}`);
+          return;
+        }
+        publications.push({ key, createdAt, metadata });
+      };
+      for (const comment of data.snapshot.comments) {
+        await addPublication("comment", comment.id, comment.body, comment.createdAt, comment.updatedAt, comment.actor);
+      }
+      for (const change of changes) {
+        await addPublication("change-request", String(change.number), change.body, change.createdAt, change.updatedAt, change.actor);
+      }
+      const reviews: NormalizedReview[] = [];
+      for (const { change, values } of reviewRows) {
+        for (const value of values) {
+          const row = object(value, "GitLab review note");
+          const id = identifier(row.id, "GitLab review note id");
+          const body = optionalString(row.body, "GitLab review note body");
+          const submittedAt = string(row, "created_at");
+          const actor = normalizeActor(row.author, "GitLab review note actor");
+          const parsed = parsePublication(body);
+          if (parsed.kind === "current") {
+            try {
+              const review = normalizeReviewNote(row, change);
+              reviews.push(review);
+              await addPublication("review", id, body, submittedAt, null, actor);
+            } catch (error) {
+              ambiguities.push(`invalid review evidence: ${publicationKey("gitlab", apiScope, ref.repository, "review", id)}: ${error instanceof Error ? error.message : "unknown error"}`);
+            }
+          } else {
+            await addPublication("review", id, body, submittedAt, null, actor);
+          }
+        }
+      }
+      if (changes.length > 1) ambiguities.push("multiple linked merge requests");
+      return {
+        snapshot: { ...data.snapshot, changeRequest: changes.length === 1 ? changes[0]! : null },
+        publications,
+        changes,
+        reviews,
+        ambiguities,
+        complete: true,
+        activeBoundary: boundary,
+        legacyActive,
       };
     },
 
@@ -424,6 +541,8 @@ function normalizeMergeRequest(value: unknown, repository: string): NormalizedCh
     headSha: string(mergeRequest, "sha"),
     state,
     actor: normalizeActor(mergeRequest.author, "GitLab merge request actor"),
+    body: optionalString(mergeRequest.description, "GitLab merge request description"),
+    createdAt: string(mergeRequest, "created_at"),
     updatedAt: string(mergeRequest, "updated_at"),
   };
 }
@@ -480,11 +599,11 @@ function normalizeLabels(value: unknown): string[] {
   });
 }
 
-function findChangeRequestNumber(
+function findChangeRequestNumbers(
   related: unknown[],
   projectId: number,
   repository: string,
-): number | null {
+): number[] {
   const candidates = new Set<number>();
   for (const item of related) {
     const mergeRequest = object(item, "GitLab related merge request");
@@ -494,11 +613,59 @@ function findChangeRequestNumber(
     const references = nullableObject(mergeRequest.references);
     if (references && string(references, "full") !== `${repository}!${number}`) continue;
     candidates.add(number);
-    if (candidates.size > 1) {
-      throw new Error("GitLab issue has multiple related merge requests in the configured project");
-    }
   }
-  return candidates.values().next().value ?? null;
+  return [...candidates].sort((left, right) => left - right);
+}
+
+function uniqueChangeNumber(numbers: readonly number[], message: string): number | null {
+  if (numbers.length > 1) throw new Error(message);
+  return numbers[0] ?? null;
+}
+
+function canonicalApiScope(value: URL): string {
+  const scope = new URL(value);
+  scope.username = "";
+  scope.password = "";
+  scope.search = "";
+  scope.hash = "";
+  scope.pathname = `${scope.pathname.replace(/\/+$/, "")}/`;
+  return scope.href;
+}
+
+function publicationKey(
+  provider: "github" | "gitlab",
+  apiScope: string,
+  repository: string,
+  kind: "comment" | "change-request" | "review",
+  id: string,
+): string {
+  return JSON.stringify([provider, apiScope, repository, kind, id]);
+}
+
+function activeBoundary(
+  snapshot: ProviderTicketSnapshot,
+  events: ReadonlyArray<{ kind: "add" | "remove"; createdAt: string }>,
+  ambiguities: string[],
+): "known" | "fresh" | "ambiguous" {
+  if (!snapshot.activation.present) return "known";
+  if (!snapshot.activation.occurredAt || !snapshot.activation.actor) {
+    ambiguities.push("activation boundary is unavailable");
+    return "ambiguous";
+  }
+  return events.some((event) => event.kind === "remove" && event.createdAt < snapshot.activation.occurredAt!)
+    ? "fresh"
+    : "known";
+}
+
+function withinActiveBoundary(
+  snapshot: ProviderTicketSnapshot,
+  boundary: "known" | "fresh" | "ambiguous",
+  createdAt: string,
+): boolean {
+  return snapshot.activation.present
+    && boundary !== "ambiguous"
+    && snapshot.activation.occurredAt !== null
+    && createdAt >= snapshot.activation.occurredAt;
 }
 
 function discoverySince(window: DiscoveryWindow): string {
