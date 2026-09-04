@@ -44,6 +44,7 @@ test("distinguishes unmarked, legacy, malformed, and duplicate markers", () => {
   assert.deepEqual(parsePublication(current.replace(" -->", "")), { kind: "invalid" });
   assert.deepEqual(parsePublication(`${current}\n${current}`), { kind: "invalid" });
   assert.deepEqual(parsePublication(`${current}\n<!-- agent-flow:v1 flow=x -->`), { kind: "invalid" });
+  assert.deepEqual(parsePublication(`<!-- agent-flow-control:v1 --> ${current}`), { kind: "invalid" });
 });
 
 test("ignores quoted and fenced examples while parsing standalone markers", () => {

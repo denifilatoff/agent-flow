@@ -52,6 +52,11 @@ export function parsePublication(body: string): ParsedPublication {
     }
     if (isQuotedExample(line)) continue;
 
+    const markerCount = (line.match(/<!-- agent-flow(?::|-control:)/g) ?? []).length;
+    if (markerCount > 1) {
+      candidates.push("invalid");
+      continue;
+    }
     if (line.includes("<!-- agent-flow:v1 flow=") || line.includes("<!-- agent-flow-control:")) {
       candidates.push(line.includes("<!-- agent-flow:v1 flow=") || line.includes("<!-- agent-flow-control:v1") ? "legacy" : "invalid");
       continue;
