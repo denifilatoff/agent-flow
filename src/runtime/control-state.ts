@@ -95,7 +95,7 @@ export function createControlWriter(
 
       const revision = stored ? stored.revision + 1 : 0;
       const aligned = control && control.sequence !== revision
-        ? { ...control, sequence: revision, updatedAt: now() }
+        ? { ...control, sequence: revision }
         : control;
       return store.save(scope, ref, stored?.revision ?? null, {
         controllerId,

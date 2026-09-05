@@ -321,6 +321,9 @@ async function readDecisionReview(
   }
   const lines = published.body.split(/\r?\n/);
   if (lines[0] !== reviewMarker) decisionTrust("provider review marker does not match the attempt");
+  if (!hasExpectedPublication(published.body, expected)) {
+    decisionTrust("provider review publication marker is invalid");
+  }
   const metadata = `<!-- agent-flow-review:v1 head=${pinned.headSha} verdict=${verdict} -->`;
   if (lines[1] !== metadata) decisionTrust("provider review metadata does not match the logical verdict");
   if (!sameReview(discovered, published)) decisionTrust("provider review changed during readback");

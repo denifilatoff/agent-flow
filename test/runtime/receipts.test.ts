@@ -763,6 +763,17 @@ test("rejects duplicate, stale, mismatched, or malformed review evidence", async
       }), provider), pattern);
     });
   }
+  await context.test("duplicate publication block", async () => {
+    const provider = new FakeProvider();
+    const body = `${marker("review")}\n`
+      + `<!-- agent-flow-review:v1 head=${HEAD_SHA} verdict=approved -->\n`
+      + marker("review");
+    provider.foundReview = review({ body });
+    provider.reviewReadback = review({ body });
+    await trustFailure(readDecision({ event: "review-approved" }, expectation({
+      stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
+    }), provider), /marker/);
+  });
 });
 
 test("rejects mismatched or unauthorized human source comments", async (context) => {

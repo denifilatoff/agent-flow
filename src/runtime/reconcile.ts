@@ -5,6 +5,7 @@ import type {
   AttemptSeries,
   ControlChangeRequest,
   ControlState,
+  FlowDefinition,
   FlowState,
   ResultContract,
 } from "../config/types.js";
@@ -99,10 +100,11 @@ export async function reconcileTicket(
 
   let snapshot: ProviderTicketSnapshot;
   if (dependencies.controllerId) {
-    const evidence = await providerCall(
+    const observedEvidence = await providerCall(
       "provider recovery evidence read failed",
       () => provider.readRecoveryEvidence(ref),
     );
+    const evidence = currentActivationEvidence(observedEvidence);
     snapshot = evidence.snapshot;
     assertSnapshot(snapshot, ref);
     let decision = classifyRecovery(evidence, dependencies.controllerId);
@@ -208,7 +210,15 @@ async function reconcileLocal(
     throw new Error("local execution belongs to another controller identity");
   }
   let control = stored?.value.control ?? null;
+  if (control
+    && (control.stateId === "done" || control.stateId === "cancelled")
+    && evidence.activeBoundary === "fresh"
+    && snapshot.activation.eventId !== null
+    && snapshot.activation.eventId !== control.activationEventId) {
+    control = null;
+  }
   const mergedWins = control?.stateId === "awaiting-merge" && snapshot.changeRequest?.state === "merged";
+  const localResume = control !== null && isMissingLocalResume(decision, snapshot, control);
 
   if (decision.kind === "inactive" && !mergedWins) {
     if (control && control.stateId !== "done" && control.stateId !== "cancelled") {
@@ -217,7 +227,7 @@ async function reconcileLocal(
     stored = await writer.recordRecovery!(ref, evidence, decision, control);
     return outcome(stored.value.control, control !== null, false, false);
   }
-  if (decision.kind === "ambiguous" || decision.kind === "foreign") {
+  if ((decision.kind === "ambiguous" && !localResume) || decision.kind === "foreign") {
     if (control && control.stateId !== "done" && control.stateId !== "cancelled") {
       await dependencies.launcher.cancel(control.flowInstanceId);
     }
@@ -232,6 +242,9 @@ async function reconcileLocal(
       () => dependencies.config.loadPinned(control!.configRevision),
     );
     assertBundle(bundle, control.configRevision);
+    if (bundle.flow.metadata.id !== control.flowId) {
+      throw new Error("control flow does not match pinned configuration");
+    }
     if (decision.owner && decision.owner.metadata.config !== control.configRevision) {
       const conflict: RecoveryDecision = {
         kind: "ambiguous",
@@ -252,8 +265,17 @@ async function reconcileLocal(
   }
   assertAllowed(bundle, ref);
 
+  if (localResume) {
+    if (!hasValidLocalResume(bundle.flow, control!)) {
+      stored = await writer.recordRecovery!(ref, evidence, decision, control);
+      return outcome(stored.value.control, false, false, false);
+    }
+    decision = { kind: decision.owner ? "reassess" : "resume", owner: decision.owner, reason: null };
+  }
+
   if (!control) {
-    const stage = evidence.activeBoundary === "fresh" ? bundle.flow.spec.initial : providerStage(snapshot);
+    const freshStart = evidence.activeBoundary === "fresh" && evidence.publications.length === 0;
+    const stage = freshStart ? bundle.flow.spec.initial : providerStage(snapshot);
     if (decision.kind === "resume" && evidence.activeBoundary !== "fresh" && stage !== bundle.flow.spec.initial) {
       await writer.recordRecovery!(ref, evidence, decision, null);
       return outcome(null, false, false);
@@ -277,7 +299,14 @@ async function reconcileLocal(
       }, null);
       return outcome(null, false, false, false);
     }
-    const timestamp = now(dependencies);
+    const iteration = recoveryIteration(bundle, evidence, stage, decision.owner?.metadata.controller ?? null);
+    if (iteration.kind === "ambiguous") {
+      stored = await writer.recordRecovery!(ref, evidence, {
+        kind: "ambiguous", owner: decision.owner, reason: iteration.reason,
+      }, null, iteration.baselineKeys);
+      return outcome(stored.value.control, false, false, false);
+    }
+    const timestamp = iteration.humanCutoff ?? now(dependencies);
     const recovered: ControlState = {
       apiVersion: "agent-flow/v1alpha1",
       kind: "ControlState",
@@ -296,9 +325,11 @@ async function reconcileLocal(
       humanGate: null,
       changeRequest: normalizedChange(snapshot.changeRequest),
     };
-    stored = await writer.recordRecovery!(ref, evidence, decision, recovered, decision.kind === "reassess" ? [] : undefined);
+    stored = await writer.recordRecovery!(ref, evidence, decision, recovered, iteration.baselineKeys);
     control = stored.value.control!;
   }
+
+  const observedKeys = markedObjectKeys(bundle, evidence);
 
   return reconcileControl(
     dependencies,
@@ -308,7 +339,7 @@ async function reconcileLocal(
     stored?.value.publicationKeys ?? evidence.publications.map(({ key }) => key),
     true,
     undefined,
-    evidence.publications.map(({ key }) => key),
+    observedKeys,
   );
 }
 
@@ -374,6 +405,181 @@ function providerStage(snapshot: ProviderTicketSnapshot): string {
   const stages = snapshot.labels.filter((label) => label.startsWith("agent-stage:"));
   if (stages.length !== 1) throw new Error("provider stage is missing or contradictory");
   return stages[0]!.slice("agent-stage:".length);
+}
+
+function currentActivationEvidence(evidence: RecoveryEvidence): RecoveryEvidence {
+  const occurredAt = evidence.snapshot.activation.occurredAt;
+  if (!evidence.snapshot.activation.present || occurredAt === null) return evidence;
+  const boundary = Date.parse(occurredAt);
+  if (!Number.isFinite(boundary)) {
+    return { ...evidence, ambiguities: [...evidence.ambiguities, "activation time is invalid"] };
+  }
+  return {
+    ...evidence,
+    publications: evidence.publications.filter((publication) => {
+      const publishedAt = Date.parse(publication.createdAt);
+      return !Number.isFinite(publishedAt) || publishedAt >= boundary;
+    }),
+  };
+}
+
+function isMissingLocalResume(
+  decision: RecoveryDecision,
+  snapshot: ProviderTicketSnapshot,
+  control: ControlState,
+): boolean {
+  if (decision.kind !== "ambiguous"
+    || (control.stateId !== "blocked" && control.stateId !== "needs-human")
+    || decision.reason !== `${control.stateId} resume target is unavailable`) return false;
+  return providerStage(snapshot) === control.stateId && control.resumeStateId !== null;
+}
+
+function hasValidLocalResume(flow: FlowDefinition, control: ControlState): boolean {
+  const paused = flow.spec.states[control.stateId];
+  const resumed = control.resumeStateId ? flow.spec.states[control.resumeStateId] : undefined;
+  const acceptsResume = Object.values(paused?.on ?? {}).some(({ target }) => target === "$resume");
+  return paused?.kind === "paused"
+    && acceptsResume
+    && resumed?.kind === "agent"
+    && Boolean(resumed.agent && resumed.resultContract);
+}
+
+type PublicationObjectKind = "comment" | "change-request" | "review";
+
+type RecoveryIteration =
+  | { kind: "ready"; baselineKeys: string[]; humanCutoff: string | null }
+  | { kind: "ambiguous"; baselineKeys: string[]; reason: string };
+
+function recoveryIteration(
+  bundle: ConfigBundle,
+  evidence: RecoveryEvidence,
+  stage: string,
+  ownerController: string | null,
+): RecoveryIteration {
+  const baselineKeys = markedObjectKeys(bundle, evidence);
+  const committed = successfulPublicationPath(bundle.flow, stage);
+  if (!committed) {
+    return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
+  }
+  const active = evidence.publications
+    .filter(({ metadata }) => ownerController === null || metadata.controller === ownerController)
+    .toSorted((left, right) =>
+      Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
+  const kinds = active.map((publication) => publicationObjectKind(publication.key, evidence.snapshot.ref, bundle));
+  if (kinds.some((kind) => kind === null) || !active.every(({ key }) => baselineKeys.includes(key))) {
+    return { kind: "ambiguous", baselineKeys, reason: "publication identity cannot be verified for the active work" };
+  }
+  if (committed.some((kind, index) => kinds[index] !== kind)) {
+    return { kind: "ambiguous", baselineKeys, reason: "published results do not justify the provider stage" };
+  }
+  const state = bundle.flow.spec.states[stage];
+  const candidateKind = state?.kind === "agent" ? resultPublicationKind(state.resultContract) : null;
+  let candidateKey: string | null = null;
+  if (active.length === committed.length + 1 && candidateKind && kinds.at(-1) === candidateKind) {
+    candidateKey = active.at(-1)!.key;
+  } else if (active.length !== committed.length) {
+    return { kind: "ambiguous", baselineKeys, reason: "current publication iteration cannot be isolated" };
+  }
+  return {
+    kind: "ready",
+    baselineKeys: baselineKeys.filter((key) => key !== candidateKey),
+    humanCutoff: committed.length === 0 ? null : active[committed.length - 1]!.createdAt,
+  };
+}
+
+function successfulPublicationPath(flow: FlowDefinition, target: string): PublicationObjectKind[] | null {
+  const queue: Array<{ stateId: string; kinds: PublicationObjectKind[]; visited: Set<string> }> = [{
+    stateId: flow.spec.initial,
+    kinds: [],
+    visited: new Set(),
+  }];
+  const matches: PublicationObjectKind[][] = [];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current.stateId === target) {
+      matches.push(current.kinds);
+      continue;
+    }
+    if (current.visited.has(current.stateId)) continue;
+    const state = flow.spec.states[current.stateId];
+    if (!state) continue;
+    const visited = new Set(current.visited).add(current.stateId);
+    for (const event of ["agent-succeeded", "review-approved", "human-approved", "change-request-merged"] as const) {
+      const transition = state.on?.[event];
+      if (!transition || transition.target === "$resume") continue;
+      const publication = event === "agent-succeeded"
+        ? resultPublicationKind(state.resultContract)
+        : event === "review-approved" ? "review" : null;
+      queue.push({
+        stateId: transition.target,
+        kinds: publication ? [...current.kinds, publication] : current.kinds,
+        visited,
+      });
+    }
+  }
+  if (matches.length !== 1) return null;
+  return matches[0]!;
+}
+
+function resultPublicationKind(result: ResultContract | undefined): PublicationObjectKind | null {
+  if (result === "assessment" || result === "plan") return "comment";
+  if (result === "development") return "change-request";
+  if (result === "review") return "review";
+  return null;
+}
+
+function markedObjectKeys(bundle: ConfigBundle, evidence: RecoveryEvidence): string[] {
+  const ref = evidence.snapshot.ref;
+  const keys = new Set<string>();
+  for (const candidate of evidence.snapshot.comments) {
+    if (parsePublication(candidate.body).kind !== "unmarked") {
+      keys.add(publicationObjectKey(bundle, ref, "comment", candidate.id));
+    }
+  }
+  for (const candidate of evidence.changes) {
+    if (parsePublication(candidate.body).kind !== "unmarked") {
+      keys.add(publicationObjectKey(bundle, ref, "change-request", String(candidate.number)));
+    }
+  }
+  for (const candidate of evidence.reviews) {
+    if (parsePublication(candidate.body).kind !== "unmarked") {
+      keys.add(publicationObjectKey(bundle, ref, "review", candidate.id));
+    }
+  }
+  return [...keys].sort();
+}
+
+function publicationObjectKey(
+  bundle: ConfigBundle,
+  ref: TicketRef,
+  kind: PublicationObjectKind,
+  id: string,
+): string {
+  const configured = bundle.controller.providers[ref.provider];
+  if (!configured) throw new Error("ticket provider is not configured");
+  const api = new URL(configured.apiUrl);
+  api.pathname = `${api.pathname.replace(/\/+$/, "")}/`;
+  api.search = "";
+  api.hash = "";
+  return JSON.stringify([ref.provider, api.href, ref.repository, kind, id]);
+}
+
+function publicationObjectKind(
+  key: string,
+  ref: TicketRef,
+  bundle: ConfigBundle,
+): PublicationObjectKind | null {
+  try {
+    const parsed = JSON.parse(key);
+    if (!Array.isArray(parsed) || parsed.length !== 5 || typeof parsed[3] !== "string" || typeof parsed[4] !== "string") {
+      return null;
+    }
+    const kind = parsed[3] as PublicationObjectKind;
+    if (!["comment", "change-request", "review"].includes(kind)) return null;
+    return key === publicationObjectKey(bundle, ref, kind, parsed[4]) ? kind : null;
+  } catch {
+    return null;
+  }
 }
 
 async function cancelLocalOutcome(

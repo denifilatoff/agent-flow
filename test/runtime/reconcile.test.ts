@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { inspect } from "node:util";
 
 import { loadConfigBundle, type ConfigBundle } from "../../src/config/load.ts";
@@ -390,6 +390,27 @@ function recoveryEvidence(
   };
 }
 
+function publicationKey(kind: "comment" | "change-request" | "review", id: string): string {
+  return JSON.stringify(["github", "https://api.github.com/", TICKET.repository, kind, id]);
+}
+
+async function localRuntime(t: TestContext, provider: FakeProvider, launcher = new FakeLauncher()) {
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-reconcile-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = openLocalStore(join(directory, "execution.sqlite"));
+  t.after(() => store.close());
+  const writer = createControlWriter(
+    store,
+    providerScope("github", "https://api.github.com"),
+    FLOW_1,
+    () => NOW,
+  );
+  const configured = dependencies(provider, launcher);
+  configured.controllerId = FLOW_1;
+  configured.writeControl = writer;
+  return { configured, launcher, writer };
+}
+
 function dependencies(provider = new FakeProvider(), launcher = new FakeLauncher()): ReconcileDependencies {
   return {
     provider,
@@ -684,7 +705,9 @@ test("a marked publication without local decision state is reassessed by the sta
   );
   const provider = new FakeProvider();
   const launcher = new FakeLauncher();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
   provider.snapshot.labels.push("agent-stage:assessment", "agent-flow:managed");
+  provider.snapshot.comments.push(comment("progress", `${marker}\nPublished work.`));
   provider.recoveryEvidence = recoveryEvidence(provider, [{
     key: JSON.stringify(["github", "https://api.github.com/", TICKET.repository, "comment", "progress"]),
     createdAt: "2026-08-26T11:30:00.000Z",
@@ -700,6 +723,188 @@ test("a marked publication without local decision state is reassessed by the sta
   assert.equal(launcher.requests.length, 1);
   assert.equal(launcher.requests[0]?.publicationKeys.length, 0);
   assert.equal(writer.load!(TICKET)?.value.control?.latestReceipt, null);
+});
+
+test("a proven fresh activation replaces a terminal local flow without removing activation", async (t) => {
+  const provider = new FakeProvider();
+  provider.snapshot.activation = {
+    present: true,
+    eventId: "804",
+    actor: MAINTAINER,
+    occurredAt: "2026-08-26T11:50:00.000Z",
+  };
+  provider.snapshot.labels.push("agent-stage:done", "agent-flow:managed");
+  provider.recoveryEvidence = recoveryEvidence(provider, [], { activeBoundary: "fresh" });
+  const runtime = await localRuntime(t, provider);
+  await runtime.writer(TICKET, null, controlState({ stateId: "done" }));
+
+  const result = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(result.flowInstanceId, FLOW_2);
+  assert.equal(result.stateId, "assessment");
+  assert.equal(runtime.launcher.requests.length, 1);
+  assert.equal(runtime.writer.load!(TICKET)?.value.control?.activationEventId, "804");
+  assert.ok(provider.snapshot.labels.includes("agent-flow:development"));
+  assert.ok(provider.snapshot.labels.includes("agent-stage:assessment"));
+});
+
+test("local needs-human and blocked resume context overrides only missing-context ambiguity", async (t) => {
+  await t.test("needs-human", async (context) => {
+    const provider = new FakeProvider();
+    const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+    const question = comment("closed-question", `${marker}\nPlease answer.`, MAINTAINER, "2026-08-26T10:30:00.000Z");
+    const answer = comment("answer", "Proceed.", MAINTAINER, "2026-08-26T10:40:00.000Z");
+    provider.snapshot.labels.push("agent-stage:needs-human", "agent-flow:managed");
+    provider.snapshot.comments.push(question, answer);
+    provider.recoveryEvidence = recoveryEvidence(provider, [{
+      key: publicationKey("comment", question.id),
+      createdAt: question.createdAt,
+      metadata: { config: SHA, controller: FLOW_1 },
+    }]);
+    const runtime = await localRuntime(context, provider);
+    await runtime.writer(TICKET, null, controlState({
+      stateId: "needs-human",
+      resumeStateId: "assessment",
+      attemptSeries: attemptSeries(),
+      latestReceipt: questionReceipt(),
+    }));
+
+    const result = await reconcileTicket(runtime.configured, TICKET);
+
+    assert.equal(result.runnable, true);
+    assert.equal(runtime.launcher.requests.length, 1);
+    assert.equal(runtime.launcher.requests[0]?.mode, "human-input");
+    assert.equal(runtime.launcher.requests[0]?.sourceComment?.id, answer.id);
+  });
+
+  await t.test("blocked", async (context) => {
+    const provider = new FakeProvider();
+    const answer = comment("retry", "Please retry.", MAINTAINER, "2026-08-26T11:00:00.000Z");
+    provider.snapshot.labels.push("agent-stage:blocked", "agent-flow:managed");
+    provider.snapshot.comments.push(answer);
+    provider.recoveryEvidence = recoveryEvidence(provider, []);
+    const runtime = await localRuntime(context, provider);
+    await runtime.writer(TICKET, null, controlState({
+      stateId: "blocked",
+      resumeStateId: "assessment",
+      attemptSeries: attemptSeries({ consumed: 3, current: {
+        attemptId: ATTEMPT,
+        status: "failed",
+        startedAt: "2026-08-26T10:30:00.000Z",
+        finishedAt: "2026-08-26T10:45:00.000Z",
+        error: { code: "ATTEMPTS_EXHAUSTED", message: "retry budget exhausted" },
+      } }),
+    }));
+
+    const result = await reconcileTicket(runtime.configured, TICKET);
+
+    assert.equal(result.stateId, "assessment");
+    assert.equal(runtime.launcher.requests.length, 1);
+    assert.equal(runtime.launcher.requests[0]?.control.attemptSeries?.consumed, 0);
+  });
+
+  await t.test("unrelated ambiguity remains blocking", async (context) => {
+    const provider = new FakeProvider();
+    provider.snapshot.labels.push("agent-stage:needs-human", "agent-flow:managed");
+    provider.recoveryEvidence = recoveryEvidence(provider, [], { complete: false });
+    const runtime = await localRuntime(context, provider);
+    await runtime.writer(TICKET, null, controlState({
+      stateId: "needs-human",
+      resumeStateId: "assessment",
+      attemptSeries: attemptSeries(),
+    }));
+
+    const result = await reconcileTicket(runtime.configured, TICKET);
+
+    assert.equal(result.runnable, false);
+    assert.equal(runtime.launcher.requests.length, 0);
+    assert.equal(runtime.writer.load!(TICKET)?.value.disposition, "ambiguous");
+  });
+});
+
+test("reset reassessment isolates the current stage publication from earlier results", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const assessment = comment("assessment", `${marker}\nAssessment.`, MAINTAINER, "2026-08-26T10:30:00.000Z");
+  const plan = comment("plan", `${marker}\nPlan.`, MAINTAINER, "2026-08-26T11:30:00.000Z");
+  provider.snapshot.labels.push("agent-stage:planning", "agent-flow:managed");
+  provider.snapshot.comments.push(assessment, plan);
+  provider.recoveryEvidence = recoveryEvidence(provider, [assessment, plan].map((published) => ({
+    key: publicationKey("comment", published.id),
+    createdAt: published.createdAt,
+    metadata: { config: SHA, controller: FLOW_1 },
+  })));
+  const runtime = await localRuntime(t, provider);
+
+  const result = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(result.stateId, "planning");
+  assert.equal(runtime.launcher.requests.length, 1);
+  assert.deepEqual(runtime.launcher.requests[0]?.publicationKeys, [publicationKey("comment", assessment.id)]);
+});
+
+test("reset baseline excludes publications from an earlier activation", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const old = comment("old-assessment", `${marker}\nOld assessment.`, MAINTAINER, "2026-08-26T10:30:00.000Z");
+  provider.snapshot.activation = {
+    present: true,
+    eventId: "804",
+    actor: MAINTAINER,
+    occurredAt: "2026-08-26T11:00:00.000Z",
+  };
+  provider.snapshot.labels.push("agent-stage:assessment", "agent-flow:managed");
+  provider.snapshot.comments.push(old);
+  provider.recoveryEvidence = recoveryEvidence(provider, [], { activeBoundary: "fresh" });
+  const runtime = await localRuntime(t, provider);
+
+  await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(runtime.launcher.requests.length, 1);
+  assert.deepEqual(runtime.launcher.requests[0]?.publicationKeys, [publicationKey("comment", old.id)]);
+});
+
+test("reset pauses when the current publication iteration cannot be isolated", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const publications = ["assessment", "plan-one", "plan-two"].map((id, index) =>
+    comment(id, `${marker}\n${id}`, MAINTAINER, `2026-08-26T1${index}:30:00.000Z`));
+  provider.snapshot.labels.push("agent-stage:planning", "agent-flow:managed");
+  provider.snapshot.comments.push(...publications);
+  provider.recoveryEvidence = recoveryEvidence(provider, publications.map((published) => ({
+    key: publicationKey("comment", published.id),
+    createdAt: published.createdAt,
+    metadata: { config: SHA, controller: FLOW_1 },
+  })));
+  const runtime = await localRuntime(t, provider);
+
+  const result = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(result.runnable, false);
+  assert.equal(runtime.launcher.requests.length, 0);
+  assert.equal(runtime.writer.load!(TICKET)?.value.disposition, "ambiguous");
+});
+
+test("reset human cutoff processes an authorized answer after the committed result", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const assessment = comment("assessment", `${marker}\nAssessment.`, MAINTAINER, "2026-08-26T10:30:00.000Z");
+  const answer = comment("answer", "Approved.", MAINTAINER, "2026-08-26T10:40:00.000Z");
+  provider.snapshot.labels.push("agent-stage:assessment-review", "agent-flow:managed");
+  provider.snapshot.comments.push(assessment, answer);
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+    key: publicationKey("comment", assessment.id),
+    createdAt: assessment.createdAt,
+    metadata: { config: SHA, controller: FLOW_1 },
+  }]);
+  const runtime = await localRuntime(t, provider);
+
+  const result = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(result.stateId, "assessment-review");
+  assert.equal(runtime.launcher.requests.length, 1);
+  assert.equal(runtime.launcher.requests[0]?.mode, "human-input");
+  assert.equal(runtime.launcher.requests[0]?.sourceComment?.id, answer.id);
 });
 
 test("an inactive ticket without local work does not create or launch a flow", async () => {
