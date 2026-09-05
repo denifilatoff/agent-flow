@@ -158,6 +158,9 @@ test("C17 reads complete recovery evidence from paginated comments, linked pulls
     .add("GET", "repos/owner/repo/pulls/31", {
       data: { ...fixture.pull, updated_at: "2026-08-25T10:01:00Z" },
     })
+    .add("POST", "graphql", {
+      data: { data: { repository: { pullRequest: { lastEditedAt: null } } } },
+    })
     .add("GET", "repos/owner/repo/pulls/32", { data: fixture.secondPull })
     .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", { data: [fixture.recoveryReview] })
     .add("GET", "repos/owner/repo/pulls/32/reviews?per_page=100", { data: [] })
@@ -182,7 +185,35 @@ test("C17 reads complete recovery evidence from paginated comments, linked pulls
   assert.ok(evidence.ambiguities.some((value) => value.includes("multiple linked")));
   assert.ok(client.calls.some(({ path }) => path.endsWith("collaborators/developer/permission")));
   assert.ok(client.calls.some(({ path }) => path.endsWith("collaborators/reviewer/permission")));
+  assert.equal(client.calls.filter(({ path }) => path === "graphql").length, 1);
   assert.ok(client.calls.every(({ priority }) => priority === "active"));
+});
+
+test("rejects a GitHub pull request whose publication marker was added after creation", async () => {
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", { data: fixture.timelineSecond })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/pulls/31", {
+      data: { ...fixture.pull, updated_at: "2026-08-25T10:01:00Z" },
+    })
+    .add("POST", "graphql", {
+      data: { data: { repository: { pullRequest: { lastEditedAt: "2026-08-25T10:01:00Z" } } } },
+    })
+    .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } })
+    .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "push" } });
+
+  const evidence = await adapter(client).readRecoveryEvidence({
+    provider: "github",
+    repository: REPOSITORY,
+    number: 17,
+  });
+
+  assert.equal(evidence.publications.some(({ key }) => key.includes("change-request")), false);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("publication provenance")));
+  assert.equal(client.calls.filter(({ path }) => path === "graphql").length, 1);
 });
 
 test("marks a first activation without managed or stage history as fresh", async () => {

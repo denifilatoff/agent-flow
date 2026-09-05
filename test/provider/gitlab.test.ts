@@ -210,6 +210,36 @@ test("C17 reads complete recovery evidence from paginated notes, linked merge re
   assert.ok(client.calls.every(({ priority }) => priority === "active"));
 });
 
+test("rejects a GitLab merge request whose publication marker was added after creation", async () => {
+  const notePath = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: fixture.labelEventsSecond })
+    .add("GET", notePath, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: fixture.relatedMergeRequests })
+    .add("GET", `${PROJECT}/merge_requests/41`, {
+      data: { ...fixture.mergeRequest, updated_at: "2026-08-25T10:01:00.000Z" },
+    })
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, {
+      data: [{
+        id: 999,
+        body: "changed the description",
+        system: true,
+        author: { id: 6, username: "developer" },
+        created_at: "2026-08-25T10:01:00.000Z",
+        updated_at: "2026-08-25T10:01:00.000Z",
+      }],
+    })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.publications.some(({ key }) => key.includes("change-request")), false);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("publication provenance")));
+});
+
 test("marks a first activation without managed or stage history as fresh", async () => {
   const issue = {
     ...(fixture.issue as Record<string, unknown>),

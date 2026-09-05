@@ -102,7 +102,12 @@ function resolveProviderUrl(path: string, apiBase: URL): URL {
   if (url.origin !== apiBase.origin) throw new Error("request path must use the same provider origin");
   const apiRoot = apiBase.pathname.slice(0, -1);
   if (url.pathname !== apiRoot && !url.pathname.startsWith(apiBase.pathname)) {
-    throw new Error("request path must remain under the configured provider API prefix");
+    const githubEnterpriseGraphql = apiBase.pathname.endsWith("/api/v3/")
+      && path === "../graphql"
+      && url.pathname === new URL("../graphql", apiBase).pathname;
+    if (!githubEnterpriseGraphql) {
+      throw new Error("request path must remain under the configured provider API prefix");
+    }
   }
   return url;
 }

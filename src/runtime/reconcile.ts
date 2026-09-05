@@ -329,6 +329,9 @@ async function reconcileLocal(
     };
     stored = await writer.recordRecovery!(ref, evidence, decision, recovered, iteration.baselineKeys);
     control = stored.value.control!;
+  } else if (!dependencies.launcher.isRunning(control.flowInstanceId)) {
+    stored = await writer.recordRecovery!(ref, evidence, decision, control);
+    control = stored.value.control!;
   }
 
   const observedKeys = markedObjectKeys(bundle, evidence);

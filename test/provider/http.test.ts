@@ -180,3 +180,15 @@ test("rejects same-origin paths outside the configured API prefix", async () => 
   }
   assert.equal(requests.length, 0);
 });
+
+test("allows only the GitHub Enterprise GraphQL sibling of an API v3 base", async () => {
+  const { client, requests } = harness(
+    [Response.json({ data: {} })],
+    new URL("https://github.enterprise.test/api/v3"),
+  );
+
+  await client.request({ path: "../graphql", method: "POST", priority: "active", body: { query: "query{}" } });
+
+  assert.equal(requests[0]!.url, "https://github.enterprise.test/api/graphql");
+  assert.equal(requests[0]!.headers.get("authorization"), "Bearer secret");
+});

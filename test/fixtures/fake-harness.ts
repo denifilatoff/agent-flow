@@ -56,6 +56,7 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
       method: "POST",
       headers: { "content-type": "application/json", "x-fixture-target": target },
       body: JSON.stringify({ ...context, publicationMarker }),
+      signal: cancellation.abortSignal,
     });
     if (!response.ok) {
       console.error(await response.text());
@@ -96,18 +97,25 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function waitForCancellation(recordCancellation: () => void): { signal: Promise<void>; close(): void } {
+function waitForCancellation(recordCancellation: () => void): {
+  signal: Promise<void>;
+  abortSignal: AbortSignal;
+  close(): void;
+} {
   let resolveSignal!: () => void;
   const signal = new Promise<void>((resolve) => { resolveSignal = resolve; });
+  const abort = new AbortController();
   const keepAlive = setInterval(() => undefined, 1_000);
   const onSignal = () => {
     clearInterval(keepAlive);
     recordCancellation();
+    abort.abort();
     resolveSignal();
   };
   process.once("SIGTERM", onSignal);
   return {
     signal,
+    abortSignal: abort.signal,
     close() {
       clearInterval(keepAlive);
       process.removeListener("SIGTERM", onSignal);

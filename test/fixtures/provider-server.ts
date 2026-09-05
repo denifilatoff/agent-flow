@@ -85,7 +85,7 @@ export interface CollisionResult {
   loserDisposition: string | null;
   duplicateCommentsDeleted: number;
   extraOwnershipReadsBeforePublication: number;
-  requestLog: Array<{ method: string; path: string; phase: string }>;
+  requestLog: Array<{ method: string; path: string; phase: string; installation: string | null }>;
 }
 
 export interface FixtureRun {
@@ -224,8 +224,8 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     AGENT_FLOW_DATA_DIRECTORY: dataDirectory,
     AGENT_FLOW_CONTROLLER_CONFIG: controllerPath,
     AGENT_FLOW_HEALTH_PORT: String(address.port + 1),
-    GH_ENTERPRISE_TOKEN: "fixture",
-    GITLAB_TOKEN: "fixture",
+    GH_ENTERPRISE_TOKEN: "fixture-a",
+    GITLAB_TOKEN: "fixture-a",
     CODEX_HOME: join(home, ".codex"),
     CLAUDE_CONFIG_DIR: join(home, ".claude"),
   };
@@ -321,6 +321,8 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
         AGENT_FLOW_HEALTH_PORT: String(address.port + 2),
         CODEX_HOME: join(competitorHome, ".codex"),
         CLAUDE_CONFIG_DIR: join(competitorHome, ".claude"),
+        GH_ENTERPRISE_TOKEN: "fixture-b",
+        GITLAB_TOKEN: "fixture-b",
       });
       await waitFor(() => state.currentPublications().length === 2);
 
@@ -329,42 +331,53 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
         { name: "b", running: competitor, data: competitorData },
       ];
       const publications = state.currentPublications();
+      const publicationBaseline = publications.map(({ key }) => key).sort();
       const owner = electOwner(publications)!;
       const scope = providerScope(provider, state.apiUrl);
       const publicationControllers = publications
         .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt) || left.key.localeCompare(right.key))
         .map(({ metadata }) => metadata.controller);
-      const byController = new Map(await Promise.all(installations.map(async (installation) => [
-        (await readFile(join(installation.data, "controller-id"), "utf8")).trim(),
-        installation,
-      ] as const)));
+      const identified = await Promise.all(installations.map(async (installation) => ({
+        ...installation,
+        id: (await readFile(join(installation.data, "controller-id"), "utf8")).trim(),
+      })));
+      const byController = new Map(identified.map((installation) => [installation.id, installation]));
       const loserId = publicationControllers.find((id) => id !== owner.metadata.controller)!;
       const loserAttemptId = state.raceAttemptId(loserId);
       const loserInstallation = byController.get(loserId)!;
       const reconcileOrder = publicationControllers.toReversed().map((id) => byController.get(id)!);
+      let loserObservedAt = -1;
       for (const installation of reconcileOrder) {
         state.phase = `reconcile-${installation.name}`;
         await installation.running.ready.controller.reconcileNow(state.ref);
+        if (installation.id === loserId) loserObservedAt = state.requestLog.length;
       }
-      const ownerSeenByA = electOwner(publications)?.metadata.controller ?? null;
-      const ownerSeenByB = electOwner(publications.toReversed())?.metadata.controller ?? null;
-      const loserDisposition = loserInstallation.running.ready.store.load(scope, state.ref)?.value.disposition ?? null;
       const loserPhase = `reconcile-${loserInstallation.name}`;
-      const writes = state.requestLog.filter(({ phase, method, path }) =>
-        phase === loserPhase && method !== "GET" && path.startsWith("/api/"));
       const firstPublish = state.requestLog.findIndex(({ method }) => method === "PUBLISH");
       const readsBeforePublish = state.requestLog.slice(0, firstPublish)
         .filter(({ method, path }) => method === "GET" && path.endsWith(`/issues/${state.number}/comments`)).length;
-      const duplicatesBeforeRelease = state.currentPublications().length;
       state.phase = "release";
       state.releaseRace();
+      await waitFor(() => state.activeAttempts.size === 0);
+      const ownerInstallation = byController.get(owner.metadata.controller)!;
+      await waitFor(() => ownerInstallation.running.ready.store.load(scope, state.ref)?.value.owner?.controllerId
+        === owner.metadata.controller);
+      const ownerSeenByA = identified[0]!.running.ready.store.load(scope, state.ref)?.value.owner?.controllerId ?? null;
+      const ownerSeenByB = identified[1]!.running.ready.store.load(scope, state.ref)?.value.owner?.controllerId ?? null;
+      const loserDisposition = loserInstallation.running.ready.store.load(scope, state.ref)?.value.disposition ?? null;
+      const writes = state.requestLog.filter(({ phase, installation, method, path }, index) =>
+        method !== "GET" && path.startsWith("/api/") && installation === loserInstallation.name
+        && (phase === loserPhase || index >= loserObservedAt));
+      const remainingPublications = state.currentPublications().map(({ key }) => key).sort();
+      assert.deepEqual(remainingPublications, publicationBaseline);
+      assert.equal(remainingPublications.length, 2);
       return {
         ownerSeenByA,
         ownerSeenByB,
         loserCancelled: state.cancelledAttempts.has(loserAttemptId),
         loserWritesAfterObservation: writes.length,
         loserDisposition,
-        duplicateCommentsDeleted: duplicatesBeforeRelease - state.currentPublications().length,
+        duplicateCommentsDeleted: publicationBaseline.length - remainingPublications.length,
         extraOwnershipReadsBeforePublication: Math.max(0, readsBeforePublish - 2),
         requestLog: [...state.requestLog],
       };
@@ -462,7 +475,7 @@ class FixtureState {
   readonly cancelledAttempts = new Set<string>();
   readonly readyAttempts = new Set<string>();
   readonly routing: Array<Omit<RoutingEvent, "kind">> = [];
-  readonly requestLog: Array<{ method: string; path: string; phase: string }> = [];
+  readonly requestLog: Array<{ method: string; path: string; phase: string; installation: string | null }> = [];
   readonly labelEvents: LabelEvent[] = [];
   labels = ["agent-flow:development"];
   open = true;
@@ -558,13 +571,21 @@ class FixtureState {
 
   async handle(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", this.origin);
-    this.requestLog.push({ method: request.method ?? "GET", path: url.pathname, phase: this.phase });
+    this.requestLog.push({
+      method: request.method ?? "GET",
+      path: url.pathname,
+      phase: this.phase,
+      installation: this.installation(request),
+    });
     const body = await requestBody(request);
     if (url.pathname === "/__fixture/attempt" && request.method === "POST") {
       return this.attempt(body as AttemptContext, request.headers["x-fixture-target"], response);
     }
     if (url.pathname === "/__fixture/cancelled" && request.method === "POST") {
-      this.cancelledAttempts.add(String((body as { attemptId: string }).attemptId));
+      const attemptId = String((body as { attemptId: string }).attemptId);
+      this.cancelledAttempts.add(attemptId);
+      this.activeAttempts.delete(attemptId);
+      this.readyAttempts.delete(attemptId);
       return json(response, 200, { ok: true });
     }
     if (url.pathname === "/__fixture/completed" && request.method === "POST") {
@@ -598,12 +619,21 @@ class FixtureState {
   }
 
   private validProviderHeaders(request: import("node:http").IncomingMessage): boolean {
-    if (request.headers.authorization !== "Bearer fixture") return false;
+    if (this.installation(request) === null) return false;
     if (this.provider === "github") {
       return request.headers.accept === "application/vnd.github+json"
         && request.headers["x-github-api-version"] === "2022-11-28";
     }
     return request.headers.accept === "application/json";
+  }
+
+  private installation(request: import("node:http").IncomingMessage): string | null {
+    switch (request.headers.authorization) {
+      case "Bearer fixture":
+      case "Bearer fixture-a": return "a";
+      case "Bearer fixture-b": return "b";
+      default: return null;
+    }
   }
 
   private attempt(
@@ -626,7 +656,12 @@ class FixtureState {
       this.#raceParticipants -= 1;
       if (this.#raceParticipants === 0) {
         for (const participant of this.#raceResponses) {
-          this.requestLog.push({ method: "PUBLISH", path: this.commentUrl("new"), phase: "publication" });
+          this.requestLog.push({
+            method: "PUBLISH",
+            path: this.commentUrl("new"),
+            phase: "publication",
+            installation: null,
+          });
           this.publish(participant.context, participant.context.controlState.attemptSeries!.current!.attemptId);
         }
       }
@@ -741,6 +776,9 @@ class FixtureState {
 
   private github(method: string, url: URL, body: unknown, response: import("node:http").ServerResponse): void {
     const path = url.pathname.slice("/api/github/".length);
+    if (method === "POST" && path === "graphql") {
+      return json(response, 200, { data: { repository: { pullRequest: { lastEditedAt: null } } } });
+    }
     if (method === "GET" && path === "user") return json(response, 200, { id: 51, login: "controller" });
     if (method === "GET" && path === `repos/${this.repository}`) return json(response, 200, this.githubRepository());
     if (method === "GET" && path === `repos/${this.repository}/issues`) return json(response, 200, this.listIssue(url));

@@ -299,6 +299,7 @@ export function createGitLabAdapter(
         createdAt: string,
         updatedAt: string | null,
         actor: Actor,
+        provenanceAvailable = true,
       ): Promise<void> => {
         const key = publicationKey("gitlab", apiScope, ref.repository, kind, id);
         if (!withinActiveBoundary(data.snapshot, boundary, createdAt)) return;
@@ -313,7 +314,8 @@ export function createGitLabAdapter(
         }
         if (parsed.kind !== "current") return;
         const metadata = parsed.metadata;
-        if (kind !== "change-request" && updatedAt !== null && updatedAt !== createdAt) {
+        if ((kind !== "change-request" && updatedAt !== null && updatedAt !== createdAt)
+          || !provenanceAvailable) {
           ambiguities.push(`publication provenance is unavailable: ${key}`);
           return;
         }
@@ -326,8 +328,23 @@ export function createGitLabAdapter(
       for (const comment of data.snapshot.comments) {
         await addPublication("comment", comment.id, comment.body, comment.createdAt, comment.updatedAt, comment.actor);
       }
-      for (const change of changes) {
-        await addPublication("change-request", String(change.number), change.body, change.createdAt, change.updatedAt, change.actor);
+      for (const { change, values } of reviewRows) {
+        const marked = parsePublication(change.body).kind === "current";
+        const descriptionWasEdited = marked && change.updatedAt !== change.createdAt
+          && values.some((value) => {
+            const row = object(value, "GitLab merge request note");
+            return row.system === true
+              && optionalString(row.body, "GitLab merge request system note body") === "changed the description";
+          });
+        await addPublication(
+          "change-request",
+          String(change.number),
+          change.body,
+          change.createdAt,
+          change.updatedAt,
+          change.actor,
+          !descriptionWasEdited,
+        );
       }
       const reviews: NormalizedReview[] = [];
       for (const { change, values } of reviewRows) {

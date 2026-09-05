@@ -114,6 +114,26 @@ export function createGitHubAdapter(
     return normalizePull(response.data, ref.repository);
   }
 
+  async function githubDescriptionWasEdited(ref: TicketRef, number: number): Promise<boolean> {
+    const [owner, name] = ref.repository.split("/") as [string, string];
+    const response = object((await request(
+      apiBase.pathname.endsWith("/api/v3/") ? "../graphql" : "graphql",
+      "active",
+      {
+        method: "POST",
+        body: {
+          query: "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){lastEditedAt}}}",
+          variables: { owner, name, number },
+        },
+      },
+    )).data, "GitHub GraphQL response");
+    if (response.errors !== undefined) throw new Error("GitHub pull request edit history is unavailable");
+    const data = object(response.data, "GitHub GraphQL data");
+    const repository = object(data.repository, "GitHub GraphQL repository");
+    const pull = object(repository.pullRequest, "GitHub GraphQL pull request");
+    return optionalString(pull.lastEditedAt, "GitHub pull request lastEditedAt") !== "";
+  }
+
   async function readSnapshotData(ref: TicketRef) {
     const path = ticketPath(ref);
     const repository = await readRepository(ref.repository);
@@ -275,6 +295,7 @@ export function createGitHubAdapter(
         createdAt: string,
         updatedAt: string | null,
         actor: Actor,
+        provenanceAvailable = true,
       ): Promise<void> => {
         const key = publicationKey("github", apiScope, canonicalRepository, kind, id);
         if (!withinActiveBoundary(data.snapshot, boundary, createdAt)) return;
@@ -289,7 +310,8 @@ export function createGitHubAdapter(
         }
         if (parsed.kind !== "current") return;
         const metadata = parsed.metadata;
-        if (kind !== "change-request" && updatedAt !== null && updatedAt !== createdAt) {
+        if ((kind !== "change-request" && updatedAt !== null && updatedAt !== createdAt)
+          || !provenanceAvailable) {
           ambiguities.push(`publication provenance is unavailable: ${key}`);
           return;
         }
@@ -303,7 +325,18 @@ export function createGitHubAdapter(
         await addPublication("comment", comment.id, comment.body, comment.createdAt, comment.updatedAt, comment.actor);
       }
       for (const change of changes) {
-        await addPublication("change-request", String(change.number), change.body, change.createdAt, change.updatedAt, change.actor);
+        const marked = parsePublication(change.body).kind === "current";
+        const provenanceAvailable = !marked || change.updatedAt === change.createdAt
+          || !await githubDescriptionWasEdited(ref, change.number);
+        await addPublication(
+          "change-request",
+          String(change.number),
+          change.body,
+          change.createdAt,
+          change.updatedAt,
+          change.actor,
+          provenanceAvailable,
+        );
       }
       const reviews: NormalizedReview[] = [];
       for (const { change, values } of reviewRows) {
