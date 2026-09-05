@@ -32,8 +32,17 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
     ticket: { repository: { cloneRoot: string } };
     controlState: { attemptSeries: { agentId: string; current: { attemptId: string } } };
   };
+  const prompt = await readStdin();
+  const publicationMarker = prompt.match(/<!-- agent-flow:v1 \{"config":"[a-f0-9]{40}","controller":"[a-f0-9-]{36}"\} -->/)?.[0];
+  if (!publicationMarker) return 2;
   const endpoint = new URL("/__fixture/attempt", context.ticket.repository.cloneRoot);
-  const cancellation = waitForCancellation();
+  const cancellation = waitForCancellation(() => {
+    void fetch(new URL("/__fixture/cancelled", endpoint), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ attemptId: context.controlState.attemptSeries.current.attemptId }),
+    }).catch(() => undefined);
+  });
   let completion: Promise<unknown> | undefined;
   const completed = () => completion ??= fetch(new URL("/__fixture/completed", endpoint), {
     method: "POST",
@@ -46,7 +55,7 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json", "x-fixture-target": target },
-      body: JSON.stringify(context),
+      body: JSON.stringify({ ...context, publicationMarker }),
     });
     if (!response.ok) {
       console.error(await response.text());
@@ -65,7 +74,7 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
       const late = await fetch(new URL("/__fixture/late", endpoint), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(context),
+        body: JSON.stringify({ ...context, publicationMarker }),
       });
       if (!late.ok) throw new Error(await late.text());
       const published = await late.json() as { decision: unknown };
@@ -81,12 +90,19 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
   }
 }
 
-function waitForCancellation(): { signal: Promise<void>; close(): void } {
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function waitForCancellation(recordCancellation: () => void): { signal: Promise<void>; close(): void } {
   let resolveSignal!: () => void;
   const signal = new Promise<void>((resolve) => { resolveSignal = resolve; });
   const keepAlive = setInterval(() => undefined, 1_000);
   const onSignal = () => {
     clearInterval(keepAlive);
+    recordCancellation();
     resolveSignal();
   };
   process.once("SIGTERM", onSignal);

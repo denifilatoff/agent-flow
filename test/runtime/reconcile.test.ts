@@ -534,7 +534,7 @@ test("ignores an activation by an actor below write permission", async () => {
   assert.ok(!provider.snapshot.labels.includes("agent-flow:managed"));
 });
 
-test("foreign ownership cancels local work and performs no provider mutation", async () => {
+test("C18/C20 foreign ownership after identity loss cancels local work without provider mutation", async () => {
   const provider = new FakeProvider();
   const launcher = new FakeLauncher();
   installControl(provider, controlState());
@@ -581,7 +581,7 @@ test("foreign ownership still cancels local work when recording fails", async ()
   assert.equal(provider.events.includes("provider:set-labels"), false);
 });
 
-test("a missing winning configuration pauses without falling back to current configuration", async () => {
+test("C12 a missing winning configuration pauses without falling back to current configuration", async () => {
   const provider = new FakeProvider();
   const launcher = new FakeLauncher();
   provider.snapshot.labels.push("agent-stage:assessment");
@@ -633,7 +633,7 @@ test("a stage missing from the winning flow pauses without a provider mutation",
   assert.equal(provider.events.includes("provider:set-labels"), false);
 });
 
-test("reassessment does not fabricate a flow transition before local recovery is available", async () => {
+test("C4 reassessment does not fabricate a flow transition before local recovery is available", async () => {
   const provider = new FakeProvider();
   const launcher = new FakeLauncher();
   provider.snapshot.labels.push("agent-stage:assessment");
@@ -734,6 +734,7 @@ test("a proven fresh activation replaces a terminal local flow without removing 
     occurredAt: "2026-08-26T11:50:00.000Z",
   };
   provider.snapshot.labels.push("agent-stage:done", "agent-flow:managed");
+  provider.snapshot.changeRequest = changeRequest({ state: "merged" });
   provider.recoveryEvidence = recoveryEvidence(provider, [], { activeBoundary: "fresh" });
   const runtime = await localRuntime(t, provider);
   await runtime.writer(TICKET, null, controlState({ stateId: "done" }));
@@ -744,6 +745,7 @@ test("a proven fresh activation replaces a terminal local flow without removing 
   assert.equal(result.stateId, "assessment");
   assert.equal(runtime.launcher.requests.length, 1);
   assert.equal(runtime.writer.load!(TICKET)?.value.control?.activationEventId, "804");
+  assert.equal(runtime.writer.load!(TICKET)?.value.control?.changeRequest, null);
   assert.ok(provider.snapshot.labels.includes("agent-flow:development"));
   assert.ok(provider.snapshot.labels.includes("agent-stage:assessment"));
 });
@@ -780,7 +782,7 @@ test("a proven fresh activation replaces nonterminal local state from an older a
   assert.equal(runtime.launcher.requests.length, 1);
 });
 
-test("local needs-human and blocked resume context overrides only missing-context ambiguity", async (t) => {
+test("C6/C16 local needs-human and blocked resume context overrides only missing-context ambiguity", async (t) => {
   await t.test("needs-human", async (context) => {
     const provider = new FakeProvider();
     const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
@@ -919,7 +921,7 @@ test("reset reassessment isolates a current result when its provider kind is dis
   ]);
 });
 
-test("reset pauses when assessment feedback makes a plan candidate indistinguishable", async (t) => {
+test("C8 reset pauses when assessment feedback makes a plan candidate indistinguishable", async (t) => {
   for (const includePlan of [false, true]) {
     await t.test(includePlan ? "real plan is present" : "only revised assessment is present", async (context) => {
       const provider = new FakeProvider();
@@ -995,7 +997,7 @@ test("reset pauses when the current publication iteration cannot be isolated", a
   assert.equal(runtime.writer.load!(TICKET)?.value.disposition, "ambiguous");
 });
 
-test("reset human cutoff processes an authorized answer after the committed result", async (t) => {
+test("C7 reset human cutoff processes an authorized answer after the committed result", async (t) => {
   const provider = new FakeProvider();
   const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
   const assessment = comment("assessment", `${marker}\nAssessment.`, MAINTAINER, "2026-08-26T10:30:00.000Z");
@@ -1017,7 +1019,7 @@ test("reset human cutoff processes an authorized answer after the committed resu
   assert.equal(runtime.launcher.requests[0]?.sourceComment?.id, answer.id);
 });
 
-test("an inactive ticket without local work does not create or launch a flow", async () => {
+test("C14 an inactive ticket without local work does not create or launch a flow", async () => {
   const provider = new FakeProvider();
   const launcher = new FakeLauncher();
   provider.snapshot.open = false;
@@ -1035,7 +1037,7 @@ test("an inactive ticket without local work does not create or launch a flow", a
   assert.equal(provider.events.includes("provider:set-labels"), false);
 });
 
-test("resume does not reset a recovered non-entry stage to the flow initial state", async () => {
+test("C2 resume does not reset a recovered non-entry stage to the flow initial state", async () => {
   const provider = new FakeProvider();
   const launcher = new FakeLauncher();
   provider.snapshot.labels.push("agent-stage:review");
@@ -1563,7 +1565,7 @@ test("derives the event selected by each controller-built receipt", () => {
   }
 });
 
-test("needs-human question stays paused until a later authorized comment", async () => {
+test("C6 needs-human question stays paused until a later authorized comment", async () => {
   const provider = new FakeProvider();
   const source = comment("question-answer", "Can you explain the options?", MAINTAINER, "2026-08-26T12:02:00.000Z");
   const clarification = comment(
@@ -1719,7 +1721,7 @@ test("rejects a merged change request at a different reviewed head", async () =>
   assert.ok(!provider.events.includes("provider:set-labels"));
 });
 
-test("selects the first later unmarked authorized human comment", async () => {
+test("C18/C19 selects human input only from later unmarked authorized comments", async () => {
   const provider = new FakeProvider();
   const receipt = assessmentReceipt();
   const assessment = comment(
@@ -1739,7 +1741,7 @@ test("selects the first later unmarked authorized human comment", async () => {
     comment("outsider", "LGTM", OUTSIDER, "2026-08-26T10:41:00.000Z"),
     comment(
       "agent",
-      `Narrative text.\n<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`,
+      `Narrative text.\n<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_2}"} -->`,
       MAINTAINER,
       "2026-08-26T10:42:00.000Z",
     ),

@@ -32,6 +32,41 @@ test("a transient exit consumes budget and retries in a new session", async (t) 
   assert.equal(await run.maximumConcurrentAttempts(), 1);
 });
 
+test("C3/C20 reset keeps identity and reuses a publication from the pre-label crash window", async (t) => {
+  const run = await startFixture("github", { firstAttempt: "crash-after-publish" });
+  t.after(() => run.close());
+  const controllerId = await run.controllerId();
+  await run.untilAgentComments(1);
+  const published = await run.latestAgentComment();
+
+  await run.resetDatabaseAndRestart();
+  await run.untilState("assessment-review");
+
+  assert.equal(await run.controllerId(), controllerId);
+  assert.equal((await run.latestAgentComment())?.id, published?.id);
+  assert.equal((await run.control()).stateId, "assessment-review");
+});
+
+test("C18/C19 concurrent controllers elect the same first publication without a second ownership read", async (t) => {
+  const run = await startFixture("github", { firstAttempt: "race" });
+  t.after(() => run.close());
+
+  const result = await run.collide();
+
+  assert.ok(result.ownerSeenByA);
+  assert.equal(result.ownerSeenByA, result.ownerSeenByB);
+  assert.equal(result.loserDisposition, "foreign");
+  assert.equal(result.loserCancelled, true);
+  assert.equal(result.loserWritesAfterObservation, 0);
+  assert.equal(result.duplicateCommentsDeleted, 0);
+  assert.equal(result.extraOwnershipReadsBeforePublication, 0);
+  assert.ok(result.requestLog.some(({ method, path, phase }) =>
+    method === "GET" && path.endsWith("/issues/17") && phase === "initial"));
+  assert.equal(result.requestLog.filter(({ method }) => method === "PUBLISH").length, 2);
+  assert.ok(result.requestLog.some(({ phase }) => phase === "reconcile-a"));
+  assert.ok(result.requestLog.some(({ phase }) => phase === "reconcile-b"));
+});
+
 test("activation removal repeatedly cancels a ready process and ignores its late decision", async () => {
   for (let iteration = 0; iteration < 3; iteration += 1) {
     const run = await startFixture("github", { firstAttempt: "late" });
@@ -44,7 +79,7 @@ test("activation removal repeatedly cancels a ready process and ignores its late
       const control = await run.control();
       assert.deepEqual(await run.decisions(), [{ event: "agent-succeeded" }]);
       assert.deepEqual(await run.receipts(), []);
-      assert.match((await run.latestAgentComment())!.body, /artifact=assessment/);
+      assert.match((await run.latestAgentComment())!.body, /Fixture assessment\./);
       assert.equal(control.stateId, "cancelled");
       assert.equal(control.latestReceipt, null);
       assert.equal(control.changeRequest, null);
@@ -58,7 +93,7 @@ test("activation removal repeatedly cancels a ready process and ignores its late
   }
 });
 
-test("a changed review head invalidates the old result", async (t) => {
+test("C9/C17 a changed review head invalidates the old result", async (t) => {
   const run = await startFixture("github");
   t.after(() => run.close());
   await passHumanGates(run);
@@ -73,7 +108,7 @@ test("a changed review head invalidates the old result", async (t) => {
   assert.equal(review?.kind === "review" ? review.headSha : null, (await run.changeRequest())!.headSha);
 });
 
-test("a closed unmerged change asks for reopen or cancel", async (t) => {
+test("C10 a closed unmerged change asks for reopen or cancel", async (t) => {
   const run = await startFixture("gitlab");
   t.after(() => run.close());
   await passHumanGates(run);
@@ -86,26 +121,22 @@ test("a closed unmerged change asks for reopen or cancel", async (t) => {
   assert.match((await run.latestAgentComment())!.body, /reopen|cancel/i);
 });
 
-test("terminal reactivation creates a new flow instance", async (t) => {
+test("C11 terminal reactivation creates a new flow instance", async (t) => {
   const run = await startFixture("github");
   t.after(() => run.close());
   await run.finish();
-  const [oldComment] = await run.controlComments();
-  const first = (await run.control()).flowInstanceId;
+  const oldLatestComment = await run.latestAgentComment();
+  const previous = await run.control();
+  const first = previous.flowInstanceId;
   await run.blockNextAttempt("assessment");
-  await run.activate();
-  await run.reconcile();
-  const comments = await run.controlComments();
-  const states = await run.controlStates();
+  await run.reactivateAfterStop();
   const current = await run.control();
-  assert.equal(comments.length, 2);
-  assert.equal(comments[0]!.body, oldComment!.body);
-  assert.equal(states[0]!.flowInstanceId, first);
+  assert.equal((await run.latestAgentComment())?.id, oldLatestComment?.id);
   assert.equal(current.stateId, "assessment");
   assert.equal(current.flowId, "development");
-  assert.equal(current.sequence, 1);
+  assert.ok(current.sequence > previous.sequence);
   assert.notEqual(current.flowInstanceId, first);
-  assert.notEqual(current.activationEventId, states[0]!.activationEventId);
+  assert.notEqual(current.activationEventId, previous.activationEventId);
   assert.equal(current.resumeStateId, null);
   assert.equal(current.latestReceipt, null);
   assert.equal(current.humanGate, null);

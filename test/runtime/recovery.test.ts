@@ -87,7 +87,7 @@ function evidence(patch: Partial<RecoveryEvidence> = {}): RecoveryEvidence {
   };
 }
 
-test("inactive and incomplete evidence cannot resume work", () => {
+test("C14/C17 inactive and incomplete evidence cannot resume work", () => {
   const foreign = publication(FOREIGN);
   assert.equal(classifyRecovery(evidence({ complete: false, publications: [foreign] }), CONTROLLER).kind, "ambiguous");
   assert.equal(classifyRecovery({
@@ -123,7 +123,7 @@ test("the first publication elects a foreign owner regardless of discovery order
   }
 });
 
-test("only conflicting pins from the winning controller are ambiguous", () => {
+test("C12 only conflicting pins from the winning controller are ambiguous", () => {
   const winner = publication(
     CONTROLLER,
     SHA,
@@ -156,7 +156,21 @@ test("only conflicting pins from the winning controller are ambiguous", () => {
   );
 });
 
-test("fresh reactivation resumes while uncertain boundaries and blocked resume targets pause", () => {
+test("C5 a PR-only first publication elects its controller and pinned configuration", () => {
+  const change = publication(
+    CONTROLLER,
+    SHA,
+    JSON.stringify(["github", "https://api.github.example.test/", REPOSITORY, "change-request", "31"]),
+  );
+
+  const decision = classifyRecovery(evidence({ publications: [change] }), CONTROLLER);
+
+  assert.equal(decision.kind, "reassess");
+  assert.equal(decision.owner?.key, change.key);
+  assert.equal(decision.owner?.metadata.config, SHA);
+});
+
+test("C11/C15/C16 fresh reactivation resumes while uncertain boundaries and blocked labels pause", () => {
   const oldMerge = {
     provider: "github" as const,
     repository: REPOSITORY,
@@ -215,7 +229,7 @@ class FixtureClient implements RateLimitedHttpClient {
   }
 }
 
-test("two competing GitHub pull requests pause reconciliation without launching an agent", async () => {
+test("C19 two competing GitHub pull requests pause reconciliation without launching an agent", async () => {
   const secondLink = {
     id: 805,
     event: "cross-referenced",

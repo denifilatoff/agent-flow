@@ -78,7 +78,7 @@ test("a signal during bootstrap drains launched work without becoming ready", as
   assert.equal(signals.listenerCount("SIGTERM"), 0);
 });
 
-test("production startup records active legacy work as migration-required without provider writes", async (t) => {
+test("C13 production startup records active legacy work as migration-required without provider writes", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-flow-legacy-startup-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const ref = { provider: "github" as const, repository: "owner/repo", number: 17 };
@@ -168,7 +168,7 @@ test("production startup records active legacy work as migration-required withou
   store.close();
 });
 
-test("a real provider adapter launches the first authorized activation through local production recovery", async (t) => {
+test("C1/C15 a real provider adapter launches the first authorized activation through local production recovery", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-flow-first-activation-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const ref = { provider: "github" as const, repository: "owner/repo", number: 17 };

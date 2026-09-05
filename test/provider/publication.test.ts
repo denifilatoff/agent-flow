@@ -21,7 +21,7 @@ test("renders metadata in the canonical field order", () => {
   );
 });
 
-test("rejects unknown fields and malformed metadata", () => {
+test("C13 rejects unknown fields and malformed metadata", () => {
   const controller = "11111111-1111-4111-8111-111111111111";
   const valid = renderPublication({ config: "a".repeat(40), controller });
   for (const body of [
@@ -56,7 +56,7 @@ test("ignores quoted and fenced examples while parsing standalone markers", () =
   });
 });
 
-test("validates publication timestamps before electing an owner", () => {
+test("C19 validates timestamps and applies the equal-time publication-key ordering", () => {
   const metadata = { config: "a".repeat(40), controller: "11111111-1111-4111-8111-111111111111" };
   assert.throws(
     () => electOwner([{ key: "bad", createdAt: "not-a-timestamp", metadata }]),

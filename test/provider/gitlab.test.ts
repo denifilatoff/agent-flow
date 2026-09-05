@@ -165,7 +165,7 @@ test("uses updated_after and normalizes an issue snapshot", async () => {
   assert.ok(client.calls.slice(1).every(({ priority }) => priority === "active"));
 });
 
-test("reads complete recovery evidence from paginated notes, linked merge requests, and reviews", async () => {
+test("C17 reads complete recovery evidence from paginated notes, linked merge requests, and reviews", async () => {
   const notePath = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
   const client = new FixtureClient()
     .add("GET", PROJECT, { data: fixture.project })
@@ -180,7 +180,9 @@ test("reads complete recovery evidence from paginated notes, linked merge reques
         { id: 4200, iid: 42, project_id: 100, references: { full: "group/project!42" } },
       ],
     })
-    .add("GET", `${PROJECT}/merge_requests/41`, { data: fixture.mergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/41`, {
+      data: { ...fixture.mergeRequest, updated_at: "2026-08-25T10:01:00.000Z" },
+    })
     .add("GET", `${PROJECT}/merge_requests/42`, { data: fixture.secondMergeRequest })
     .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [fixture.recoveryReviewNote] })
     .add("GET", `${PROJECT}/merge_requests/42/notes?per_page=100`, { data: [] })
@@ -197,6 +199,8 @@ test("reads complete recovery evidence from paginated notes, linked merge reques
   assert.equal(evidence.changes.length, 2);
   assert.equal(evidence.reviews.length, 1);
   assert.ok(evidence.publications.some(({ key }) => key.includes("change-request")));
+  assert.ok(!evidence.ambiguities.some((value) => value.includes("change-request")
+    && value.includes("provenance")));
   assert.ok(evidence.publications.some(({ key }) => key.includes("comment")));
   assert.ok(evidence.publications.some(({ key }) => key.includes("review")));
   assert.ok(electOwner(evidence.publications)?.key.includes("change-request"));
@@ -230,7 +234,7 @@ test("marks a first activation without managed or stage history as fresh", async
   assert.deepEqual(evidence.ambiguities, []);
 });
 
-test("rejects incomplete GitLab recovery evidence pages", async () => {
+test("C17 rejects incomplete GitLab recovery evidence pages", async () => {
   const notePath = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
   const client = new FixtureClient()
     .add("GET", PROJECT, { data: fixture.project })

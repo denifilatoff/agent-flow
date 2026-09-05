@@ -325,7 +325,7 @@ async function reconcileLocal(
       attemptSeries: null,
       latestReceipt: null,
       humanGate: null,
-      changeRequest: normalizedChange(snapshot.changeRequest),
+      changeRequest: freshStart ? null : normalizedChange(snapshot.changeRequest),
     };
     stored = await writer.recordRecovery!(ref, evidence, decision, recovered, iteration.baselineKeys);
     control = stored.value.control!;

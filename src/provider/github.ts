@@ -289,7 +289,7 @@ export function createGitHubAdapter(
         }
         if (parsed.kind !== "current") return;
         const metadata = parsed.metadata;
-        if (updatedAt !== null && updatedAt !== createdAt) {
+        if (kind !== "change-request" && updatedAt !== null && updatedAt !== createdAt) {
           ambiguities.push(`publication provenance is unavailable: ${key}`);
           return;
         }

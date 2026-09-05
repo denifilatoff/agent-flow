@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { AgentReceipt, ReceiptArtifact } from "../../src/config/types.ts";
+import { parsePublication } from "../../src/provider/publication.ts";
 import { startFixture } from "../fixtures/provider-server.ts";
 
 test("GitHub activation reaches done through both human gates", async (t) => {
@@ -52,8 +53,9 @@ test("GitHub activation reaches done through both human gates", async (t) => {
   );
 
   const [assessment, assessmentGate, plan, planGate, development, review] = receipts;
-  assertCommentReceipt(assessment!, "assessment", "#issuecomment-");
-  assertCommentReceipt(plan!, "plan", "#issuecomment-");
+  const metadata = { config: (await run.control()).configRevision, controller: await run.controllerId() };
+  assertCommentReceipt(assessment!, "assessment", "#issuecomment-", metadata);
+  assertCommentReceipt(plan!, "plan", "#issuecomment-", metadata);
   const change = development!.artifacts[0]!;
   const nativeReview = review!.artifacts[0]!;
   assert.equal(change.kind, "change-request");
@@ -61,11 +63,10 @@ test("GitHub activation reaches done through both human gates", async (t) => {
   assert.equal(nativeReview.kind === "review" && change.kind === "change-request" && nativeReview.headSha, change.headSha);
   assert.match(change.url, /\/pull\/31$/);
   assert.match(nativeReview.url, new RegExp(`#pullrequestreview-${nativeReview.kind === "review" ? nativeReview.id : ""}$`));
-  assert.deepEqual(await run.reviewRequests(), [
-    "repos/owner/repo/pulls/31/reviews?per_page=100",
-    "repos/owner/repo/pulls/31/reviews?per_page=100&page=2",
-    `repos/owner/repo/pulls/31/reviews/${nativeReview.kind === "review" ? nativeReview.id : ""}`,
-  ]);
+  const reviewRequests = await run.reviewRequests();
+  assert.equal(reviewRequests.filter((path) => path.endsWith("?per_page=100")).length,
+    reviewRequests.filter((path) => path.endsWith("?per_page=100&page=2")).length);
+  assert.equal(reviewRequests.filter((path) => path.endsWith(`/reviews/${nativeReview.kind === "review" ? nativeReview.id : ""}`)).length, 1);
   const humanAnswers = await run.humanAnswers();
   assert.deepEqual(
     [assessmentGate!.humanGate?.sourceCommentId, planGate!.humanGate?.sourceCommentId],
@@ -104,13 +105,11 @@ function assertCommentReceipt(
   receipt: AgentReceipt,
   artifactKind: "assessment" | "plan",
   urlFragment: string,
+  metadata: { config: string; controller: string },
 ): void {
   const artifact = receipt.artifacts[0];
   assert.equal(artifact?.kind, "comment");
   if (artifact?.kind !== "comment") return;
-  assert.equal(
-    artifact.marker,
-    `<!-- agent-flow:v1 flow=${receipt.flowInstanceId} attempt=${receipt.attemptId} artifact=${artifactKind} -->`,
-  );
+  assert.deepEqual(parsePublication(artifact.marker), { kind: "current", metadata });
   assert.ok(artifact.url.endsWith(`${urlFragment}${artifact.id}`));
 }

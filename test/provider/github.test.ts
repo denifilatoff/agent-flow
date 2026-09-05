@@ -133,7 +133,7 @@ test("discovers changed issues and normalizes one snapshot", async () => {
   assert.ok(client.calls.slice(1).every(({ priority }) => priority === "active"));
 });
 
-test("reads complete recovery evidence from paginated comments, linked pulls, and reviews", async () => {
+test("C17 reads complete recovery evidence from paginated comments, linked pulls, and reviews", async () => {
   const client = new FixtureClient()
     .add("GET", "repos/owner/repo", { data: fixture.repository })
     .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
@@ -155,7 +155,9 @@ test("reads complete recovery evidence from paginated comments, linked pulls, an
       next: "repos/owner/repo/issues/17/comments?page=2",
     })
     .add("GET", "repos/owner/repo/issues/17/comments?page=2", { data: [fixture.recoveryComment] })
-    .add("GET", "repos/owner/repo/pulls/31", { data: fixture.pull })
+    .add("GET", "repos/owner/repo/pulls/31", {
+      data: { ...fixture.pull, updated_at: "2026-08-25T10:01:00Z" },
+    })
     .add("GET", "repos/owner/repo/pulls/32", { data: fixture.secondPull })
     .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", { data: [fixture.recoveryReview] })
     .add("GET", "repos/owner/repo/pulls/32/reviews?per_page=100", { data: [] })
@@ -172,6 +174,8 @@ test("reads complete recovery evidence from paginated comments, linked pulls, an
   assert.equal(evidence.changes.length, 2);
   assert.equal(evidence.reviews.length, 1);
   assert.ok(evidence.publications.some(({ key }) => key.includes("change-request")));
+  assert.ok(!evidence.ambiguities.some((value) => value.includes("change-request")
+    && value.includes("provenance")));
   assert.ok(evidence.publications.some(({ key }) => key.includes("comment")));
   assert.ok(evidence.publications.some(({ key }) => key.includes("review")));
   assert.ok(electOwner(evidence.publications)?.key.includes("change-request"));
@@ -207,7 +211,7 @@ test("marks a first activation without managed or stage history as fresh", async
   assert.deepEqual(evidence.ambiguities, []);
 });
 
-test("rejects incomplete GitHub recovery evidence pages", async () => {
+test("C17 rejects incomplete GitHub recovery evidence pages", async () => {
   const client = new FixtureClient()
     .add("GET", "repos/owner/repo", { data: fixture.repository })
     .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
