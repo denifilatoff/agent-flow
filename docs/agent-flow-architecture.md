@@ -1,6 +1,6 @@
 # Agent flow controller architecture
 
-Status: Approved for prototype
+Status: Accepted and implemented for provider recovery and local SQLite execution.
 
 This document records the agreed target architecture for a controller that partially automates development work from
 GitHub or GitLab tickets.
@@ -17,27 +17,27 @@ on the configured flow policy.
 The controller coordinates the work. Agents remain responsible for their domain work and publish their own final
 results. GitHub or GitLab is the source of truth for every operational decision.
 
-The implementation is greenfield. It uses existing libraries and provider capabilities when they shorten the work
-without weakening these invariants.
+The decision is recorded in [ADR 0001](adr/0001-provider-commit-points-and-local-execution.md).
+[Recovery rules](recovery-from-provider-draft.md) define failure cases; the
+[data model](recovery-data-model.md) defines publication metadata, local identity, and SQLite.
+The [recovery specification](recovery-from-provider-draft.md) defines restart, ownership, and ambiguity handling.
 
 ## Agreed invariants
 
 ### Source of truth
 
-- GitHub or GitLab stores all canonical operational state. The controller must not require a database, durable queue,
-  lease store, or local retry ledger.
-- The current state must be reconstructible from the ticket, its labels, marked comments, linked pull or merge request,
-  and provider metadata.
-- Local workspaces and session files are diagnostic artifacts. Losing them may require a new attempt, but must not make
-  the ticket state ambiguous or change the next valid transition.
-- Agents publish final artifacts and outcomes to the provider. They do not publish complete session transcripts.
-- Each flow instance has one machine-marked control comment. The controller updates it in place with the current state,
-  retry consumption, attempt metadata, and the latest controller-verified attempt result.
-- The control comment contains the flow instance identity and pinned configuration revision. Its SHA field changes only
-  during an explicit migration.
-- The current XState state is exposed as exactly one controller-owned `agent-stage:<state-id>` label for provider
-  searches and queues. There is no separate `agent-status:*` label dimension.
-- One ticket has at most one active flow instance.
+- GitHub or GitLab is the commit point for published work and stage transitions.
+- SQLite stores disposable execution state. Losing it can reset retry counts and repeat unpublished work.
+- Recover from activation and stage labels, published results, human answers, and linked PR/MR evidence. Ambiguous
+  evidence pauses the affected ticket for clarification; unattended recovery is not guaranteed in every case.
+- Agents publish substantive results with a hidden block containing configuration SHA and controller UUID. There is
+  no separate mutable control comment and no controller-assignment label.
+- Local workspaces and sessions contain replaceable execution artifacts. Preserve published code and inspect existing
+  PRs/MRs before retrying work. A published object alone does not prove completion.
+- Exactly one `agent-stage:<state-id>` label records the stage. The flow and provider evidence reconcile interrupted
+  publication/label updates. Cached SQLite state cannot override provider cancellation or ownership.
+- The first eligible publication of identifiable current work determines its owner. Accidental overlap can produce
+  duplicate work before the next reconciliation; this is accepted rather than prevented by distributed locking.
 
 ### Flow versioning
 
@@ -50,7 +50,8 @@ without weakening these invariants.
 - Each materialized revision retains a minimal Git object store. The controller verifies its files against the pinned
   commit before loading them, even when a later history rewrite and garbage collection remove the commit from the
   startup mirror.
-- The controller records that SHA in the control comment it creates for the instance.
+- The controller includes that SHA in each substantive agent publication. With no published pin, recovery can use
+  current configuration; with an unavailable or conflicting pin, it must pause.
 - The pinned configuration revision includes every `apm.lock.yaml` produced for the agent catalog. External APM
   artifacts must resolve through a committed lockfile.
 - Fetching a newer configuration revision must not change a running instance.
@@ -80,16 +81,18 @@ without weakening these invariants.
 
 ### Concurrency and deployment
 
-- One deployment contains one controller instance. Multiple cooperating controllers are outside the current design.
+- Each installation has one supervised controller process and a persistent UUID outside SQLite. Independent
+  installations normally use different repository allowlists and may use different flows on the same host.
 - The controller may process different tickets in parallel.
-- At most one agent process may work on a given ticket at a time, regardless of stage or retry.
+- Within an installation, a per-ticket guard prevents overlapping agent processes. Across accidental overlapping
+  installations, the first publication wins ownership and the loser stops on ordinary reconciliation.
 - Each active flow instance has its own writable repository workspace. Concurrent tickets must never share a working
   tree.
 - Each attempt starts a new headless agent process and creates a separate local session directory.
 - A configurable global concurrency limit bounds parallel ticket processing.
 - The deployment runs either as one Docker container or as one Kubernetes replica.
-- A Kubernetes deployment uses a persistent volume for session files and the `Recreate` strategy so two controller
-  replicas cannot run concurrently.
+- Each Kubernetes installation uses a persistent volume and `Recreate`. Transfer its UUID and routing configuration
+  only after stopping the previous executor and agents. A fresh installation cannot silently adopt foreign work.
 
 ### Agent configuration and harnesses
 
@@ -129,13 +132,18 @@ without weakening these invariants.
 - The model writes one minimal JSON decision. It does not repeat deterministic state or provider facts such as the flow
   instance, attempt ID, target state, retry budget, artifact ID, URL, change-request state, or head SHA.
 - The controller treats the model decision as untrusted input, reads the required provider artifact back, and builds the
-  verified attempt result stored in the control comment. The state machine receives no event until both agree.
+  verified attempt result stored locally in SQLite. The state machine receives no event until both agree.
 - The controller owns the reserved state labels. Agent instructions must prohibit editing them, and the controller must
   reject a transition that is not valid for the current flow state.
-- Every agent-authored provider comment must contain the attempt-specific marker supplied by the generated runtime
-  prompt. This is required because agent and human actions may use the same provider account.
-- After an agent asks a question, the first later unmarked comment from a user with `write` or `maintain` access is the
-  human answer. The agent type responsible for the current stage interprets the answer.
+- Every agent-authored publication includes the controller-supplied block on creation:
+  `<!-- agent-flow:v1 {"config":"<configuration-sha>","controller":"<controller-id>"} -->`.
+  Human comments remain unmarked. The marker identifies format and installation, not authorization or success.
+- The PR/MR description carries the same block when it can be the only publication. Review-specific head and verdict
+  evidence remains separate. Do not add run IDs, sequences, or stage copies to the common block.
+- The generated prompt does not require a second ownership read before publication. Ordinary reconciliation observes
+  ownership and cancellation; required artifact readback and review-head checks remain in place.
+- After an agent asks a question, use a later authorized unmarked answer that can be associated with that question.
+  Never reuse an old approval for a revised result. Ambiguous associations require clarification.
 - Human gates accept ordinary comments rather than requiring a command syntax. The current-stage agent maps the first
   later authorized, unmarked comment to `approved`, `changes-requested`, `question`, or `unclear`.
 - `changes-requested` means the human requires another iteration before the flow advances. `approved` may include
@@ -224,16 +232,15 @@ attempt without advancing the machine.
 - Entering a new state or observing a new pinned input revision, such as a new pull or merge request head SHA, starts
   a fresh series with the configured budget.
 - Every retry uses a new agent process and a new local session directory.
-- The controller records and reads back an attempt start before launching the agent. Starting the process consumes the
-  attempt even if the controller or executor then crashes.
-- Attempt consumption must be derivable from provider-visible machine metadata so a controller restart cannot reset the
-  budget accidentally.
+- The controller commits an attempt start to SQLite before launching the agent. Surviving local records preserve retry
+  consumption across normal restarts. Losing SQLite may reset the budget; a surviving `blocked` label still stops work.
 - After a blocked state, a later authorized, unmarked human comment resets the relevant retry budget and allows the
   same logical attempt series to continue.
 
 ## State machine
 
-XState v5 in TypeScript is the state transition engine. The controller supplies a provider-derived snapshot and an
+XState v5 in TypeScript is the state transition engine. The controller supplies a reconciled provider/local snapshot and
+an
 event to the machine, then applies the returned transition. XState persistence is not used.
 
 Flow definitions are data-only YAML. They may declare states, transitions, agent package references, retry policy,
@@ -311,8 +318,9 @@ state ID.
 The initial development flow should use the same general vocabulary as the autonomous development experiments in
 `qubership-profiler-agent`: `assessment`, `assessment-review`, `planning`, `plan-review`, `replan`, `implement`,
 `working`, `testing`, `review`, `awaiting-merge`, `needs-human`, `blocked`, `done`, and `cancelled`. The YAML flow may
-use only the states it needs. When a transition enters `needs-human` or `blocked`, the control comment records the
-originating state so an authorized comment can resume the correct stage.
+use only the states it needs. When a transition enters `needs-human` or `blocked`, SQLite records the
+originating state locally so an authorized comment can resume the correct stage. After local data loss, recover
+that target from published context or request clarification.
 
 ## Configuration repository
 
@@ -350,13 +358,13 @@ the default agent behavior; external APM artifacts are optional, narrow dependen
 | --- | --- |
 | Flow activation | Authorized `agent-flow:development` label change |
 | Ticket has flow history | Permanent controller-owned `agent-flow:managed` label |
-| Flow instance and configuration version | One mutable control comment with instance identity and config SHA |
+| Configuration and observed owner | Hidden `config` and `controller` fields on substantive publications |
 | Current state | Exactly one controller-owned `agent-stage:<state-id>` label |
 | Assessment and plan | Full machine-marked ticket comments |
 | Agent question | Machine-marked ticket comment plus `agent-stage:needs-human` |
 | Human answer | First later authorized, unmarked ticket comment |
 | Human gate verdict | Minimal model decision verified against the authorized human comment |
-| Attempt start, outcome, retry consumption, and latest verified result | Mutable control comment |
+| Attempts, retry consumption, verified receipts | Local SQLite only; recover or recompute after loss |
 | Development result | One linked pull or merge request and its pinned head SHA |
 | Review result | Provider review or marked comment tied to the reviewed head SHA |
 | Linked change request closed without merge | `agent-stage:needs-human` while the ticket remains open |
@@ -374,6 +382,7 @@ flowchart LR
     Adapter --> Reconciler["Controller reconciler"]
     Config["Pinned flow and agent config"] --> Reconciler
     Reconciler <--> Machine["XState v5"]
+    Reconciler <--> Local["Disposable SQLite"]
     Reconciler --> Harness["Harness adapter"]
     Harness --> Agent["Headless agent process"]
     Agent <--> Provider
@@ -391,29 +400,42 @@ flowchart LR
 | Agent catalog | Map each flow stage to one domain APM package, target harness, retry policy, and timeout |
 | Harness adapters | Add the generated runtime prompt and run, monitor, and cancel the selected headless CLI |
 | Agent process | Perform stage work and publish the final result directly to the provider |
+| Local execution store | Cache reconciled state, attempt bookkeeping, and verified results |
 | Session archive | Keep adjacent local transcripts and process artifacts for operator inspection only |
 | Optional UI | Show state graphs, queues, running processes, processed tickets, and local sessions |
 
 ## Reconciliation and recovery
 
-The controller performs the same bounded reconciliation for every eligible ticket:
+The controller performs ordinary reconciliation for each eligible ticket and uses that snapshot for the work it
+schedules. It does not reread ownership before every publication solely to prevent accidental controller collisions.
 
-1. Read the ticket, labels, marked comments, permissions, and linked pull or merge request from the provider.
-2. Resolve the active flow instance and its pinned configuration commit.
-3. Derive the current machine state, consumed retry budget, and next provider event.
-4. Ask XState for the next valid transition.
-5. Apply controller-owned label changes and, when required, record and read back an attempt start.
-6. Start one agent attempt for the ticket only after the attempt marker is visible.
-7. Let the agent publish its final result and return one minimal JSON decision.
-8. Validate the decision, discover and read the required provider evidence, build the verified result, and reconcile
-   again.
+1. Check authorized activation and repository routing. Without activation, do not launch or recover automated work.
+2. Read sufficient provider evidence and establish the active work. Incomplete reads do not prove absence.
+3. Elect the owner using the earliest eligible publication by provider creation time and stable object key. Use the
+   exact ordering in the data model. If the owner is foreign, cancel local work and perform no provider mutations.
+4. Resolve the winning configuration, stage, and usable results. Conflicting facts require clarification.
+5. Refresh SQLite, derive a valid XState transition, or launch/repeat unfinished work. A local attempt record is not
+   evidence of a published result. A stale callback cannot override a newer local reconciliation decision.
+6. Let the agent publish a substantive result with the block and return its minimal local decision.
+7. Read and validate required result evidence, persist local bookkeeping, then publish and verify the stage label.
+8. Reconcile subsequent provider changes, including activation removal, ticket closure, head changes, and ownership.
 
-The control comment stores only bounded machine metadata. Human-readable assessment, plan, questions, and review
-results remain separate comments and are never overwritten by controller state updates.
+First-publication races are allowed. Once controllers observe the same evidence, the loser stops; the winner ignores
+losing duplicate comments as stage evidence and human input. It does not remove them or publish routine conflict noise.
+If both controllers changed code or created competing PRs/MRs, inspect the external effects and pause when ambiguous.
+This is eventual collision resolution, not a lease or exactly-once publication.
 
-Machine markers and provider readback make publications idempotent. After a crash, the controller checks whether the
-expected result already exists before starting or accepting a replacement attempt. Local session files may help an
-operator diagnose the crash, but they cannot prove that a provider transition completed.
+Readback needed to establish a result, authorization checks, and review-head validation remain required. Do not add a
+full ownership read alongside an already available reconciliation snapshot. Cancellation is observed through ordinary
+polling; a stale agent may publish before cancellation is observed, but that result must not advance a canceled flow.
+
+Publish a result before advancing its label. On recovery, a result with an old label can complete the interrupted
+transition after validation. A forward label without required evidence cannot justify approval or completion.
+Finish terminal label cleanup before removing activation. Inactive historical tickets never restart from comments alone.
+
+Recovery restores enough state for the next justified action, not every local record. Recompute local-only decisions,
+reuse published work, preserve `blocked`, and clarify uncertain run boundaries or resume targets. See the recovery
+specification for the complete case matrix and legacy rollout policy.
 
 ## Polling and API budget
 
@@ -433,9 +455,9 @@ GitHub uses the Issues API `since` filter; GitLab uses `updated_after`. The cont
 requests, and other details only for tickets returned as changed. It uses a small overlap between incremental windows
 to avoid missing updates at a timestamp boundary and relies on idempotent reconciliation to discard duplicates.
 
-After restart, bootstrap queries `agent-flow:managed` to recover tickets with flow history and
-`agent-flow:development` to find activations that have not yet been accepted. It does not search comment bodies or
-enumerate every possible stage label.
+After restart, bootstrap queries the configured activation label to find runnable tickets. A managed label alone
+never starts recovery. Ordinary reconciliation filters incremental discoveries by activation before executing work.
+Use cached observations and incremental discovery; do not add a second ownership poll before publication.
 
 Repository scans are serialized and continue into the next interval when the configured budget is not enough to
 finish one sweep. A bootstrap after restart may therefore be slow. Correctness does not depend on finishing every
@@ -462,14 +484,14 @@ References:
 
 ## Deployment model
 
-The initial deployment is one long-running controller with a bounded in-memory worker pool. The workers provide
-parallelism across tickets, while a per-ticket in-memory guard prevents overlapping agent processes. Provider state and
-publication markers provide recovery after process loss; the in-memory guard is sufficient because only one controller
-instance is allowed.
+Each installation runs one long-running controller with a bounded worker pool and a separate data directory.
+A per-ticket in-memory guard prevents overlapping agents inside that process. Different installations may run on the
+same host with distinct identities and repository/flow routing. A shared-machine UUID is not used.
 
-The prototype runs in Docker on macOS and mounts configuration, credentials, repository workspaces, and the session
-directory. A later Kubernetes deployment uses one replica and a persistent volume for sessions. Horizontal scaling,
-distributed leases, leader election, and an external queue are intentionally outside this design.
+Docker mounts configuration, credentials, identity, SQLite, workspaces, and sessions. Kubernetes uses one replica per
+installation. Stop the old executor before transferring its identity. A copied UUID on two live machines is an invalid
+installation; this design does not fence it. Distributed leases, shared databases, and a central coordinator are
+excluded.
 
 ## Security and trust boundary
 
@@ -485,9 +507,11 @@ from the executor user's machine.
 ## Deferred work
 
 - A custom UI is optional. The first version can operate entirely through provider state and filesystem sessions.
-- Multiple controller instances, distributed leases, and a shared session store are not supported.
+- Cooperating controller replicas, distributed leases, and a shared session store are not supported. Independent
+  installations with normally disjoint repository routing are supported by the target design.
 - Automatic merge remains disabled until a separate policy is agreed.
-- The controller will not implement its own state machine engine, workflow database, or general plugin framework.
+- The controller will not implement its own state machine engine, canonical workflow database, or general plugin
+framework.
 
 ## Deferred design questions
 

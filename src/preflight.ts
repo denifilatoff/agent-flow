@@ -11,6 +11,8 @@ import type { HarnessAdapter } from "./harness/types.js";
 import type { ProviderKind, ProviderAdapter } from "./provider/types.js";
 import type { Controller } from "./runtime/controller.js";
 import { ensureSafeDirectory, prepareDataRoot } from "./runtime/filesystem.ts";
+import { loadControllerId } from "./runtime/identity.ts";
+import { openLocalStore, providerScope, type LocalStore } from "./runtime/local-store.ts";
 
 type Providers = Partial<Record<ProviderKind, ProviderAdapter>>;
 type Harnesses = Partial<Record<HarnessTarget, HarnessAdapter>>;
@@ -20,10 +22,23 @@ export interface PreflightDependencies {
   loadConfig(): Promise<ConfigBundle>;
   createProviders(bundle: ConfigBundle): Providers;
   createHarnesses(bundle: ConfigBundle): Harnesses;
-  createController(bundle: ConfigBundle, providers: Providers, harnesses: Harnesses): Controller;
+  createController(
+    bundle: ConfigBundle,
+    providers: Providers,
+    harnesses: Harnesses,
+    runtime: StartupRuntime,
+  ): Controller;
   validateConfig?: (bundle: ConfigBundle) => Promise<void>;
   prepareDirectories?: (dataDirectory: string) => Promise<void>;
+  loadControllerId?: (dataDirectory: string) => Promise<string>;
+  openLocalStore?: (path: string) => LocalStore;
   runCommand?: CommandRunner;
+}
+
+export interface StartupRuntime {
+  controllerId: string;
+  store: LocalStore;
+  providerScopes: Partial<Record<ProviderKind, string>>;
 }
 
 export interface ReadyDependencies {
@@ -31,6 +46,7 @@ export interface ReadyDependencies {
   providers: Providers;
   harnesses: Harnesses;
   controller: Controller;
+  store: LocalStore;
 }
 
 const execFile = promisify(execFileCallback);
@@ -46,43 +62,65 @@ export async function runPreflight(dependencies: PreflightDependencies): Promise
   await checked("data directory preflight failed", () =>
     (dependencies.prepareDirectories ?? prepareDirectories)(bundle.controller.runtime.dataDirectory));
 
-  const providers = await checked("provider configuration failed", async () => dependencies.createProviders(bundle));
-  for (const kind of ["github", "gitlab"] as const) {
-    if (bundle.controller.providers[kind]) {
-      const adapter = providers[kind];
-      if (!adapter || adapter.kind !== kind) throw new Error(`${kind} provider configuration failed`);
-      await checked(`${kind} REST authentication failed`, () => adapter.verifyAuth());
+  const controllerId = await checked("controller identity load failed", () =>
+    (dependencies.loadControllerId ?? loadControllerId)(bundle.controller.runtime.dataDirectory));
+  const store = await checked("local execution store open failed", async () =>
+    (dependencies.openLocalStore ?? openLocalStore)(join(bundle.controller.runtime.dataDirectory, "execution.sqlite")));
+  try {
+    const providerScopes = await checked("provider configuration failed", async () =>
+      Object.fromEntries((["github", "gitlab"] as const).flatMap((kind) => {
+        const config = bundle.controller.providers[kind];
+        return config ? [[kind, providerScope(kind, config.apiUrl)]] : [];
+      })));
+    const providers = await checked("provider configuration failed", async () => dependencies.createProviders(bundle));
+    for (const kind of ["github", "gitlab"] as const) {
+      if (bundle.controller.providers[kind]) {
+        const adapter = providers[kind];
+        if (!adapter || adapter.kind !== kind) throw new Error(`${kind} provider configuration failed`);
+        await checked(`${kind} REST authentication failed`, () => adapter.verifyAuth());
+      }
     }
-  }
 
-  const run = dependencies.runCommand ?? defaultCommand;
-  for (const [kind, executable] of [["github", "gh"], ["gitlab", "glab"]] as const) {
-    const config = bundle.controller.providers[kind];
-    if (config) {
-      const hostname = providerHostname(kind, config.apiUrl);
-      await checked(
-        `${kind} agent authentication failed`,
-        () => run(executable, ["auth", "status", "--hostname", hostname]),
-      );
+    const run = dependencies.runCommand ?? defaultCommand;
+    for (const [kind, executable] of [["github", "gh"], ["gitlab", "glab"]] as const) {
+      const config = bundle.controller.providers[kind];
+      if (config) {
+        const hostname = providerHostname(kind, config.apiUrl);
+        await checked(
+          `${kind} agent authentication failed`,
+          () => run(executable, ["auth", "status", "--hostname", hostname]),
+        );
+      }
     }
-  }
-  await checked("git executable preflight failed", () => run("git", ["--version"]));
-  await checked("apm executable preflight failed", () => run("apm", ["--version"]));
+    await checked("git executable preflight failed", () => run("git", ["--version"]));
+    await checked("apm executable preflight failed", () => run("apm", ["--version"]));
 
-  const harnesses = await checked("harness configuration failed", async () => dependencies.createHarnesses(bundle));
-  const targets = new Set(Object.values(bundle.catalog.agents).map((agent) => agent.target));
-  for (const target of [...targets].sort()) {
-    const harness = harnesses[target];
-    if (!harness || harness.target !== target) throw new Error(`${target} harness configuration failed`);
-    await checked(`${target} harness preflight failed`, () => harness.preflight());
-  }
+    const harnesses = await checked("harness configuration failed", async () => dependencies.createHarnesses(bundle));
+    const targets = new Set(Object.values(bundle.catalog.agents).map((agent) => agent.target));
+    for (const target of [...targets].sort()) {
+      const harness = harnesses[target];
+      if (!harness || harness.target !== target) throw new Error(`${target} harness configuration failed`);
+      await checked(`${target} harness preflight failed`, () => harness.preflight());
+    }
 
-  const controller = await checked(
-    "controller configuration failed",
-    async () => dependencies.createController(bundle, providers, harnesses),
-  );
-  await checked("controller bootstrap failed", () => controller.bootstrap());
-  return { bundle, providers, harnesses, controller };
+    const controller = await checked(
+      "controller configuration failed",
+      async () => dependencies.createController(bundle, providers, harnesses, {
+        controllerId,
+        store,
+        providerScopes,
+      }),
+    );
+    await checked("controller bootstrap failed", () => controller.bootstrap());
+    return { bundle, providers, harnesses, controller, store };
+  } catch (error) {
+    try {
+      store.close();
+    } catch {
+      // Preserve the startup failure that caused cleanup.
+    }
+    throw error;
+  }
 }
 
 async function prepareDirectories(dataDirectory: string): Promise<void> {

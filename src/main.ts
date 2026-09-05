@@ -19,10 +19,16 @@ import { createGitHubAdapter } from "./provider/github.ts";
 import { createGitLabAdapter } from "./provider/gitlab.ts";
 import { createRateLimitedHttpClient } from "./provider/http.ts";
 import type { ProviderAdapter, ProviderKind } from "./provider/types.ts";
-import { runPreflight, type PreflightDependencies, type ReadyDependencies } from "./preflight.ts";
+import {
+  runPreflight,
+  type PreflightDependencies,
+  type ReadyDependencies,
+  type StartupRuntime,
+} from "./preflight.ts";
 import { createAttemptRunner, type AttemptRunnerDependencies } from "./runtime/attempt-runner.ts";
 import { createControlWriter, type ControlWriter } from "./runtime/control-state.ts";
 import { createController, type Controller } from "./runtime/controller.ts";
+import { providerScope } from "./runtime/local-store.ts";
 import { RateLimiter, type RateLimiterClock } from "./runtime/rate-limiter.ts";
 import { reconcileTicket, type AttemptLauncher } from "./runtime/reconcile.ts";
 import { WorkspaceManager } from "./runtime/workspaces.ts";
@@ -105,6 +111,14 @@ export async function main(
     readiness.markNotReady();
     dependencies.signals.removeListener("SIGINT", stop);
     dependencies.signals.removeListener("SIGTERM", stop);
+    if (ready) {
+      try {
+        ready.store.close();
+      } catch {
+        dependencies.reportError("agent-flow local store shutdown failed");
+        exitCode = 1;
+      }
+    }
     try {
       await close(server);
     } catch {
@@ -186,8 +200,13 @@ export function createProductionDependencies(
         }, overrides.harnessProcesses),
       };
     },
-    createController(bundle: ConfigBundle, providers: Providers, harnesses: Harnesses): Controller {
-      return composeController(bundle, providers, harnesses, load, dataDirectory, environment, overrides);
+    createController(
+      bundle: ConfigBundle,
+      providers: Providers,
+      harnesses: Harnesses,
+      runtime: StartupRuntime,
+    ): Controller {
+      return composeController(bundle, providers, harnesses, load, dataDirectory, environment, overrides, runtime);
     },
   };
 }
@@ -200,6 +219,7 @@ function composeController(
   dataDirectory: string,
   environment: NodeJS.ProcessEnv,
   overrides: ProductionOverrides,
+  runtime: StartupRuntime,
 ): Controller {
   const { workspaceManager = new WorkspaceManager(dataDirectory), ...attemptRunnerOverrides } =
     overrides.attemptRunner ?? {};
@@ -209,7 +229,11 @@ function composeController(
   for (const kind of ["github", "gitlab"] as const) {
     const provider = providers[kind];
     if (!provider) continue;
-    const writeControl = createControlWriter(provider);
+    const scope = runtime.providerScopes[kind];
+    if (!scope || scope !== providerScope(kind, bundle.controller.providers[kind]!.apiUrl)) {
+      throw new Error("provider scope is not bound to startup configuration");
+    }
+    const writeControl = createControlWriter(runtime.store, scope, runtime.controllerId);
     writers[kind] = writeControl;
     runners[kind] = createAttemptRunner({
       ...attemptRunnerOverrides,
@@ -255,6 +279,7 @@ function composeController(
         provider,
         launcher: requiredRunner(runners, ref.provider),
         writeControl,
+        controllerId: runtime.controllerId,
         config: {
           loadCurrent: async () => bundle,
           loadPinned: async (revision) => {

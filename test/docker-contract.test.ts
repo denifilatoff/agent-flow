@@ -175,6 +175,7 @@ function assertRuntimeStage(stage: string): void {
   assert.match(stage, /python3 -m pip install[\s\\]+--break-system-packages[\s\S]*--require-hashes[\s\\]+--requirement \/tmp\/apm-requirements\.txt/);
   assert.match(stage, /^COPY --from=tools .+\/tools\/node_modules \/opt\/tools\/node_modules$/m);
   assert.match(stage, /^COPY .+schemas .+schemas$/m);
+  assert.match(stage, /^RUN node -e .+node:sqlite.+DatabaseSync.+$/m);
   assert.match(stage, /^EXPOSE 8080$/m);
   assert.deepEqual(stage.match(/^CMD .+$/gm), ['CMD ["node", "dist/main.js"]']);
 

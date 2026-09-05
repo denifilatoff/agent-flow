@@ -12,14 +12,16 @@ import { loadConfigBundle } from "../src/config/load.ts";
 import type { AgentReceipt, ControlState } from "../src/config/types.ts";
 import type { SpawnedProcess } from "../src/harness/process.ts";
 import { createProductionDependencies } from "../src/main.ts";
-import { parseControlComment } from "../src/provider/control-comment.ts";
+import { renderPublication } from "../src/provider/publication.ts";
 import type {
   ProviderAdapter,
   ProviderComment,
   ProviderRepository,
   ProviderTicketSnapshot,
+  RecoveryEvidence,
   TicketRef,
 } from "../src/provider/types.ts";
+import { openLocalStore, providerScope, type LocalStore } from "../src/runtime/local-store.ts";
 import { createAttemptSession } from "../src/runtime/sessions.ts";
 
 const REVISION = "a".repeat(40);
@@ -27,6 +29,7 @@ const NOW = "2026-08-26T12:00:00.000Z";
 const TICKET = { provider: "gitlab", repository: "group/repo", number: 7 } as const;
 const GHES_TICKET = { provider: "github", repository: "owner/repo", number: 8 } as const;
 const ACTOR = { login: "operator", providerId: "1" };
+const CONTROLLER_ID = "11111111-1111-4111-8111-111111111111";
 const GITLAB_OAUTH_METADATA: Record<string, string> = {
   host: "gitlab.test", api_host: "gitlab.test", api_protocol: "https", git_protocol: "https",
   user: "operator", use_keyring: "true", is_oauth2: "true", oauth2_expiry_date: "2026-08-27T12:00:00Z",
@@ -88,6 +91,18 @@ class Provider implements ProviderAdapter {
       open: true, labels: [...this.labels], updatedAt: NOW,
       activation: { present: true, eventId: "activation-1", actor: ACTOR, occurredAt: NOW },
       comments: structuredClone(this.comments), changeRequest: null,
+    };
+  }
+  async readRecoveryEvidence(): Promise<RecoveryEvidence> {
+    return {
+      snapshot: await this.readTicket(),
+      publications: [],
+      changes: [],
+      reviews: [],
+      ambiguities: [],
+      complete: true,
+      activeBoundary: "fresh",
+      legacyActive: false,
     };
   }
   async permission() { return "maintain" as const; }
@@ -187,7 +202,7 @@ test("production retries keep the pinned provider credential scoped to the child
           flowInstanceId: expected.flowInstanceId, attemptId: expected.attemptId, outcome: "succeeded",
           summary: "assessment published", artifacts: [{ kind: "comment", id: "99",
             url: "https://gitlab.test/group/repo/-/issues/7#note_99",
-            marker: `<!-- agent-flow:v1 flow=${expected.flowInstanceId} attempt=${expected.attemptId} artifact=assessment -->`,
+            marker: renderPublication({ config: expected.configRevision, controller: expected.controllerId }),
             artifactKind: "assessment" }] };
       },
       async delay() {},
@@ -195,16 +210,24 @@ test("production retries keep the pinned provider credential scoped to the child
     },
   });
   const harnesses = production.createHarnesses();
-  const controller = production.createController(bundle, { gitlab: provider }, harnesses);
+  await mkdir(join(root, "data"));
+  const scope = providerScope("gitlab", bundle.controller.providers.gitlab!.apiUrl);
+  const store = openLocalStore(join(root, "data/execution.sqlite"));
+  const runtime = { controllerId: CONTROLLER_ID, store, providerScopes: { gitlab: scope } };
+  const controller = production.createController(bundle, { gitlab: provider }, harnesses, runtime);
 
   await controller.bootstrap();
   await waitFor(() => environments.length === 2);
   await waitFor(
-    () => currentControl(provider)?.stateId === "assessment-review",
-    () => `events=${events.join(",")}; control=${JSON.stringify(currentControl(provider))}`,
+    () => currentControl(store, scope, TICKET)?.stateId === "assessment-review",
+    () => `events=${events.join(",")}; control=${JSON.stringify(currentControl(store, scope, TICKET))}`,
   );
 
-  assert.equal(environments.length, 2, `events=${events.join(",")}; control=${JSON.stringify(currentControl(provider))}`);
+  assert.equal(
+    environments.length,
+    2,
+    `events=${events.join(",")}; control=${JSON.stringify(currentControl(store, scope, TICKET))}`,
+  );
   for (const environment of environments) {
     assert.equal(environment.OAUTH_TOKEN, undefined);
     for (const name of ["CHANGED_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "UNRELATED_SECRET"]) {
@@ -217,9 +240,9 @@ test("production retries keep the pinned provider credential scoped to the child
     assert.deepEqual(Object.keys(parse(await readFile(path, "utf8")).hosts), ["gitlab.test"]);
     assert.doesNotMatch(await readFile(path, "utf8"), /token|refresh|pinned-gitlab-token/i);
   }
-  assert.equal(currentControl(provider)?.attemptSeries?.consumed, 2);
-  assert.equal(currentControl(provider)?.stateId, "assessment-review");
-  const sessions = join(root, "data/sessions", currentControl(provider)!.flowInstanceId);
+  assert.equal(currentControl(store, scope, TICKET)?.attemptSeries?.consumed, 2);
+  assert.equal(currentControl(store, scope, TICKET)?.stateId, "assessment-review");
+  const sessions = join(root, "data/sessions", currentControl(store, scope, TICKET)!.flowInstanceId);
   for (const attemptId of await readdir(sessions)) {
     for (const file of ["context.json", "harness.log"]) {
       assert.doesNotMatch(
@@ -228,6 +251,8 @@ test("production retries keep the pinned provider credential scoped to the child
       );
     }
   }
+  await controller.run(AbortSignal.abort());
+  store.close();
 });
 
 test("production passes a custom GHES credential without exposing public GitHub auth", async (t) => {
@@ -286,18 +311,22 @@ test("production passes a custom GHES credential without exposing public GitHub 
           flowInstanceId: expected.flowInstanceId, attemptId: expected.attemptId, outcome: "succeeded",
           summary: "assessment published", artifacts: [{ kind: "comment", id: "99",
             url: "https://github.enterprise.test/owner/repo/issues/8#issuecomment-99",
-            marker: `<!-- agent-flow:v1 flow=${expected.flowInstanceId} attempt=${expected.attemptId} artifact=assessment -->`,
+            marker: renderPublication({ config: expected.configRevision, controller: expected.controllerId }),
             artifactKind: "assessment" }] };
       },
       async delay() {},
       now: () => NOW,
     },
   });
-  const controller = production.createController(bundle, { github: provider }, production.createHarnesses());
+  await mkdir(join(root, "data"));
+  const scope = providerScope("github", bundle.controller.providers.github!.apiUrl);
+  const store = openLocalStore(join(root, "data/execution.sqlite"));
+  const runtime = { controllerId: CONTROLLER_ID, store, providerScopes: { github: scope } };
+  const controller = production.createController(bundle, { github: provider }, production.createHarnesses(), runtime);
 
   await controller.bootstrap();
   await waitFor(() => environments.length === 1);
-  await waitFor(() => currentControl(provider)?.attemptSeries?.current?.status === "succeeded");
+  await waitFor(() => currentControl(store, scope, GHES_TICKET)?.attemptSeries?.current?.status === "succeeded");
 
   const environment = environments[0]!;
   assert.equal(environment.GH_ENTERPRISE_TOKEN, "ghes-token");
@@ -308,21 +337,22 @@ test("production passes a custom GHES credential without exposing public GitHub 
   const wrongBundle = structuredClone(bundle);
   wrongBundle.controller.providers.github!.tokenEnv = "GH_TOKEN";
   const wrongProvider = new Provider("github", GHES_TICKET, "github.enterprise.test");
+  const wrongStore = openLocalStore(join(root, "wrong-execution.sqlite"));
   const wrongController = production.createController(
     wrongBundle,
     { github: wrongProvider },
     production.createHarnesses(),
+    { ...runtime, store: wrongStore },
   );
   await assert.rejects(wrongController.bootstrap(), /provider token environment is not supported/);
+  wrongStore.close();
   assert.equal(environments.length, 1);
+  await controller.run(AbortSignal.abort());
+  store.close();
 });
 
-function currentControl(provider: Provider): ControlState | null {
-  for (const comment of provider.comments) {
-    const control = parseControlComment(comment.body);
-    if (control) return control;
-  }
-  return null;
+function currentControl(store: LocalStore, scope: string, ref: TicketRef): ControlState | null {
+  return store.load(scope, ref)?.value.control ?? null;
 }
 
 async function waitFor(predicate: () => boolean, detail = () => "condition was not met"): Promise<void> {

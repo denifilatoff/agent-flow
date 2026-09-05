@@ -372,26 +372,20 @@ test("binds discovery cursors to the exact API resource and window", async () =>
   );
 });
 
-test("bootstraps the union of managed and activation labels across pages", async () => {
-  const managedPath =
-    "repos/owner/repo/issues?state=all&labels=agent-flow%3Amanaged&per_page=100";
+test("bootstraps only active tickets across pages", async () => {
   const activationPath =
     "repos/owner/repo/issues?state=all&labels=agent-flow%3Adevelopment&per_page=100";
   const client = new FixtureClient()
-    .add("GET", managedPath, {
-      data: [{ number: 17 }, { number: 18, pull_request: {} }],
-      next: "repos/owner/repo/issues?labels=agent-flow%3Amanaged&page=2",
-    })
-    .add("GET", "repos/owner/repo/issues?labels=agent-flow%3Amanaged&page=2", {
-      data: [{ number: 19 }],
-    })
     .add("GET", activationPath, {
-      data: [{ number: 17 }, { number: 20 }],
+      data: [{ number: 17 }, { number: 18, pull_request: {} }],
+      next: "repos/owner/repo/issues?labels=agent-flow%3Adevelopment&page=2",
+    })
+    .add("GET", "repos/owner/repo/issues?labels=agent-flow%3Adevelopment&page=2", {
+      data: [{ number: 20 }],
     });
 
   assert.deepEqual(await adapter(client).bootstrap(REPOSITORY), [
     { provider: "github", repository: REPOSITORY, number: 17 },
-    { provider: "github", repository: REPOSITORY, number: 19 },
     { provider: "github", repository: REPOSITORY, number: 20 },
   ]);
   assert.ok(client.calls.every(({ priority }) => priority === "background"));

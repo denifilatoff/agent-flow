@@ -249,19 +249,13 @@ export function createGitLabAdapter(
 
     async bootstrap(repository: string): Promise<TicketRef[]> {
       const route = `${repositoryPath(repository)}/issues`;
-      const found = new Map<number, TicketRef>();
-      for (const label of ["agent-flow:managed", ACTIVATION_LABEL]) {
-        const query = new URLSearchParams({
-          scope: "all",
-          state: "all",
-          labels: label,
-          per_page: "100",
-        });
-        for (const ref of issueRefs(await listAll(`${route}?${query}`, "background"), repository)) {
-          found.set(ref.number, ref);
-        }
-      }
-      return [...found.values()];
+      const query = new URLSearchParams({
+        scope: "all",
+        state: "all",
+        labels: ACTIVATION_LABEL,
+        per_page: "100",
+      });
+      return issueRefs(await listAll(`${route}?${query}`, "background"), repository);
     },
 
     readRepository,

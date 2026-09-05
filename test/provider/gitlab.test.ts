@@ -344,42 +344,37 @@ test("rejects provider pagination that changes routes or omits an advancing page
     /pagination.*page/,
   );
 
-  const managed = `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100`;
-  const crossProjectClient = new FixtureClient().add("GET", managed, {
+  const activation = `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100`;
+  const crossProjectClient = new FixtureClient().add("GET", activation, {
     data: [{ iid: 23 }],
     next:
-      "/api/v4/projects/other%2Fproject/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100&page=2",
+      "/api/v4/projects/other%2Fproject/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100&page=2",
   });
   await assert.rejects(adapter(crossProjectClient).bootstrap(REPOSITORY), /pagination.*route/);
 
-  const changedFilterClient = new FixtureClient().add("GET", managed, {
+  const changedFilterClient = new FixtureClient().add("GET", activation, {
     data: [{ iid: 23 }],
     next:
-      `/api/v4/${PROJECT}/issues?scope=all&state=opened&labels=agent-flow%3Amanaged&per_page=100&page=2`,
+      `/api/v4/${PROJECT}/issues?scope=all&state=opened&labels=agent-flow%3Adevelopment&per_page=100&page=2`,
   });
   await assert.rejects(adapter(changedFilterClient).bootstrap(REPOSITORY), /pagination.*filters/);
 });
 
-test("bootstraps the union of managed and activation labels across pages", async () => {
-  const managed = `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100`;
+test("bootstraps only active tickets across pages", async () => {
   const activation =
     `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100`;
   const client = new FixtureClient()
-    .add("GET", managed, {
+    .add("GET", activation, {
       data: [{ iid: 23 }],
       next:
-        `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100&page=2`,
+        `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100&page=2`,
     })
-    .add(
-      "GET",
-      `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100&page=2`,
-      { data: [{ iid: 24 }] },
-    )
-    .add("GET", activation, { data: [{ iid: 23 }, { iid: 25 }] });
+    .add("GET", `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100&page=2`, {
+      data: [{ iid: 25 }],
+    });
 
   assert.deepEqual(await adapter(client).bootstrap(REPOSITORY), [
     { provider: "gitlab", repository: REPOSITORY, number: 23 },
-    { provider: "gitlab", repository: REPOSITORY, number: 24 },
     { provider: "gitlab", repository: REPOSITORY, number: 25 },
   ]);
   assert.ok(client.calls.every(({ priority }) => priority === "background"));

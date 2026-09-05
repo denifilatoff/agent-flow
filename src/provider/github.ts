@@ -220,17 +220,8 @@ export function createGitHubAdapter(
 
     async bootstrap(repository: string): Promise<TicketRef[]> {
       const route = repositoryPath(repository);
-      const found = new Map<number, TicketRef>();
-      for (const label of ["agent-flow:managed", ACTIVATION_LABEL]) {
-        const query = new URLSearchParams({ state: "all", labels: label, per_page: "100" });
-        for (const ref of issueRefs(
-          await listAll(`repos/${route}/issues?${query}`, "background"),
-          repository,
-        )) {
-          found.set(ref.number, ref);
-        }
-      }
-      return [...found.values()];
+      const query = new URLSearchParams({ state: "all", labels: ACTIVATION_LABEL, per_page: "100" });
+      return issueRefs(await listAll(`repos/${route}/issues?${query}`, "background"), repository);
     },
 
     readRepository,
