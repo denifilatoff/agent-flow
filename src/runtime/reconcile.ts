@@ -505,8 +505,13 @@ function isMissingLocalResume(
 ): boolean {
   if (decision.kind !== "ambiguous"
     || (control.stateId !== "blocked" && control.stateId !== "needs-human")
-    || decision.reason !== `${control.stateId} resume target is unavailable`) return false;
-  return providerStage(snapshot) === control.stateId && control.resumeStateId !== null;
+    || control.resumeStateId === null) return false;
+  const stages = snapshot.labels
+    .filter((label) => label.startsWith("agent-stage:"))
+    .map((label) => label.slice("agent-stage:".length));
+  return (decision.reason === `${control.stateId} resume target is unavailable`
+      && stages.length === 1 && stages[0] === control.stateId)
+    || (decision.reason === "provider stage is missing or contradictory" && stages.length === 0);
 }
 
 function hasValidLocalResume(flow: FlowDefinition, control: ControlState): boolean {

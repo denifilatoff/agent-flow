@@ -888,6 +888,33 @@ test("C6/C16 local needs-human and blocked resume context overrides only missing
     assert.equal(runtime.launcher.requests[0]?.control.attemptSeries?.consumed, 0);
   });
 
+  await t.test("blocked after a partial stage-label update", async (context) => {
+    const provider = new FakeProvider();
+    const answer = comment("retry-after-crash", "Please retry.", MAINTAINER, "2026-08-26T11:00:00.000Z");
+    provider.snapshot.labels.push("agent-flow:managed");
+    provider.snapshot.comments.push(answer);
+    provider.recoveryEvidence = recoveryEvidence(provider, []);
+    const runtime = await localRuntime(context, provider);
+    await runtime.writer(TICKET, null, controlState({
+      stateId: "blocked",
+      resumeStateId: "assessment",
+      attemptSeries: attemptSeries({ consumed: 3, current: {
+        attemptId: ATTEMPT,
+        status: "failed",
+        startedAt: "2026-08-26T10:30:00.000Z",
+        finishedAt: "2026-08-26T10:45:00.000Z",
+        error: { code: "ATTEMPTS_EXHAUSTED", message: "retry budget exhausted" },
+      } }),
+    }));
+
+    const result = await reconcileTicket(runtime.configured, TICKET);
+
+    assert.equal(result.stateId, "assessment");
+    assert.equal(runtime.launcher.requests.length, 1);
+    assert.equal(runtime.launcher.requests[0]?.control.attemptSeries?.consumed, 0);
+    assert.ok(provider.snapshot.labels.includes("agent-stage:assessment"));
+  });
+
   await t.test("blocked resumes a human gate", async (context) => {
     const provider = new FakeProvider();
     const retry = comment("retry-review", "Retry the review gate.", MAINTAINER, "2026-08-26T11:00:00.000Z");
