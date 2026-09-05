@@ -182,6 +182,17 @@ export function createGitLabAdapter(
     };
   }
 
+  async function readActiveChanges(
+    ref: TicketRef,
+    data: Awaited<ReturnType<typeof readSnapshotData>>,
+    ambiguities: string[],
+  ): Promise<{ boundary: RecoveryEvidence["activeBoundary"]; changes: NormalizedChangeRequest[] }> {
+    const boundary = activeBoundary(data.snapshot, data.activationEvents, ambiguities);
+    const changes = (await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number))))
+      .filter((change) => withinActiveBoundary(data.snapshot, boundary, change.createdAt));
+    return { boundary, changes };
+  }
+
   return {
     kind: "gitlab",
 
@@ -262,19 +273,18 @@ export function createGitLabAdapter(
 
     async readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot> {
       const data = await readSnapshotData(ref);
-      const changeNumber = uniqueChangeNumber(data.changeNumbers, "GitLab issue has multiple related merge requests");
+      const { changes } = await readActiveChanges(ref, data, []);
+      const change = uniqueChange(changes, "GitLab issue has multiple related merge requests");
       return {
         ...data.snapshot,
-        changeRequest: changeNumber === null ? null : await readChangeRequest(ref, changeNumber),
+        changeRequest: change,
       };
     },
 
     async readRecoveryEvidence(ref: TicketRef): Promise<RecoveryEvidence> {
       const data = await readSnapshotData(ref);
       const ambiguities: string[] = [];
-      const boundary = activeBoundary(data.snapshot, data.activationEvents, ambiguities);
-      const changes = (await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number))))
-        .filter((change) => withinActiveBoundary(data.snapshot, boundary, change.createdAt));
+      const { boundary, changes } = await readActiveChanges(ref, data, ambiguities);
       const reviewRows = await Promise.all(changes.map(async (change) => ({
         change,
         values: await listAll(`${repositoryPath(ref.repository)}/merge_requests/${change.number}/notes?per_page=100`, "active"),
@@ -634,9 +644,9 @@ function findChangeRequestNumbers(
   return [...candidates].sort((left, right) => left - right);
 }
 
-function uniqueChangeNumber(numbers: readonly number[], message: string): number | null {
-  if (numbers.length > 1) throw new Error(message);
-  return numbers[0] ?? null;
+function uniqueChange(changes: readonly NormalizedChangeRequest[], message: string): NormalizedChangeRequest | null {
+  if (changes.length > 1) throw new Error(message);
+  return changes[0] ?? null;
 }
 
 function canonicalApiScope(value: URL): string {

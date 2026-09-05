@@ -183,6 +183,17 @@ export function createGitHubAdapter(
     };
   }
 
+  async function readActiveChanges(
+    ref: TicketRef,
+    data: Awaited<ReturnType<typeof readSnapshotData>>,
+    ambiguities: string[],
+  ): Promise<{ boundary: RecoveryEvidence["activeBoundary"]; changes: NormalizedChangeRequest[] }> {
+    const boundary = activeBoundary(data.snapshot, data.activationEvents, ambiguities);
+    const changes = (await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number))))
+      .filter((change) => withinActiveBoundary(data.snapshot, boundary, change.createdAt));
+    return { boundary, changes };
+  }
+
   return {
     kind: "github",
 
@@ -248,18 +259,18 @@ export function createGitHubAdapter(
 
     async readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot> {
       const data = await readSnapshotData(ref);
-      const changeNumber = uniqueChangeNumber(data.changeNumbers, "GitHub issue has multiple related pull requests");
+      const { changes } = await readActiveChanges(ref, data, []);
+      const change = uniqueChange(changes, "GitHub issue has multiple related pull requests");
       return {
         ...data.snapshot,
-        changeRequest: changeNumber === null ? null : await readChangeRequest(ref, changeNumber),
+        changeRequest: change,
       };
     },
 
     async readRecoveryEvidence(ref: TicketRef): Promise<RecoveryEvidence> {
       const data = await readSnapshotData(ref);
-      const boundary = activeBoundary(data.snapshot, data.activationEvents, data.linkAmbiguities);
-      const changes = (await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number))))
-        .filter((change) => withinActiveBoundary(data.snapshot, boundary, change.createdAt));
+      const ambiguities: string[] = [...data.linkAmbiguities];
+      const { boundary, changes } = await readActiveChanges(ref, data, ambiguities);
       const reviewRows = await Promise.all(changes.map(async (change) => ({
         change,
         values: await listAll(
@@ -267,7 +278,6 @@ export function createGitHubAdapter(
           "active",
         ),
       })));
-      const ambiguities: string[] = [...data.linkAmbiguities];
       const permissionCache = new Map<string, boolean>();
       const authorized = async (actor: Actor): Promise<boolean> => {
         const cached = permissionCache.get(actor.providerId);
@@ -605,9 +615,9 @@ function sameRepositoryUrl(value: unknown, expected: URL): boolean {
   }
 }
 
-function uniqueChangeNumber(numbers: readonly number[], message: string): number | null {
-  if (numbers.length > 1) throw new Error(message);
-  return numbers[0] ?? null;
+function uniqueChange(changes: readonly NormalizedChangeRequest[], message: string): NormalizedChangeRequest | null {
+  if (changes.length > 1) throw new Error(message);
+  return changes[0] ?? null;
 }
 
 function canonicalApiScope(value: URL): string {

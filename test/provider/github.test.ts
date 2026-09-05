@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+import { loadConfigBundle } from "../../src/config/load.ts";
 import { createGitHubAdapter } from "../../src/provider/github.ts";
 import { ProviderHttpError } from "../../src/provider/http.ts";
 import { electOwner } from "../../src/provider/publication.ts";
@@ -10,6 +14,7 @@ import type {
   ProviderResponse,
   RateLimitedHttpClient,
 } from "../../src/provider/types.ts";
+import { readDecisionAndBuildReceipt } from "../../src/runtime/receipts.ts";
 
 const SINCE = "2026-08-25T10:00:00.000Z";
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -283,6 +288,62 @@ test("fresh recovery ignores pull requests created before the latest activation"
   assert.deepEqual(evidence.reviews, []);
   assert.deepEqual(evidence.publications, []);
   assert.equal(evidence.ambiguities.some((value) => value.includes("multiple linked")), false);
+});
+
+test("development verification selects the pull request from the second activation", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-github-reactivation-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const decision = join(root, "decision.json");
+  await writeFile(decision, '{"event":"agent-succeeded"}\n');
+  const oldLink = {
+    id: 799,
+    event: "cross-referenced",
+    created_at: "2026-08-25T09:10:00Z",
+    source: { issue: { number: 31, repository_url: "https://api.github.example.test/repos/owner/repo", pull_request: {} } },
+  };
+  const newLink = {
+    id: 805,
+    event: "cross-referenced",
+    created_at: "2026-08-25T10:00:11Z",
+    source: { issue: { number: 32, repository_url: "https://api.github.example.test/repos/owner/repo", pull_request: {} } },
+  };
+  const oldPull = {
+    ...(fixture.pull as Record<string, unknown>),
+    created_at: "2026-08-25T09:05:00Z",
+    updated_at: "2026-08-25T09:05:00Z",
+  };
+  const currentPull = {
+    ...(fixture.secondPull as Record<string, unknown>),
+    body: (fixture.pull as { body: string }).body,
+  };
+  const timeline = [...(fixture.timelineFirst as unknown[]), oldLink, ...(fixture.timelineSecond as unknown[]), newLink];
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository }, { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue }, { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", { data: timeline }, { data: timeline })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] }, { data: [] })
+    .add("GET", "repos/owner/repo/pulls/31", { data: oldPull }, { data: oldPull })
+    .add("GET", "repos/owner/repo/pulls/32", { data: currentPull }, { data: currentPull }, { data: currentPull })
+    .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "write" } });
+  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", "a".repeat(40));
+
+  const receipt = await readDecisionAndBuildReceipt(decision, {
+    flow: bundle.flow,
+    stateId: "development",
+    mode: "stage",
+    resultContract: "development",
+    configRevision: "a".repeat(40),
+    controllerId: "11111111-1111-4111-8111-111111111111",
+    publicationKeys: [],
+    flowInstanceId: "33333333-3333-4333-8333-333333333333",
+    attemptId: "44444444-4444-4444-8444-444444444444",
+    ticket: { provider: "github", repository: REPOSITORY, number: 17 },
+    sourceComment: null,
+    pinnedChangeRequest: null,
+  }, adapter(client), false);
+
+  assert.equal(receipt.artifacts[0]?.kind, "change-request");
+  assert.equal(receipt.artifacts[0]?.kind === "change-request" ? receipt.artifacts[0].number : null, 32);
 });
 
 test("C17 rejects incomplete GitHub recovery evidence pages", async () => {
