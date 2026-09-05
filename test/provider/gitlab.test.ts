@@ -269,6 +269,37 @@ test("marks a first activation without managed or stage history as fresh", async
   assert.deepEqual(evidence.ambiguities, []);
 });
 
+test("selects the latest activation from descending paginated label events", async () => {
+  const oldActivation = {
+    id: 800,
+    action: "add",
+    label: { name: "agent-flow:development" },
+    user: { id: 6, username: "developer" },
+    created_at: "2026-08-25T09:00:00.000Z",
+  };
+  const eventsPath = `${PROJECT}/issues/23/resource_label_events?per_page=100`;
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", eventsPath, {
+      data: [...(fixture.labelEventsSecond as unknown[]), ...(fixture.labelEventsFirst as unknown[])],
+      next: `${eventsPath}&page=2`,
+    })
+    .add("GET", `${eventsPath}&page=2`, { data: [oldActivation] })
+    .add("GET", notes, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.snapshot.activation.eventId, "802");
+  assert.equal(evidence.snapshot.activation.actor?.login, "maintainer");
+  assert.equal(evidence.snapshot.activation.occurredAt, "2026-08-25T10:00:00.000Z");
+  assert.equal(evidence.activeBoundary, "fresh");
+});
+
 test("fresh recovery ignores merge requests created before the latest activation", async () => {
   const oldMergeRequest = {
     ...(fixture.mergeRequest as Record<string, unknown>),

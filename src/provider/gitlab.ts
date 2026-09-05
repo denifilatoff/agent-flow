@@ -147,7 +147,7 @@ export function createGitLabAdapter(
       }
     }
     const activationEvent = labels.includes(ACTIVATION_LABEL)
-      ? activationEvents.toReversed().find(({ kind }) => kind === "add")
+      ? activationEvents.filter(({ kind }) => kind === "add").toSorted(compareActivationEvents).at(-1)
       : undefined;
     const issueUrl = string(issue, "web_url");
     const commentQuery = new URLSearchParams({
@@ -680,7 +680,8 @@ function activeBoundary(
     ambiguities.push("activation boundary is unavailable");
     return "ambiguous";
   }
-  if (events.some((event) => event.kind === "remove" && event.createdAt < snapshot.activation.occurredAt!)) {
+  if (events.some((event) => event.kind === "remove"
+    && Date.parse(event.createdAt) < Date.parse(snapshot.activation.occurredAt!))) {
     return "fresh";
   }
   const firstActivation = events.length === 1
@@ -688,6 +689,17 @@ function activeBoundary(
     && !snapshot.labels.includes("agent-flow:managed")
     && !snapshot.labels.some((label) => label.startsWith("agent-stage:"));
   return firstActivation ? "fresh" : "known";
+}
+
+function compareActivationEvents(
+  left: { id: string; createdAt: string },
+  right: { id: string; createdAt: string },
+): number {
+  const time = Date.parse(left.createdAt) - Date.parse(right.createdAt);
+  if (time !== 0) return time;
+  const leftId = BigInt(left.id);
+  const rightId = BigInt(right.id);
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
 }
 
 function withinActiveBoundary(
