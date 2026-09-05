@@ -748,6 +748,38 @@ test("a proven fresh activation replaces a terminal local flow without removing 
   assert.ok(provider.snapshot.labels.includes("agent-stage:assessment"));
 });
 
+test("a proven fresh activation replaces nonterminal local state from an older activation", async (t) => {
+  const provider = new FakeProvider();
+  provider.snapshot.activation = {
+    present: true,
+    eventId: "804",
+    actor: MAINTAINER,
+    occurredAt: "2026-08-26T11:50:00.000Z",
+  };
+  provider.snapshot.labels.push("agent-stage:planning", "agent-flow:managed");
+  provider.recoveryEvidence = recoveryEvidence(provider, [], { activeBoundary: "fresh" });
+  const runtime = await localRuntime(t, provider);
+  await runtime.writer(TICKET, null, controlState({
+    configRevision: "b".repeat(40),
+    stateId: "planning",
+    attemptSeries: attemptSeries({ agentId: "planner", stateId: "planning" }),
+    latestReceipt: assessmentReceipt(),
+  }));
+
+  const result = await reconcileTicket(runtime.configured, TICKET);
+
+  const control = runtime.writer.load!(TICKET)?.value.control;
+  assert.equal(result.flowInstanceId, FLOW_2);
+  assert.equal(control?.flowInstanceId, FLOW_2);
+  assert.equal(control?.activationEventId, "804");
+  assert.equal(control?.configRevision, SHA);
+  assert.equal(control?.stateId, "assessment");
+  assert.equal(control?.attemptSeries, null);
+  assert.equal(control?.latestReceipt, null);
+  assert.deepEqual(runtime.launcher.cancelled, [FLOW_1]);
+  assert.equal(runtime.launcher.requests.length, 1);
+});
+
 test("local needs-human and blocked resume context overrides only missing-context ambiguity", async (t) => {
   await t.test("needs-human", async (context) => {
     const provider = new FakeProvider();

@@ -206,6 +206,30 @@ test("reads complete recovery evidence from paginated notes, linked merge reques
   assert.ok(client.calls.every(({ priority }) => priority === "active"));
 });
 
+test("marks a first activation without managed or stage history as fresh", async () => {
+  const issue = {
+    ...(fixture.issue as Record<string, unknown>),
+    labels: ["bug", "agent-flow:development"],
+  };
+  const activation = (fixture.labelEventsSecond as unknown[])[0];
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: [activation] })
+    .add("GET", notes, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/7`, {
+      data: { id: 7, username: "maintainer", access_level: 40 },
+    });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.activeBoundary, "fresh");
+  assert.deepEqual(evidence.publications, []);
+  assert.deepEqual(evidence.ambiguities, []);
+});
+
 test("rejects incomplete GitLab recovery evidence pages", async () => {
   const notePath = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
   const client = new FixtureClient()

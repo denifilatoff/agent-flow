@@ -211,10 +211,12 @@ async function reconcileLocal(
   }
   let control = stored?.value.control ?? null;
   if (control
-    && (control.stateId === "done" || control.stateId === "cancelled")
     && evidence.activeBoundary === "fresh"
     && snapshot.activation.eventId !== null
     && snapshot.activation.eventId !== control.activationEventId) {
+    if (control.stateId !== "done" && control.stateId !== "cancelled") {
+      await dependencies.launcher.cancel(control.flowInstanceId);
+    }
     control = null;
   }
   const mergedWins = control?.stateId === "awaiting-merge" && snapshot.changeRequest?.state === "merged";

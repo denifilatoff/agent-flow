@@ -650,9 +650,14 @@ function activeBoundary(
     ambiguities.push("activation boundary is unavailable");
     return "ambiguous";
   }
-  return events.some((event) => event.kind === "remove" && event.createdAt < snapshot.activation.occurredAt!)
-    ? "fresh"
-    : "known";
+  if (events.some((event) => event.kind === "remove" && event.createdAt < snapshot.activation.occurredAt!)) {
+    return "fresh";
+  }
+  const firstActivation = events.length === 1
+    && events[0]!.kind === "add"
+    && !snapshot.labels.includes("agent-flow:managed")
+    && !snapshot.labels.some((label) => label.startsWith("agent-stage:"));
+  return firstActivation ? "fresh" : "known";
 }
 
 function withinActiveBoundary(

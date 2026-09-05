@@ -181,6 +181,32 @@ test("reads complete recovery evidence from paginated comments, linked pulls, an
   assert.ok(client.calls.every(({ priority }) => priority === "active"));
 });
 
+test("marks a first activation without managed or stage history as fresh", async () => {
+  const issue = {
+    ...(fixture.issue as Record<string, unknown>),
+    labels: [{ name: "bug" }, { name: "agent-flow:development" }],
+  };
+  const activation = (fixture.timelineSecond as unknown[])[0];
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", { data: [activation] })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", {
+      data: { permission: "maintain" },
+    });
+
+  const evidence = await adapter(client).readRecoveryEvidence({
+    provider: "github",
+    repository: REPOSITORY,
+    number: 17,
+  });
+
+  assert.equal(evidence.activeBoundary, "fresh");
+  assert.deepEqual(evidence.publications, []);
+  assert.deepEqual(evidence.ambiguities, []);
+});
+
 test("rejects incomplete GitHub recovery evidence pages", async () => {
   const client = new FixtureClient()
     .add("GET", "repos/owner/repo", { data: fixture.repository })

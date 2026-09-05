@@ -182,6 +182,10 @@ test("fresh reactivation resumes while uncertain boundaries and blocked resume t
     changes: [oldMerge],
   }), CONTROLLER).kind, "ambiguous");
   assert.equal(classifyRecovery(evidence({
+    snapshot: snapshot({ labels: ["agent-flow:development"] }),
+    activeBoundary: "known",
+  }), CONTROLLER).kind, "ambiguous");
+  assert.equal(classifyRecovery(evidence({
     snapshot: snapshot({ labels: ["agent-flow:development", "agent-stage:blocked"] }),
   }), CONTROLLER).kind, "ambiguous");
 });
