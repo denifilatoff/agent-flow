@@ -178,6 +178,10 @@ test("renders event-specific evidence and the pinned change identity", async () 
   assert.match(review, /github owner\/repo#8/);
   assert.match(review, /https:\/\/github\.test\/owner\/repo\/pull\/8/);
   assert.match(review, /agent-flow-review:v1/);
+  assert.ok(review.includes(
+    "If one existing provider-native review already satisfies either exact review evidence contract for this pinned "
+      + "head, reuse it by writing the matching decision without publishing another review.",
+  ));
 
   const paused = renderRuntimePrompt(promptInput(flow, {
     stateId: "needs-human",

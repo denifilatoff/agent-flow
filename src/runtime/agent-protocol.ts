@@ -97,6 +97,12 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
         + "to reopen the same change request or cancel the flow, then write {\"event\":\"agent-needs-human\"}.",
     );
   }
+  if (input.stateId === "review" && input.mode === "stage") {
+    lines.push(
+      "If one existing provider-native review already satisfies either exact review evidence contract for this pinned "
+        + "head, reuse it by writing the matching decision without publishing another review.",
+    );
+  }
   lines.push(
     "Allowed decisions and required provider evidence:",
     ...events.map((event) => `${JSON.stringify({ event })} requires ${evidence(input, event)}.`),
