@@ -803,6 +803,34 @@ test("local needs-human and blocked resume context overrides only missing-contex
     assert.equal(runtime.launcher.requests[0]?.control.attemptSeries?.consumed, 0);
   });
 
+  await t.test("blocked resumes a human gate", async (context) => {
+    const provider = new FakeProvider();
+    const retry = comment("retry-review", "Retry the review gate.", MAINTAINER, "2026-08-26T11:00:00.000Z");
+    provider.snapshot.labels.push("agent-stage:blocked", "agent-flow:managed");
+    provider.snapshot.comments.push(retry);
+    provider.recoveryEvidence = recoveryEvidence(provider, []);
+    const runtime = await localRuntime(context, provider);
+    await runtime.writer(TICKET, null, controlState({
+      stateId: "blocked",
+      resumeStateId: "assessment-review",
+      attemptSeries: attemptSeries({ consumed: 3, current: {
+        attemptId: ATTEMPT,
+        status: "failed",
+        startedAt: "2026-08-26T10:30:00.000Z",
+        finishedAt: "2026-08-26T10:45:00.000Z",
+        error: { code: "ATTEMPTS_EXHAUSTED", message: "retry budget exhausted" },
+      } }),
+    }));
+
+    const result = await reconcileTicket(runtime.configured, TICKET);
+
+    assert.equal(result.stateId, "assessment-review");
+    assert.equal(result.runnable, true);
+    assert.equal(runtime.launcher.requests.length, 0);
+    assert.equal(runtime.writer.load!(TICKET)?.value.disposition, "ready");
+    assert.equal(runtime.writer.load!(TICKET)?.value.control?.attemptSeries?.consumed, 0);
+  });
+
   await t.test("unrelated ambiguity remains blocking", async (context) => {
     const provider = new FakeProvider();
     provider.snapshot.labels.push("agent-stage:needs-human", "agent-flow:managed");
@@ -822,25 +850,75 @@ test("local needs-human and blocked resume context overrides only missing-contex
   });
 });
 
-test("reset reassessment isolates the current stage publication from earlier results", async (t) => {
+test("reset reassessment isolates a current result when its provider kind is distinct", async (t) => {
   const provider = new FakeProvider();
   const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
   const assessment = comment("assessment", `${marker}\nAssessment.`, MAINTAINER, "2026-08-26T10:30:00.000Z");
-  const plan = comment("plan", `${marker}\nPlan.`, MAINTAINER, "2026-08-26T11:30:00.000Z");
-  provider.snapshot.labels.push("agent-stage:planning", "agent-flow:managed");
+  const plan = comment("plan", `${marker}\nPlan.`, MAINTAINER, "2026-08-26T11:00:00.000Z");
+  const change = changeRequest({
+    body: `${marker}\nImplementation.`,
+    createdAt: "2026-08-26T11:30:00.000Z",
+    updatedAt: "2026-08-26T11:30:00.000Z",
+  });
+  provider.snapshot.labels.push("agent-stage:development", "agent-flow:managed");
   provider.snapshot.comments.push(assessment, plan);
-  provider.recoveryEvidence = recoveryEvidence(provider, [assessment, plan].map((published) => ({
-    key: publicationKey("comment", published.id),
-    createdAt: published.createdAt,
-    metadata: { config: SHA, controller: FLOW_1 },
-  })));
+  provider.snapshot.changeRequest = change;
+  provider.recoveryEvidence = recoveryEvidence(provider, [
+    ...[assessment, plan].map((published) => ({
+      key: publicationKey("comment", published.id),
+      createdAt: published.createdAt,
+      metadata: { config: SHA, controller: FLOW_1 },
+    })),
+    {
+      key: publicationKey("change-request", String(change.number)),
+      createdAt: change.createdAt,
+      metadata: { config: SHA, controller: FLOW_1 },
+    },
+  ], { changes: [change] });
   const runtime = await localRuntime(t, provider);
 
   const result = await reconcileTicket(runtime.configured, TICKET);
 
-  assert.equal(result.stateId, "planning");
+  assert.equal(result.stateId, "development");
   assert.equal(runtime.launcher.requests.length, 1);
-  assert.deepEqual(runtime.launcher.requests[0]?.publicationKeys, [publicationKey("comment", assessment.id)]);
+  assert.deepEqual(runtime.launcher.requests[0]?.publicationKeys, [
+    publicationKey("comment", assessment.id),
+    publicationKey("comment", plan.id),
+  ]);
+});
+
+test("reset pauses when assessment feedback makes a plan candidate indistinguishable", async (t) => {
+  for (const includePlan of [false, true]) {
+    await t.test(includePlan ? "real plan is present" : "only revised assessment is present", async (context) => {
+      const provider = new FakeProvider();
+      const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+      const assessment = comment("assessment", `${marker}\nAssessment.`, MAINTAINER, "2026-08-26T10:10:00.000Z");
+      const revised = comment(
+        "revised-assessment",
+        `${marker}\nRevised assessment.`,
+        MAINTAINER,
+        "2026-08-26T10:50:00.000Z",
+      );
+      const plan = comment("plan", `${marker}\nPlan.`, MAINTAINER, "2026-08-26T11:30:00.000Z");
+      const publications = includePlan ? [assessment, revised, plan] : [assessment, revised];
+      provider.snapshot.labels.push("agent-stage:planning", "agent-flow:managed");
+      provider.snapshot.comments.push(...publications);
+      provider.recoveryEvidence = recoveryEvidence(provider, publications.map((published) => ({
+        key: publicationKey("comment", published.id),
+        createdAt: published.createdAt,
+        metadata: { config: SHA, controller: FLOW_1 },
+      })));
+      const runtime = await localRuntime(context, provider);
+
+      const result = await reconcileTicket(runtime.configured, TICKET);
+
+      assert.equal(result.runnable, false);
+      assert.equal(runtime.launcher.requests.length, 0);
+      assert.equal(runtime.writer.load!(TICKET)?.value.disposition, "ambiguous");
+      assert.deepEqual(runtime.writer.load!(TICKET)?.value.publicationKeys, publications
+        .map(({ id }) => publicationKey("comment", id)).sort());
+    });
+  }
 });
 
 test("reset baseline excludes publications from an earlier activation", async (t) => {

@@ -440,7 +440,7 @@ function hasValidLocalResume(flow: FlowDefinition, control: ControlState): boole
   const acceptsResume = Object.values(paused?.on ?? {}).some(({ target }) => target === "$resume");
   return paused?.kind === "paused"
     && acceptsResume
-    && resumed?.kind === "agent"
+    && (resumed?.kind === "agent" || resumed?.kind === "human-gate")
     && Boolean(resumed.agent && resumed.resultContract);
 }
 
@@ -476,6 +476,9 @@ function recoveryIteration(
   const candidateKind = state?.kind === "agent" ? resultPublicationKind(state.resultContract) : null;
   let candidateKey: string | null = null;
   if (active.length === committed.length + 1 && candidateKind && kinds.at(-1) === candidateKind) {
+    if (committed.at(-1) === candidateKind) {
+      return { kind: "ambiguous", baselineKeys, reason: "current publication role cannot be proved" };
+    }
     candidateKey = active.at(-1)!.key;
   } else if (active.length !== committed.length) {
     return { kind: "ambiguous", baselineKeys, reason: "current publication iteration cannot be isolated" };

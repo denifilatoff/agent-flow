@@ -314,6 +314,36 @@ test("does not accept a marked comment that was present in the publication basel
   }), provider), /comment/);
 });
 
+test("accepts a new plan after feedback when prior comments are in the local baseline", async () => {
+  const provider = new FakeProvider();
+  const assessment = comment("assessment", {
+    id: "99",
+    url: "https://github.example.test/owner/repo/issues/17#issuecomment-99",
+    createdAt: "2026-08-27T09:00:00.000Z",
+    updatedAt: "2026-08-27T09:00:00.000Z",
+  });
+  const revised = comment("assessment", {
+    id: "100",
+    url: "https://github.example.test/owner/repo/issues/17#issuecomment-100",
+    createdAt: "2026-08-27T09:30:00.000Z",
+    updatedAt: "2026-08-27T09:30:00.000Z",
+  });
+  const plan = comment("plan");
+  installComments(provider, [assessment, revised, plan]);
+
+  const receipt = await readDecision({ event: "agent-succeeded" }, expectation({
+    stateId: "planning",
+    resultContract: "plan",
+    publicationKeys: [assessment, revised].map(({ id }) => JSON.stringify([
+      "github", "https://api.github.com/", "owner/repo", "comment", id,
+    ])),
+  }), provider);
+
+  assert.equal(receipt.artifacts[0]?.kind, "comment");
+  assert.equal(receipt.artifacts[0]?.id, plan.id);
+  assert.equal(receipt.artifacts[0]?.artifactKind, "plan");
+});
+
 test("rejects a malformed publication baseline instead of reusing old evidence", async () => {
   const provider = new FakeProvider();
   installComments(provider, [comment("assessment")]);
