@@ -279,11 +279,15 @@ test("selects the latest activation from descending paginated label events", asy
   };
   const eventsPath = `${PROJECT}/issues/23/resource_label_events?per_page=100`;
   const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const removal = {
+    ...((fixture.labelEventsFirst as unknown[])[0] as Record<string, unknown>),
+    created_at: "2026-08-25T10:00:00.000Z",
+  };
   const client = new FixtureClient()
     .add("GET", PROJECT, { data: fixture.project })
     .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
     .add("GET", eventsPath, {
-      data: [...(fixture.labelEventsSecond as unknown[]), ...(fixture.labelEventsFirst as unknown[])],
+      data: [...(fixture.labelEventsSecond as unknown[]), removal],
       next: `${eventsPath}&page=2`,
     })
     .add("GET", `${eventsPath}&page=2`, { data: [oldActivation] })

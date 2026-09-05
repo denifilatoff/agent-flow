@@ -672,16 +672,19 @@ function publicationKey(
 
 function activeBoundary(
   snapshot: ProviderTicketSnapshot,
-  events: ReadonlyArray<{ kind: "add" | "remove"; createdAt: string }>,
+  events: ReadonlyArray<{ kind: "add" | "remove"; id: string; createdAt: string }>,
   ambiguities: string[],
 ): "known" | "fresh" | "ambiguous" {
   if (!snapshot.activation.present) return "known";
-  if (!snapshot.activation.occurredAt || !snapshot.activation.actor) {
+  if (!snapshot.activation.eventId || !snapshot.activation.occurredAt || !snapshot.activation.actor) {
     ambiguities.push("activation boundary is unavailable");
     return "ambiguous";
   }
   if (events.some((event) => event.kind === "remove"
-    && Date.parse(event.createdAt) < Date.parse(snapshot.activation.occurredAt!))) {
+    && compareActivationEvents(event, {
+      id: snapshot.activation.eventId!,
+      createdAt: snapshot.activation.occurredAt!,
+    }) < 0)) {
     return "fresh";
   }
   const firstActivation = events.length === 1
