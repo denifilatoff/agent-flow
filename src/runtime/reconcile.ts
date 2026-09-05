@@ -335,17 +335,87 @@ async function reconcileLocal(
   }
 
   const observedKeys = markedObjectKeys(bundle, evidence);
+  const validated = clearUncommittedReceipt(evidence, control, controllerId, dependencies);
+  const receiptChanged = validated !== control;
+  if (receiptChanged) {
+    await writeExistingControl(dependencies, ref, control, validated, observedKeys);
+    control = validated;
+  }
 
-  return reconcileControl(
+  const result = await reconcileControl(
     dependencies,
     snapshot,
     bundle,
     control,
-    stored?.value.publicationKeys ?? evidence.publications.map(({ key }) => key),
+    receiptChanged
+      ? observedKeys
+      : stored?.value.publicationKeys ?? evidence.publications.map(({ key }) => key),
     true,
     undefined,
     observedKeys,
   );
+  return receiptChanged ? { ...result, changed: true } : result;
+}
+
+function clearUncommittedReceipt(
+  evidence: RecoveryEvidence,
+  control: ControlState,
+  controllerId: string,
+  dependencies: ReconcileDependencies,
+): ControlState {
+  const receipt = control.latestReceipt;
+  const current = control.attemptSeries?.current;
+  if (!receipt || receipt.outcome === "failed" || current?.status !== "succeeded"
+    || current.attemptId !== receipt.attemptId) return control;
+
+  const committed = receipt.artifacts.every((artifact) => {
+    const id = artifact.kind === "change-request" ? String(artifact.number) : artifact.id;
+    const publication = evidence.publications.find((candidate) =>
+      hasPublicationIdentity(candidate.key, evidence.snapshot.ref, artifact.kind, id));
+    if (!publication
+      || publication.metadata.config !== control.configRevision
+      || publication.metadata.controller !== controllerId) return false;
+    if (artifact.kind === "change-request") {
+      return evidence.changes.some((change) => change.number === artifact.number
+        && change.headSha === artifact.headSha);
+    }
+    if (artifact.kind === "review") {
+      return evidence.reviews.some((review) => review.id === artifact.id
+        && review.headSha === artifact.headSha
+        && review.verdict === artifact.verdict);
+    }
+    return true;
+  }) && (!receipt.humanGate || evidence.snapshot.comments.some((comment) =>
+    comment.id === receipt.humanGate!.sourceCommentId && !isMarked(comment.body)));
+  if (committed && (receipt.artifacts.length > 0 || receipt.humanGate)) return control;
+
+  return advanceControlState(control, {
+    attemptSeries: control.attemptSeries ? { ...control.attemptSeries, current: null } : null,
+    latestReceipt: null,
+    humanGate: control.humanGate?.interpretedByAttemptId === receipt.attemptId ? null : control.humanGate,
+    changeRequest: normalizedChange(evidence.snapshot.changeRequest),
+  }, now(dependencies));
+}
+
+function hasPublicationIdentity(
+  key: string,
+  ref: TicketRef,
+  kind: PublicationObjectKind,
+  id: string,
+): boolean {
+  try {
+    const value = JSON.parse(key);
+    return Array.isArray(value)
+      && value.length === 5
+      && value[0] === ref.provider
+      && typeof value[1] === "string"
+      && value[1].length > 0
+      && value[2] === ref.repository
+      && value[3] === kind
+      && value[4] === id;
+  } catch {
+    return false;
+  }
 }
 
 async function reconcileControl(
@@ -1002,9 +1072,10 @@ function humanCutoff(comments: ProviderComment[], control: ControlState): string
       .map((artifact) => artifact.kind === "comment" ? artifact.id : "") ?? [],
   );
   const publications = comments.filter((candidate) => artifactIds.has(candidate.id));
+  if (publications.length === 0) return control.updatedAt;
   return publications.reduce(
     (latest, candidate) => candidate.createdAt > latest ? candidate.createdAt : latest,
-    control.updatedAt,
+    control.activatedAt,
   );
 }
 

@@ -692,6 +692,57 @@ test("a locally verified publication survives the publication-before-label crash
   assert.equal(writer.load!(TICKET)?.value.control?.attemptSeries?.consumed, 1);
 });
 
+test("a cached successful receipt cannot advance after its provider publication disappears", async (t) => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels.push("agent-stage:assessment", "agent-flow:managed");
+  provider.recoveryEvidence = recoveryEvidence(provider, []);
+  const runtime = await localRuntime(t, provider);
+  await runtime.writer(TICKET, null, controlState({
+    attemptSeries: attemptSeries(),
+    latestReceipt: assessmentReceipt(),
+  }));
+
+  const result = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(result.stateId, "assessment");
+  assert.equal(runtime.launcher.requests.length, 1);
+  assert.equal(runtime.launcher.requests[0]?.control.latestReceipt, null);
+  assert.equal(runtime.launcher.requests[0]?.control.attemptSeries?.current, null);
+  assert.equal(runtime.writer.load!(TICKET)?.value.control?.latestReceipt, null);
+});
+
+test("an answer published before recovered stage persistence remains eligible", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const assessment = comment(
+    "assessment-result",
+    `${marker}\nAssessment complete.`,
+    MAINTAINER,
+    "2026-08-26T11:30:00.000Z",
+  );
+  const answer = comment("answer-before-reconcile", "Approved.", MAINTAINER, "2026-08-26T11:40:00.000Z");
+  provider.snapshot.labels.push("agent-stage:assessment", "agent-flow:managed");
+  provider.snapshot.comments.push(assessment, answer);
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+    key: publicationKey("comment", assessment.id),
+    createdAt: assessment.createdAt,
+    metadata: { config: SHA, controller: FLOW_1 },
+  }]);
+  const runtime = await localRuntime(t, provider);
+  await runtime.writer(TICKET, null, controlState({
+    updatedAt: NOW,
+    attemptSeries: attemptSeries(),
+    latestReceipt: assessmentReceipt(),
+  }));
+
+  const result = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(result.stateId, "assessment-review");
+  assert.equal(runtime.launcher.requests.length, 1);
+  assert.equal(runtime.launcher.requests[0]?.mode, "human-input");
+  assert.equal(runtime.launcher.requests[0]?.sourceComment?.id, answer.id);
+});
+
 test("a marked publication without local decision state is reassessed by the stage agent", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "agent-flow-reconcile-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -1035,6 +1086,58 @@ test("C14 an inactive ticket without local work does not create or launch a flow
   assert.equal(provider.created, 0);
   assert.deepEqual(launcher.requests, []);
   assert.equal(provider.events.includes("provider:set-labels"), false);
+});
+
+test("an empty store completes a merged change after the provider closes the ticket", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const assessment = comment("assessment", `${marker}\nAssessment.`, MAINTAINER, "2026-08-26T10:10:00.000Z");
+  const plan = comment("plan", `${marker}\nPlan.`, MAINTAINER, "2026-08-26T10:20:00.000Z");
+  const change = changeRequest({
+    body: `${marker}\nImplementation.`,
+    state: "merged",
+    createdAt: "2026-08-26T10:30:00.000Z",
+    updatedAt: "2026-08-26T11:00:00.000Z",
+  });
+  const review: NormalizedReview = {
+    id: "review-1",
+    url: "https://github.example.test/reviews/1",
+    actor: MAINTAINER,
+    submittedAt: "2026-08-26T10:40:00.000Z",
+    headSha: OLD_HEAD,
+    verdict: "approved",
+    body: `${marker}\n<!-- agent-flow-review:v1 head=${OLD_HEAD} verdict=approved -->`,
+  };
+  provider.snapshot.open = false;
+  provider.snapshot.labels.push("agent-stage:awaiting-merge", "agent-flow:managed");
+  provider.snapshot.comments.push(assessment, plan);
+  provider.snapshot.changeRequest = change;
+  provider.recoveryEvidence = recoveryEvidence(provider, [
+    ...[assessment, plan].map((published) => ({
+      key: publicationKey("comment", published.id),
+      createdAt: published.createdAt,
+      metadata: { config: SHA, controller: FLOW_1 },
+    })),
+    {
+      key: publicationKey("change-request", String(change.number)),
+      createdAt: change.createdAt,
+      metadata: { config: SHA, controller: FLOW_1 },
+    },
+    {
+      key: publicationKey("review", review.id),
+      createdAt: review.submittedAt,
+      metadata: { config: SHA, controller: FLOW_1 },
+    },
+  ], { changes: [change], reviews: [review] });
+  const runtime = await localRuntime(t, provider);
+
+  const result = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(result.stateId, "done");
+  assert.equal(result.started, false);
+  assert.equal(runtime.writer.load!(TICKET)?.value.control?.stateId, "done");
+  assert.equal(provider.snapshot.labels.includes("agent-flow:development"), false);
+  assert.ok(provider.snapshot.labels.includes("agent-stage:done"));
 });
 
 test("C2 resume does not reset a recovered non-entry stage to the flow initial state", async () => {

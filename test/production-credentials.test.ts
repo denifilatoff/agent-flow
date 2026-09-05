@@ -12,7 +12,7 @@ import { loadConfigBundle } from "../src/config/load.ts";
 import type { AgentReceipt, ControlState } from "../src/config/types.ts";
 import type { SpawnedProcess } from "../src/harness/process.ts";
 import { createProductionDependencies } from "../src/main.ts";
-import { renderPublication } from "../src/provider/publication.ts";
+import { parsePublication, renderPublication } from "../src/provider/publication.ts";
 import type {
   ProviderAdapter,
   ProviderComment,
@@ -94,9 +94,24 @@ class Provider implements ProviderAdapter {
     };
   }
   async readRecoveryEvidence(): Promise<RecoveryEvidence> {
+    const apiPath = this.kind === "github" ? "api/v3" : "api/v4";
+    const publications = this.comments.flatMap((comment) => {
+      const parsed = parsePublication(comment.body);
+      return parsed.kind === "current" ? [{
+        key: JSON.stringify([
+          this.kind,
+          `https://${this.host}/${apiPath}/`,
+          this.ticket.repository,
+          "comment",
+          comment.id,
+        ]),
+        createdAt: comment.createdAt,
+        metadata: parsed.metadata,
+      }] : [];
+    });
     return {
       snapshot: await this.readTicket(),
-      publications: [],
+      publications,
       changes: [],
       reviews: [],
       ambiguities: [],
@@ -198,11 +213,13 @@ test("production retries keep the pinned provider credential scoped to the child
         return createAttemptSession(...args);
       },
       async verifyDecision(_path, expected): Promise<AgentReceipt> {
+        const marker = renderPublication({ config: expected.configRevision, controller: expected.controllerId });
+        const published = await provider.createComment(expected.ticket, `${marker}\nAssessment published.`);
         return { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt",
           flowInstanceId: expected.flowInstanceId, attemptId: expected.attemptId, outcome: "succeeded",
-          summary: "assessment published", artifacts: [{ kind: "comment", id: "99",
-            url: "https://gitlab.test/group/repo/-/issues/7#note_99",
-            marker: renderPublication({ config: expected.configRevision, controller: expected.controllerId }),
+          summary: "assessment published", artifacts: [{ kind: "comment", id: published.id,
+            url: published.url,
+            marker,
             artifactKind: "assessment" }] };
       },
       async delay() {},
@@ -307,11 +324,13 @@ test("production passes a custom GHES credential without exposing public GitHub 
       },
       async createSession(...args) { return createAttemptSession(...args); },
       async verifyDecision(_path, expected): Promise<AgentReceipt> {
+        const marker = renderPublication({ config: expected.configRevision, controller: expected.controllerId });
+        const published = await provider.createComment(expected.ticket, `${marker}\nAssessment published.`);
         return { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt",
           flowInstanceId: expected.flowInstanceId, attemptId: expected.attemptId, outcome: "succeeded",
-          summary: "assessment published", artifacts: [{ kind: "comment", id: "99",
-            url: "https://github.enterprise.test/owner/repo/issues/8#issuecomment-99",
-            marker: renderPublication({ config: expected.configRevision, controller: expected.controllerId }),
+          summary: "assessment published", artifacts: [{ kind: "comment", id: published.id,
+            url: published.url,
+            marker,
             artifactKind: "assessment" }] };
       },
       async delay() {},

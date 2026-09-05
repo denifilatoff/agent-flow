@@ -242,6 +242,49 @@ test("marks a first activation without managed or stage history as fresh", async
   assert.deepEqual(evidence.ambiguities, []);
 });
 
+test("fresh recovery ignores pull requests created before the latest activation", async () => {
+  const oldLink = {
+    id: 799,
+    event: "cross-referenced",
+    created_at: "2026-08-25T09:10:00Z",
+    actor: { id: 8, login: "developer" },
+    source: {
+      issue: {
+        number: 31,
+        repository_url: "https://api.github.example.test/repos/owner/repo",
+        pull_request: {},
+      },
+    },
+  };
+  const oldPull = {
+    ...(fixture.pull as Record<string, unknown>),
+    created_at: "2026-08-25T09:05:00Z",
+    updated_at: "2026-08-25T09:05:00Z",
+  };
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", {
+      data: [...(fixture.timelineFirst as unknown[]), oldLink, ...(fixture.timelineSecond as unknown[])],
+    })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/pulls/31", { data: oldPull })
+    .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", { data: [fixture.recoveryReview] })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } });
+
+  const evidence = await adapter(client).readRecoveryEvidence({
+    provider: "github",
+    repository: REPOSITORY,
+    number: 17,
+  });
+
+  assert.equal(evidence.activeBoundary, "fresh");
+  assert.deepEqual(evidence.changes, []);
+  assert.deepEqual(evidence.reviews, []);
+  assert.deepEqual(evidence.publications, []);
+  assert.equal(evidence.ambiguities.some((value) => value.includes("multiple linked")), false);
+});
+
 test("C17 rejects incomplete GitHub recovery evidence pages", async () => {
   const client = new FixtureClient()
     .add("GET", "repos/owner/repo", { data: fixture.repository })

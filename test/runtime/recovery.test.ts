@@ -102,6 +102,38 @@ test("C14/C17 inactive and incomplete evidence cannot resume work", () => {
   assert.equal(classifyRecovery(evidence({ snapshot: snapshot({ open: false }) }), CONTROLLER).kind, "inactive");
 });
 
+test("a closed ticket with a merged change can finish from provider-only state", () => {
+  const change = {
+    provider: "github" as const,
+    repository: REPOSITORY,
+    number: 31,
+    url: "https://github.example.test/owner/repo/pull/31",
+    headSha: "1".repeat(40),
+    state: "merged" as const,
+    actor: { login: "developer", providerId: "8" },
+    body: fixture.pull.body,
+    createdAt: fixture.pull.created_at,
+    updatedAt: fixture.pull.updated_at,
+  };
+  const owner = publication(
+    CONTROLLER,
+    SHA,
+    JSON.stringify(["github", "https://api.github.example.test/", REPOSITORY, "change-request", "31"]),
+  );
+  const decision = classifyRecovery(evidence({
+    snapshot: snapshot({
+      open: false,
+      labels: ["agent-flow:development", "agent-stage:awaiting-merge"],
+      changeRequest: change,
+    }),
+    publications: [owner],
+    changes: [change],
+  }), CONTROLLER);
+
+  assert.equal(decision.kind, "reassess");
+  assert.equal(decision.owner?.key, owner.key);
+});
+
 test("unresolved provider ambiguity prevents foreign owner election", () => {
   const decision = classifyRecovery(evidence({
     publications: [publication(FOREIGN)],

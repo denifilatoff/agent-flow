@@ -257,7 +257,9 @@ export function createGitHubAdapter(
 
     async readRecoveryEvidence(ref: TicketRef): Promise<RecoveryEvidence> {
       const data = await readSnapshotData(ref);
-      const changes = await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number)));
+      const boundary = activeBoundary(data.snapshot, data.activationEvents, data.linkAmbiguities);
+      const changes = (await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number))))
+        .filter((change) => withinActiveBoundary(data.snapshot, boundary, change.createdAt));
       const reviewRows = await Promise.all(changes.map(async (change) => ({
         change,
         values: await listAll(
@@ -266,7 +268,6 @@ export function createGitHubAdapter(
         ),
       })));
       const ambiguities: string[] = [...data.linkAmbiguities];
-      const boundary = activeBoundary(data.snapshot, data.activationEvents, ambiguities);
       const permissionCache = new Map<string, boolean>();
       const authorized = async (actor: Actor): Promise<boolean> => {
         const cached = permissionCache.get(actor.providerId);

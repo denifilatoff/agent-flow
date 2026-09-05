@@ -271,13 +271,14 @@ export function createGitLabAdapter(
 
     async readRecoveryEvidence(ref: TicketRef): Promise<RecoveryEvidence> {
       const data = await readSnapshotData(ref);
-      const changes = await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number)));
+      const ambiguities: string[] = [];
+      const boundary = activeBoundary(data.snapshot, data.activationEvents, ambiguities);
+      const changes = (await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number))))
+        .filter((change) => withinActiveBoundary(data.snapshot, boundary, change.createdAt));
       const reviewRows = await Promise.all(changes.map(async (change) => ({
         change,
         values: await listAll(`${repositoryPath(ref.repository)}/merge_requests/${change.number}/notes?per_page=100`, "active"),
       })));
-      const ambiguities: string[] = [];
-      const boundary = activeBoundary(data.snapshot, data.activationEvents, ambiguities);
       const permissionCache = new Map<string, boolean>();
       const authorized = async (actor: Actor): Promise<boolean> => {
         const cached = permissionCache.get(actor.providerId);
@@ -358,7 +359,7 @@ export function createGitLabAdapter(
           const parsed = parsePublication(body);
           if (parsed.kind === "current") {
             try {
-              const review = normalizeReviewNote(row, change);
+              const review = normalizeReviewNote(row, change, false);
               reviews.push(review);
               await addPublication("review", id, body, submittedAt, updatedAt, actor);
             } catch (error) {
@@ -565,13 +566,14 @@ function normalizeMergeRequest(value: unknown, repository: string): NormalizedCh
 function normalizeReviewNote(
   value: unknown,
   change: NormalizedChangeRequest,
+  requireCurrentHead = true,
 ): NormalizedReview {
   const note = object(value, "GitLab review note");
   const body = optionalString(note.body, "GitLab review note body");
   const metadata = REVIEW_METADATA.exec(body.split(/\r?\n/)[1] ?? "");
   if (!metadata) throw new Error("invalid GitLab review note metadata");
   const headSha = metadata[1]!;
-  if (headSha !== change.headSha) {
+  if (requireCurrentHead && headSha !== change.headSha) {
     throw new Error("GitLab review note head SHA does not match the merge request head SHA");
   }
   const id = identifier(note.id, "GitLab review note id");

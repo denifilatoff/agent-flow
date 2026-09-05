@@ -8,7 +8,15 @@ export interface RecoveryDecision {
 }
 
 export function classifyRecovery(evidence: RecoveryEvidence, controllerId: string): RecoveryDecision {
-  if (!evidence.snapshot.activation.present || !evidence.snapshot.open) {
+  const linked = evidence.snapshot.changeRequest;
+  const mergedCompletion = evidence.snapshot.labels.includes("agent-stage:awaiting-merge")
+    && evidence.changes.length === 1
+    && linked?.state === "merged"
+    && evidence.changes[0]!.provider === linked.provider
+    && evidence.changes[0]!.repository === linked.repository
+    && evidence.changes[0]!.number === linked.number
+    && evidence.changes[0]!.headSha === linked.headSha;
+  if ((!evidence.snapshot.activation.present || !evidence.snapshot.open) && !mergedCompletion) {
     return decision("inactive", null, "ticket is inactive");
   }
   if (!evidence.complete) return decision("ambiguous", null, "provider evidence is incomplete");

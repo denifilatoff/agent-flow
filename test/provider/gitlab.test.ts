@@ -264,6 +264,63 @@ test("marks a first activation without managed or stage history as fresh", async
   assert.deepEqual(evidence.ambiguities, []);
 });
 
+test("fresh recovery ignores merge requests created before the latest activation", async () => {
+  const oldMergeRequest = {
+    ...(fixture.mergeRequest as Record<string, unknown>),
+    created_at: "2026-08-25T09:05:00.000Z",
+    updated_at: "2026-08-25T09:05:00.000Z",
+  };
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
+      data: [...(fixture.labelEventsFirst as unknown[]), ...(fixture.labelEventsSecond as unknown[])],
+    })
+    .add("GET", notes, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: fixture.relatedMergeRequests })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: oldMergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [fixture.recoveryReviewNote] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.activeBoundary, "fresh");
+  assert.deepEqual(evidence.changes, []);
+  assert.deepEqual(evidence.reviews, []);
+  assert.deepEqual(evidence.publications, []);
+  assert.equal(evidence.ambiguities.some((value) => value.includes("multiple linked")), false);
+});
+
+test("recovery preserves a GitLab review marker for its historical head", async () => {
+  const currentHead = "2".repeat(40);
+  const changedMergeRequest = {
+    ...(fixture.mergeRequest as Record<string, unknown>),
+    sha: currentHead,
+  };
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
+      data: [...(fixture.labelEventsFirst as unknown[]), ...(fixture.labelEventsSecond as unknown[])],
+    })
+    .add("GET", notes, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: fixture.relatedMergeRequests })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: changedMergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [fixture.recoveryReviewNote] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } })
+    .add("GET", `${PROJECT}/members/all/9`, { data: { id: 9, username: "reviewer", access_level: 40 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.reviews.length, 1);
+  assert.equal(evidence.reviews[0]?.headSha, HEAD_SHA);
+  assert.ok(evidence.publications.some(({ key }) => key.includes("review")));
+  assert.equal(evidence.ambiguities.some((value) => value.includes("head SHA")), false);
+});
+
 test("C17 rejects incomplete GitLab recovery evidence pages", async () => {
   const notePath = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
   const client = new FixtureClient()
