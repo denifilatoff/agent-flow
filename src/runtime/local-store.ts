@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { lstatSync } from "node:fs";
 
 import { validateDocument } from "../config/schema-validator.ts";
 import type { LocalExecution } from "../config/types.js";
@@ -43,6 +44,7 @@ const CREATE_TABLE = `
 `;
 
 export function openLocalStore(path: string): LocalStore {
+  rejectUnsafeDatabasePath(path);
   const database = new DatabaseSync(path);
   try {
     database.exec("PRAGMA busy_timeout = 5000");
@@ -113,6 +115,21 @@ export function openLocalStore(path: string): LocalStore {
     database.close();
     throw error;
   }
+}
+
+function rejectUnsafeDatabasePath(path: string): void {
+  try {
+    const info = lstatSync(path);
+    if (info.isSymbolicLink()) throw new Error("local store path must not be a symbolic link");
+    if (!info.isFile()) throw new Error("local store path must be a regular file");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return;
+    throw error;
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function initialize(database: DatabaseSync): void {

@@ -189,7 +189,7 @@ export function createGitLabAdapter(
   ): Promise<{ boundary: RecoveryEvidence["activeBoundary"]; changes: NormalizedChangeRequest[] }> {
     const boundary = activeBoundary(data.snapshot, data.activationEvents, ambiguities);
     const changes = (await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number))))
-      .filter((change) => withinActiveBoundary(data.snapshot, boundary, change.createdAt));
+      .filter((change) => withinActiveBoundary(data.snapshot, boundary, change.createdAt, ambiguities));
     return { boundary, changes };
   }
 
@@ -313,8 +313,9 @@ export function createGitLabAdapter(
         provenanceAvailable = true,
       ): Promise<void> => {
         const key = publicationKey("gitlab", apiScope, ref.repository, kind, id);
-        if (!withinActiveBoundary(data.snapshot, boundary, createdAt)) return;
         const parsed = parsePublication(body);
+        if (parsed.kind === "unmarked") return;
+        if (!withinActiveBoundary(data.snapshot, boundary, createdAt, ambiguities)) return;
         if (parsed.kind === "legacy") {
           legacyActive = true;
           return;
@@ -693,11 +694,22 @@ function withinActiveBoundary(
   snapshot: ProviderTicketSnapshot,
   boundary: "known" | "fresh" | "ambiguous",
   createdAt: string,
+  ambiguities: string[],
 ): boolean {
-  return snapshot.activation.present
-    && boundary !== "ambiguous"
-    && snapshot.activation.occurredAt !== null
-    && createdAt >= snapshot.activation.occurredAt;
+  if (!snapshot.activation.present || boundary === "ambiguous" || snapshot.activation.occurredAt === null) {
+    return false;
+  }
+  const activationTime = Date.parse(snapshot.activation.occurredAt);
+  const publicationTime = Date.parse(createdAt);
+  if (!Number.isFinite(activationTime) || !Number.isFinite(publicationTime)) {
+    ambiguities.push("publication or activation timestamp is invalid");
+    return false;
+  }
+  if (publicationTime === activationTime) {
+    ambiguities.push("publication order at the activation timestamp is ambiguous");
+    return false;
+  }
+  return publicationTime > activationTime;
 }
 
 function discoverySince(window: DiscoveryWindow): string {

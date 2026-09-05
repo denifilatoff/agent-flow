@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -63,6 +63,23 @@ test("persists a record and applies compare-and-swap revisions", async (t) => {
   assert.deepEqual(reopened.load(scope, ref), { revision: 1, value: record });
   assert.equal(reopened.load("github:https://github.example.test/api/v3-alt", ref), null);
   reopened.close();
+});
+
+test("rejects a symlinked database before writing through it", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-local-store-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const outside = join(directory, "outside.sqlite");
+  new DatabaseSync(outside).close();
+  await symlink(outside, join(directory, "execution.sqlite"));
+
+  assert.throws(() => openLocalStore(join(directory, "execution.sqlite")), /symbolic link/);
+
+  const database = new DatabaseSync(outside);
+  assert.equal(
+    database.prepare("SELECT count(*) AS count FROM sqlite_master WHERE name = 'ticket_execution'").get().count,
+    0,
+  );
+  database.close();
 });
 
 test("canonicalizes credential-free provider scopes and keeps hosts separate", async (t) => {

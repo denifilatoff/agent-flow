@@ -290,6 +290,32 @@ test("fresh recovery ignores pull requests created before the latest activation"
   assert.equal(evidence.ambiguities.some((value) => value.includes("multiple linked")), false);
 });
 
+test("treats a publication with the activation timestamp as ambiguous", async () => {
+  const comment = {
+    ...(fixture.recoveryComment as Record<string, unknown>),
+    created_at: "2026-08-25T10:00:00Z",
+    updated_at: "2026-08-25T10:00:00Z",
+  };
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: fixture.issue })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", {
+      data: [...(fixture.timelineFirst as unknown[]), (fixture.timelineSecond as unknown[])[0]],
+    })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [comment] })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } })
+    .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "write" } });
+
+  const evidence = await adapter(client).readRecoveryEvidence({
+    provider: "github",
+    repository: REPOSITORY,
+    number: 17,
+  });
+
+  assert.deepEqual(evidence.publications, []);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("activation timestamp")));
+});
+
 test("development verification selects the pull request from the second activation", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agent-flow-github-reactivation-"));
   t.after(() => rm(root, { recursive: true, force: true }));

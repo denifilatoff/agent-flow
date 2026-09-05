@@ -297,6 +297,30 @@ test("fresh recovery ignores merge requests created before the latest activation
   assert.equal(evidence.ambiguities.some((value) => value.includes("multiple linked")), false);
 });
 
+test("treats a publication with the activation timestamp as ambiguous", async () => {
+  const comment = {
+    ...(fixture.recoveryComment as Record<string, unknown>),
+    created_at: "2026-08-25T10:00:00.000Z",
+    updated_at: "2026-08-25T10:00:00.000Z",
+  };
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
+      data: [...(fixture.labelEventsFirst as unknown[]), ...(fixture.labelEventsSecond as unknown[])],
+    })
+    .add("GET", notes, { data: [comment] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.deepEqual(evidence.publications, []);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("activation timestamp")));
+});
+
 test("development verification selects the merge request from the second activation", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agent-flow-gitlab-reactivation-"));
   t.after(() => rm(root, { recursive: true, force: true }));
