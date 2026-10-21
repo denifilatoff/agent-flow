@@ -987,6 +987,45 @@ test("repairs multiple old stage labels to exactly one", async () => {
   );
 });
 
+for (const stateId of ["awaiting-merge", "bug-awaiting-merge"]) {
+  test(`uses the shared waiting label for ${stateId}`, async () => {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({ stateId, changeRequest: controlChange() }));
+    provider.snapshot.changeRequest = changeRequest();
+
+    await reconcileTicket(dependencies(provider), TICKET);
+
+    assert.deepEqual(
+      provider.snapshot.labels.filter((label) => label.startsWith("agent-stage:")),
+      ["agent-stage:awaiting-merge"],
+    );
+  });
+}
+
+test("returns bugfix work to bug review when the waiting PR head changes", async () => {
+  const provider = new FakeProvider();
+  installControl(provider, controlState({
+    stateId: "bug-awaiting-merge",
+    activationLabel: "bugfix",
+    changeRequest: controlChange(),
+  }));
+  provider.snapshot.labels = ["bugfix", "agent-flow:managed", "agent-stage:awaiting-merge"];
+  provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD });
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.deepEqual({
+    stateId: outcome.stateId,
+    labels: provider.snapshot.labels.filter((label) => label.startsWith("agent-stage:")),
+    agentId: launcher.requests[0]?.agentId,
+  }, {
+    stateId: "bug-review",
+    labels: ["agent-stage:bug-review"],
+    agentId: "reviewer",
+  });
+});
+
 test("enters needs-human for a closed change and reviews a new head", async (t) => {
   await t.test("closed, unmerged change", async () => {
     const provider = new FakeProvider();

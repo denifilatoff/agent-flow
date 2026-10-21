@@ -419,7 +419,7 @@ async function ownLabels(
   removeActivation: boolean,
   pinnedActivationLabel?: string,
 ): Promise<void> {
-  const stage = `agent-stage:${stateId}`;
+  const stage = `agent-stage:${stateId === "bug-awaiting-merge" ? "awaiting-merge" : stateId}`;
   const managed = bundle.flow.metadata.managedLabel;
   const activation = [
     bundle.flow.metadata.activationLabel,
