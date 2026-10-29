@@ -45,7 +45,9 @@ The updated runtime prompt prepares local comment text; the controller publishes
 and verifies provider readback before advancement. PR/MR and native review publication are unchanged.
 
 Preserve disposable session directories when restarting if pending prepared results or accounting should survive.
-Delivery reconciliation reuses completed work and does not automatically run another model. An uncertain write with
+Delivery reconciliation reuses completed work and does not automatically run another model. Invalid or permanently
+untrusted results retain failed accounting and follow existing failure/retry/block rules; PR/review evidence requirements
+remain unchanged. An uncertain write with
 unavailable or mismatched provider evidence stays pending for inspection; do not delete local delivery state to force
 another create. Old post-publication `usage-delivery.json` records are no longer processed. No existing comment is
 edited for accounting, and no historic receipts are backfilled. See [the contracts](prototype-contracts.md#completed-attempt-accounting-and-prepared-stage-comments).

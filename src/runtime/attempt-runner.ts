@@ -18,11 +18,12 @@ import { compileAgentContext, type CompiledAgent } from "../harness/apm.ts";
 import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../harness/types.ts";
 import { HarnessProcessError } from "../harness/process.ts";
 import { advanceControlState, type ControlStatePatch } from "../provider/control-comment.ts";
+import { ProviderHttpError } from "../provider/http.ts";
 import { parsePublication } from "../provider/publication.ts";
 import type { ProviderAdapter, ProviderArtifact } from "../provider/types.js";
 import type { AttemptLauncher, AttemptRequest } from "./reconcile.ts";
 import { renderRuntimePrompt } from "./agent-protocol.ts";
-import { DecisionReadbackError, readDecisionAndBuildReceipt } from "./receipts.ts";
+import { DecisionReadbackError, InvalidDecisionError, readDecisionAndBuildReceipt } from "./receipts.ts";
 import { createAttemptSession, type AttemptContext } from "./sessions.ts";
 import { WorkspaceManager } from "./workspaces.ts";
 import { AttemptError, classifyAttemptError, controlError } from "./errors.ts";
@@ -202,7 +203,9 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         try {
           usage = await deliverPreparedPublication(root, expected, dependencies.provider,
             () => !running.cancelled && !running.abort.signal.aborted);
-        } catch {
+        } catch (error) {
+          if (error instanceof InvalidDecisionError
+            || (error instanceof ProviderHttpError && !error.transient)) throw error;
           if (running.cancelled) await retainCancelled(root, attempt, usage);
           else deliveryDiagnostic();
           return;

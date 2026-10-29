@@ -643,7 +643,7 @@ test("prepared results classify verification failures and archive accounting on 
         new InvalidDecisionError("invalid result")]) {
         const dataDirectory = await mkdtemp(join(tmpdir(), "runner-verification-"));
         t.after(() => rm(dataDirectory, { recursive: true, force: true }));
-        const configured = request({ bundle: bundle(1) });
+        const configured = request({ bundle: bundle(error instanceof DecisionTrustError ? 3 : 1) });
         configured.bundle.stack.spec.publication = "controller-prepared-v1";
         let published: { id: string; url: string; body: string; createdAt: string } | undefined;
         let creates = 0;
@@ -684,4 +684,25 @@ test("prepared results classify verification failures and archive accounting on 
       }
     }
   }
+});
+
+
+test("permanent prepared comment rejection blocks and archives accounting without another launch", async (t) => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "runner-rejection-"));
+  t.after(() => rm(dataDirectory, { recursive: true, force: true }));
+  const configured = request();
+  configured.bundle.stack.spec.publication = "controller-prepared-v1";
+  const archived: AgentReceipt[] = [];
+  const provider = { kind: "github", readTicket: async () => snapshot(),
+    createComment: async () => { throw new ProviderHttpError("forbidden", 403, false, {}, {}); },
+  } as unknown as ProviderAdapter;
+  const subject = fixture({ request: configured, dataDirectory, provider,
+    results: [{ ...OK, usage: { totalTokens: 27 } }], archive: async (value) => { archived.push(value); } });
+  await subject.runner.start(subject.request);
+  await new Promise<void>((resolve) => subject.runner.onSettled!(resolve));
+  assert.equal(subject.controls.at(-1)?.stateId, "blocked");
+  assert.equal(subject.controls.at(-1)?.attemptSeries?.current?.error?.code, "PROVIDER_FAILED");
+  assert.equal(subject.attempts.length, 1);
+  assert.deepEqual(subject.delays, []);
+  assert.equal(archived[0]?.usage?.totalTokens, 27);
 });

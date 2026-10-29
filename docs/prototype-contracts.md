@@ -323,7 +323,9 @@ before accepting the result. No accounting edit or usage-only comment is made. R
 Each attempt session retains its immutable finalized `receipt.json`. A prepared attempt also retains
 `prepared-publication.json` before delivery, with a separate attempt identifier outside the common marker. A restart or
 transient delivery failure resumes that completed attempt without rerunning the model or consuming another attempt.
-Explicit provider rejections may retry after reading current evidence. Transport/server errors remain uncertain: retries
+Permanent provider rejections and invalid or untrusted decisions follow the existing classified failure/retry/block path
+and retain failed accounting receipts. Missing agent-published PR/review evidence also follows that path. Only recoverable
+prepared-comment delivery/readback failures retain completed work for delivery retry. Transport/server errors remain uncertain: retries
 look for the exact existing publication and read it back; if no matching evidence can be established they remain pending
 with a diagnostic rather than create a possible duplicate. Cancellation or foreign/ambiguous ownership prevents writes
 and advancement. These session records and SQLite remain disposable local artifacts, never a canonical workflow store.
