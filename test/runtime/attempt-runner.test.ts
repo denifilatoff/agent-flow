@@ -118,6 +118,7 @@ function fixture(options: {
   execution?: AttemptRunnerDependencies["execution"];
   preparePinnedAgent?: AttemptRunnerDependencies["preparePinnedAgent"];
   packageDirectory?: string;
+  archive?: (receipt: AgentReceipt) => Promise<void>;
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
   const prompts: string[] = [];
@@ -145,6 +146,7 @@ function fixture(options: {
     events.push("control:readback"); return structuredClone(current);
   });
   const runner = createAttemptRunner({
+    archiveReceipt: async (_root, value) => options.archive?.(value),
     dataDirectory: "/data", provider: { kind: "github" } as ProviderAdapter,
     providerConfig: { apiUrl: "https://api.github.com", repositories: ["owner/repo"] },
     providerCredential: options.providerCredential
@@ -241,6 +243,51 @@ test("persists and reads back started before a background launch", async () => {
     pinnedChangeRequest: subject.request.snapshot.changeRequest,
   });
   assert.deepEqual(subject.controls.at(-1)?.latestReceipt, receipt(ATTEMPT_1));
+});
+
+test("archives usage across process and decision failures without accumulating retries", async () => {
+  for (const failure of ["exit", "timeout", "signal", "process", "decision", "readback"]) {
+    const archived: AgentReceipt[] = [];
+    const processError = new HarnessProcessError("codex", true);
+    processError.usage = { totalTokens: 12 };
+    const failed = failure === "process" ? processError : { ...OK, usage: { totalTokens: 12 },
+      ...(failure === "exit" ? { exitCode: 1 } : {}), ...(failure === "timeout" ? { timedOut: true } : {}),
+      ...(failure === "signal" ? { exitCode: null, signal: "SIGTERM" as const } : {}) };
+    let verifies = 0;
+    const subject = fixture({ results: [failed, { ...OK, usage: { totalTokens: 3 } }],
+      archive: async (value) => { archived.push(value); }, verify: async (_path, expected) => {
+        if (++verifies === 1 && failure === "decision") throw new InvalidDecisionError("Invalid decision.");
+        if (verifies === 1 && failure === "readback") throw new DecisionReadbackError();
+        return receipt(expected.attemptId);
+      } });
+    await subject.runner.start(subject.request); await waitIdle(subject);
+    assert.equal(archived.length, 2, failure);
+    assert.equal(archived[0]?.outcome, "failed", failure);
+    assert.deepEqual(archived[0]?.artifacts, []);
+    assert.equal(archived[0]?.usage?.totalTokens, 12);
+    assert.equal(archived[1]?.usage?.totalTokens, 3);
+    assert.equal(subject.controls.at(-1)?.latestReceipt?.usage?.totalTokens, 3);
+  }
+});
+
+test("telemetry storage failure does not launch another harness", async () => {
+  const subject = fixture({ results: [{ ...OK, usage: { totalTokens: 5 } }],
+    archive: async () => { throw new Error("storage failed"); } });
+  await subject.runner.start(subject.request); await waitIdle(subject);
+  assert.equal(subject.attempts.length, 1);
+  assert.equal(subject.controls.at(-1)?.attemptSeries?.current?.status, "succeeded");
+});
+
+test("cancellation archives available usage without a receipt transition", async () => {
+  const archived: AgentReceipt[] = [];
+  const subject = fixture({ archive: async (value) => { archived.push(value); } });
+  await subject.runner.start(subject.request);
+  const cancelling = subject.runner.cancel(FLOW);
+  subject.process.resolve({ exitCode: null, signal: "SIGTERM", timedOut: false, usage: { inputTokens: 17 } });
+  await cancelling;
+  assert.equal(archived[0]?.usage?.inputTokens, 17);
+  assert.equal(archived[0]?.error?.code, "ATTEMPT_CANCELLED");
+  assert.equal(subject.controls.at(-1)?.latestReceipt, null);
 });
 
 test("stages a private pinned package before compiling each retry", async () => {

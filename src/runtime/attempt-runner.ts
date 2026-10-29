@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { validateBundleDocument, type ConfigBundle } from "../config/load.ts";
 import type {
   AgentReceipt,
+  AttemptUsage,
   Attempt,
   AttemptSeries,
   ControlChangeRequest,
@@ -15,6 +16,7 @@ import type {
 import { validateDocument } from "../config/schema-validator.ts";
 import { compileAgentContext, type CompiledAgent } from "../harness/apm.ts";
 import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../harness/types.ts";
+import { HarnessProcessError } from "../harness/process.ts";
 import { advanceControlState, type ControlStatePatch } from "../provider/control-comment.ts";
 import { parsePublication } from "../provider/publication.ts";
 import type { ProviderAdapter, ProviderArtifact } from "../provider/types.js";
@@ -25,8 +27,11 @@ import { createAttemptSession, type AttemptContext } from "./sessions.ts";
 import { WorkspaceManager } from "./workspaces.ts";
 import { AttemptError, classifyAttemptError, controlError } from "./errors.ts";
 import { writeControlCas, type ControlWriter } from "./control-state.ts";
+import { archiveReceipt } from "./usage-records.ts";
 
 export interface AttemptRunnerDependencies {
+  archiveReceipt?: typeof archiveReceipt;
+  telemetryDiagnostic?: (message: string) => void;
   dataDirectory: string;
   provider: ProviderAdapter;
   providerConfig: { apiUrl: string; repositories: string[] };
@@ -223,6 +228,23 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
 
       if (running.cancelled) return;
 
+      let sessionRoot: string | undefined;
+      let usage: AttemptUsage | undefined;
+      let harnessEnded = false;
+      let archived = false;
+      async function archive(value: AgentReceipt): Promise<void> {
+        archived = true;
+        try { await (dependencies.archiveReceipt ?? archiveReceipt)(sessionRoot!, value); }
+        catch {
+          try { (dependencies.telemetryDiagnostic ?? console.error)("Attempt receipt telemetry could not be archived."); }
+          catch { /* A diagnostic callback cannot change the attempt outcome. */ }
+        }
+      }
+      function failedReceipt(error: { code: string; message: string }): AgentReceipt {
+        return { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt", flowInstanceId: control.flowInstanceId,
+          attemptId: attempt.attemptId, outcome: "failed", summary: "Agent attempt did not complete successfully.",
+          artifacts: [], error, ...(usage ? { usage } : {}) };
+      }
       try {
         const workspace = await dependencies.workspaceManager.prepareWorkspace(
           request.snapshot.repository,
@@ -238,6 +260,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           attempt.attemptId,
           context,
         );
+        sessionRoot = session.root;
         assertCurrent(running, series, attempt);
         const prepared = await dependencies.preparePinnedAgent(
           control.configRevision,
@@ -295,9 +318,14 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           running.resolveReady();
         }
         const result = await resultPromise;
-        if (running.cancelled || running.abort.signal.aborted) return;
+        harnessEnded = true;
+        usage = result.usage;
+        if (running.cancelled || running.abort.signal.aborted) {
+          await archive(failedReceipt({ code: "ATTEMPT_CANCELLED", message: "Attempt was cancelled." }));
+          return;
+        }
         assertProcessResult(result);
-        const receipt = await verifyDecision(
+        const verified = await verifyDecision(
           session.decisionPath,
           {
             flow: request.bundle.flow,
@@ -327,6 +355,13 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           running.cancelled,
           (kind, value) => validateBundleDocument(request.bundle, kind, value),
         );
+        if (running.cancelled || running.abort.signal.aborted) {
+          await archive(failedReceipt({ code: "ATTEMPT_CANCELLED", message: "Attempt was cancelled." }));
+          return;
+        }
+        const receipt = { ...verified, ...(usage ? { usage } : {}) };
+        validateBundleDocument(request.bundle, "AgentReceipt", receipt);
+        await archive(receipt);
         if (running.cancelled || running.abort.signal.aborted) return;
         series = {
           ...series,
@@ -342,8 +377,12 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         );
         return;
       } catch (error) {
-        if (running.cancelled || running.abort.signal.aborted) return;
+        if (error instanceof HarnessProcessError) { harnessEnded = true; usage = error.usage; }
         const classified = classifyAttemptError(error);
+        const failure = failedReceipt(running.cancelled
+          ? { code: "ATTEMPT_CANCELLED", message: "Attempt was cancelled." } : controlError(classified));
+        if (sessionRoot && harnessEnded && !archived) await archive(failure);
+        if (running.cancelled || running.abort.signal.aborted) return;
         const failedSeries: AttemptSeries = {
           ...series,
           current: {
@@ -363,6 +402,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
             control,
             failedSeries,
             controlError(classified),
+            harnessEnded ? failure : undefined,
           );
           if (!running.launched) throw classified;
           return;
@@ -373,7 +413,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           request,
           running,
           control,
-          { attemptSeries: failedSeries },
+          { attemptSeries: failedSeries, ...(harnessEnded ? { latestReceipt: failure } : {}) },
         );
         series = failedSeries;
         await cancellableDelay(config.executionSnapshot.delaySeconds * 1_000, running, delay);
@@ -591,6 +631,7 @@ async function persistBlocked(
   control: ControlState,
   series: AttemptSeries,
   error: { code: string; message: string },
+  receipt?: AgentReceipt,
 ): Promise<void> {
   const current = series.current;
   const failed = current?.status === "failed" ? current : current ? {
@@ -603,6 +644,7 @@ async function persistBlocked(
     stateId: "blocked",
     resumeStateId: request.stateId,
     attemptSeries: { ...series, current: failed },
+    ...(receipt ? { latestReceipt: receipt } : {}),
   });
 }
 
