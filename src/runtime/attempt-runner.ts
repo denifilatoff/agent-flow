@@ -28,6 +28,7 @@ import { WorkspaceManager } from "./workspaces.ts";
 import { AttemptError, classifyAttemptError, controlError } from "./errors.ts";
 import { writeControlCas, type ControlWriter } from "./control-state.ts";
 import { archiveReceipt } from "./usage-records.ts";
+import { queueUsageDelivery, deliverUsageRecord, retryUsageDeliveries } from "./usage-delivery.ts";
 
 export interface AttemptRunnerDependencies {
   archiveReceipt?: typeof archiveReceipt;
@@ -79,6 +80,11 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
   let onSettled: ((ref: AttemptRequest["ref"]) => void) | undefined;
 
   return {
+    async reconcileUsage(control, snapshot, controllerId): Promise<void> {
+      if (!snapshot.open || !snapshot.activation.present || control.stateId === "cancelled" || control.stateId === "done") return;
+      await retryUsageDeliveries(dependencies.dataDirectory, snapshot.ref, controllerId, control.flowInstanceId,
+        dependencies.provider, () => !active.get(control.flowInstanceId)?.cancelled).catch(() => undefined);
+    },
     async start(request): Promise<void> {
       const flowId = request.control.flowInstanceId;
       if (active.has(flowId)) return;
@@ -232,12 +238,13 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       let usage: AttemptUsage | undefined;
       let harnessEnded = false;
       let archived = false;
-      async function archive(value: AgentReceipt): Promise<void> {
+      async function archive(value: AgentReceipt): Promise<boolean> {
         archived = true;
-        try { await (dependencies.archiveReceipt ?? archiveReceipt)(sessionRoot!, value); }
+        try { await (dependencies.archiveReceipt ?? archiveReceipt)(sessionRoot!, value); return true; }
         catch {
           try { (dependencies.telemetryDiagnostic ?? console.error)("Attempt receipt telemetry could not be archived."); }
           catch { /* A diagnostic callback cannot change the attempt outcome. */ }
+          return false;
         }
       }
       function failedReceipt(error: { code: string; message: string }): AgentReceipt {
@@ -361,7 +368,19 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         }
         const receipt = { ...verified, ...(usage ? { usage } : {}) };
         validateBundleDocument(request.bundle, "AgentReceipt", receipt);
-        await archive(receipt);
+        const stored = await archive(receipt);
+        if (running.cancelled || running.abort.signal.aborted) return;
+        if (stored) {
+          try {
+            if (await queueUsageDelivery(sessionRoot!, request.ref, request.controllerId, receipt)) {
+              await deliverUsageRecord(sessionRoot!, request.ref, request.controllerId, control.flowInstanceId,
+                attempt.attemptId, dependencies.provider, () => !running.cancelled && !running.abort.signal.aborted);
+            }
+          } catch {
+            try { (dependencies.telemetryDiagnostic ?? console.error)("Usage annotation remains pending for reconciliation."); }
+            catch { /* Diagnostic failures do not change the outcome. */ }
+          }
+        }
         if (running.cancelled || running.abort.signal.aborted) return;
         series = {
           ...series,
