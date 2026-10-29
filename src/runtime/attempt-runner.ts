@@ -22,7 +22,7 @@ import { parsePublication } from "../provider/publication.ts";
 import type { ProviderAdapter, ProviderArtifact } from "../provider/types.js";
 import type { AttemptLauncher, AttemptRequest } from "./reconcile.ts";
 import { renderRuntimePrompt } from "./agent-protocol.ts";
-import { readDecisionAndBuildReceipt } from "./receipts.ts";
+import { DecisionReadbackError, readDecisionAndBuildReceipt } from "./receipts.ts";
 import { createAttemptSession, type AttemptContext } from "./sessions.ts";
 import { WorkspaceManager } from "./workspaces.ts";
 import { AttemptError, classifyAttemptError, controlError } from "./errors.ts";
@@ -193,16 +193,30 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
     }
     async function finish(root: string, attempt: Attempt, usage: AttemptUsage | undefined,
       expected = expectedDecision(attempt)): Promise<void> {
+      let preparedComment = false;
       if (preparedProtocol) {
         const retained = await readPreparedPublication(root, expected);
+        preparedComment = retained.body !== null;
         expected = { ...expected, publicationKeys: retained.publicationKeys,
           reusableCommentIds: retained.reusableCommentIds };
-        usage = await deliverPreparedPublication(root, expected, dependencies.provider,
-          () => !running.cancelled && !running.abort.signal.aborted);
+        try {
+          usage = await deliverPreparedPublication(root, expected, dependencies.provider,
+            () => !running.cancelled && !running.abort.signal.aborted);
+        } catch {
+          if (running.cancelled) await retainCancelled(root, attempt, usage);
+          else deliveryDiagnostic();
+          return;
+        }
       }
       if (running.cancelled || running.abort.signal.aborted) { await retainCancelled(root, attempt, usage); return; }
-      const verified = await verifyDecision(join(root, "decision.json"), expected, dependencies.provider,
-        running.cancelled, (kind, value) => validateBundleDocument(request.bundle, kind, value));
+      let verified: AgentReceipt;
+      try {
+        verified = await verifyDecision(join(root, "decision.json"), expected, dependencies.provider,
+          running.cancelled, (kind, value) => validateBundleDocument(request.bundle, kind, value));
+      } catch (error) {
+        if (preparedComment && error instanceof DecisionReadbackError) { deliveryDiagnostic(); return; }
+        throw error;
+      }
       if (running.cancelled || running.abort.signal.aborted) { await retainCancelled(root, attempt, usage); return; }
       const receipt = { ...verified, ...(usage ? { usage } : {}) };
       validateBundleDocument(request.bundle, "AgentReceipt", receipt);
@@ -213,7 +227,12 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       }
       if (running.cancelled || running.abort.signal.aborted) return;
       series = { ...series, current: { ...attempt, status: "succeeded", finishedAt: now() } };
-      await persist(dependencies, now(), request, running, control, successPatch(request, control, series, receipt));
+      try {
+        await persist(dependencies, now(), request, running, control, successPatch(request, control, series, receipt));
+      } catch (error) {
+        if (preparedProtocol) { deliveryDiagnostic(); return; }
+        throw error;
+      }
     }
 
     if (!series.runtimeDigest || !series.executionSnapshot) {
@@ -221,21 +240,44 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       control = await persist(dependencies, now(), request, running, control, { attemptSeries: series });
     }
 
+    async function recordFailure(error: unknown, attempt: Attempt, failure?: AgentReceipt): Promise<boolean> {
+      const classified = classifyAttemptError(error);
+      const failedSeries: AttemptSeries = { ...series, current: {
+        ...attempt, status: "failed", finishedAt: now(), error: controlError(classified),
+      } };
+      if (!classified.retryable || failedSeries.consumed >= failedSeries.maxAttempts) {
+        await persistBlocked(dependencies, now(), request, running, control, failedSeries,
+          controlError(classified), failure);
+        return false;
+      }
+      control = await persist(dependencies, now(), request, running, control,
+        { attemptSeries: failedSeries, ...(failure ? { latestReceipt: failure } : {}) });
+      series = failedSeries;
+      return true;
+    }
+
     if (preparedProtocol && series.current?.status === "started") {
       const attempt = series.current;
       const root = join(dependencies.dataDirectory, "sessions", control.flowInstanceId, attempt.attemptId);
-      try {
-        const retained = await readPreparedPublication(root, expectedDecision(attempt));
+      let retained: Awaited<ReturnType<typeof readPreparedPublication>> | undefined;
+      try { retained = await readPreparedPublication(root, expectedDecision(attempt)); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") { deliveryDiagnostic(); return; }
+      }
+      if (retained) {
         running.attemptId = attempt.attemptId;
         running.resolveReady();
-        try { await finish(root, attempt, retained.usage); }
-        catch {
-          if (running.cancelled) await retainCancelled(root, attempt, retained.usage);
-          else deliveryDiagnostic();
+        try { await finish(root, attempt, retained.usage); return; }
+        catch (error) {
+          if (running.cancelled) { await retainCancelled(root, attempt, retained.usage); return; }
+          const failure: AgentReceipt = { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt",
+            flowInstanceId: control.flowInstanceId, attemptId: attempt.attemptId, outcome: "failed",
+            summary: "Agent attempt did not complete successfully.", artifacts: [],
+            error: controlError(classifyAttemptError(error)), ...(retained.usage ? { usage: retained.usage } : {}) };
+          try { await (dependencies.archiveReceipt ?? archiveReceipt)(root, failure); }
+          catch { /* Receipt telemetry cannot change the classified failure. */ }
+          if (!await recordFailure(error, attempt, failure)) return;
         }
-        return;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") { deliveryDiagnostic(); return; }
       }
     }
 
@@ -414,11 +456,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         assertProcessResult(result);
         if (preparedProtocol) {
           await freezePreparedPublication(sessionRoot!, expectedDecision(attempt), usage);
-          try { await finish(sessionRoot!, attempt, usage); }
-          catch {
-            if (running.cancelled) await retainCancelled(sessionRoot!, attempt, usage);
-            else deliveryDiagnostic();
-          }
+          await finish(sessionRoot!, attempt, usage);
           return;
         }
         await finish(sessionRoot!, attempt, usage);
@@ -431,39 +469,10 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           ? { code: "ATTEMPT_CANCELLED", message: "Attempt was cancelled." } : controlError(classified));
         if (sessionRoot && harnessEnded && !archived) await archive(failure);
         if (running.cancelled || running.abort.signal.aborted) return;
-        const failedSeries: AttemptSeries = {
-          ...series,
-          current: {
-            ...attempt,
-            status: "failed",
-            finishedAt: now(),
-            error: controlError(classified),
-          },
-        };
-        const exhausted = failedSeries.consumed >= failedSeries.maxAttempts;
-        if (!classified.retryable || exhausted) {
-          await persistBlocked(
-            dependencies,
-            now(),
-            request,
-            running,
-            control,
-            failedSeries,
-            controlError(classified),
-            harnessEnded ? failure : undefined,
-          );
+        if (!await recordFailure(error, attempt, harnessEnded ? failure : undefined)) {
           if (!running.launched) throw classified;
           return;
         }
-        control = await persist(
-          dependencies,
-          now(),
-          request,
-          running,
-          control,
-          { attemptSeries: failedSeries, ...(harnessEnded ? { latestReceipt: failure } : {}) },
-        );
-        series = failedSeries;
         await cancellableDelay(config.executionSnapshot.delaySeconds * 1_000, running, delay);
         if (running.cancelled) return;
       }

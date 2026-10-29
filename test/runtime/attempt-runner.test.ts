@@ -123,6 +123,7 @@ function fixture(options: {
   packageDirectory?: string;
   archive?: (receipt: AgentReceipt) => Promise<void>;
   dataDirectory?: string;
+  decisionEvent?: "agent-succeeded" | "agent-needs-human";
   provider?: ProviderAdapter;
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
@@ -136,7 +137,7 @@ function fixture(options: {
   const harness: HarnessAdapter = { target: "codex", async preflight() {}, async run(input) {
     events.push("harness:spawn");
     if (options.dataDirectory) {
-      await writeFile(input.session.decisionPath, JSON.stringify({ event: "agent-needs-human" }));
+      await writeFile(input.session.decisionPath, JSON.stringify({ event: options.decisionEvent ?? "agent-needs-human" }));
       await writeFile(join(input.session.root, "prepared-comment.txt"), "Please clarify the ticket.");
     }
     prompts.push(input.stagePrompt);
@@ -632,4 +633,55 @@ test("restart delivers a completed prepared attempt without another harness laun
   assert.equal(second.controls.at(-1)?.latestReceipt?.usage?.totalTokens, 27);
   assert.equal(second.controls.at(-1)?.attemptSeries?.current?.status, "succeeded");
   assert.equal(creates, 1);
+});
+
+
+test("prepared results classify verification failures and archive accounting on launch and restart", async (t) => {
+  for (const resumed of [false, true]) {
+    for (const decisionEvent of ["agent-needs-human", "agent-succeeded"] as const) {
+      for (const error of [new DecisionTrustError("secret"), new DecisionEvidenceUnavailableError("missing evidence"),
+        new InvalidDecisionError("invalid result")]) {
+        const dataDirectory = await mkdtemp(join(tmpdir(), "runner-verification-"));
+        t.after(() => rm(dataDirectory, { recursive: true, force: true }));
+        const configured = request({ bundle: bundle(1) });
+        configured.bundle.stack.spec.publication = "controller-prepared-v1";
+        let published: { id: string; url: string; body: string; createdAt: string } | undefined;
+        let creates = 0;
+        const provider = { kind: "github", readTicket: async () => ({ ...snapshot(), comments: published ? [published] : [] }),
+          createComment: async (_ref: unknown, body: string) => {
+            creates++;
+            published = { id: "9", url: "https://github.test/comment/9", body, createdAt: NOW };
+            if (resumed) throw new Error("uncertain create");
+            return published;
+          }, readComment: async () => published } as unknown as ProviderAdapter;
+        const archived: AgentReceipt[] = [];
+        const first = fixture({ request: configured, dataDirectory, provider, decisionEvent,
+          results: [{ ...OK, usage: { totalTokens: 27 } }],
+          archive: async (value) => { archived.push(value); }, verify: async () => { throw error; } });
+        await first.runner.start(first.request);
+        await new Promise<void>((resolve) => first.runner.onSettled!(resolve));
+        // PR/native-review results do not create controller comments and fail immediately.
+        let subject = first;
+        if (resumed && decisionEvent === "agent-needs-human") {
+          const retained = first.controls.at(-1)!;
+          assert.equal(retained.attemptSeries?.current?.status, "started");
+          subject = fixture({ request: request({ bundle: configured.bundle, control: retained }), dataDirectory, provider,
+            archive: async (value) => { archived.push(value); }, verify: async () => { throw error; } });
+          await subject.runner.start(subject.request);
+          for (let i = 0; subject.runner.isRunning(FLOW) && i < 100; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          assert.equal(subject.attempts.length, 0);
+        }
+        assert.equal(subject.controls.at(-1)?.stateId, "blocked");
+        assert.equal(subject.controls.at(-1)?.attemptSeries?.current?.status, "failed");
+        assert.equal(subject.controls.at(-1)?.attemptSeries?.current?.error?.code, error.code);
+        assert.equal(archived.length, 1);
+        assert.equal(archived[0]?.error?.code, error.code);
+        assert.equal(archived[0]?.usage?.totalTokens, 27);
+        assert.deepEqual(archived[0]?.artifacts, []);
+        assert.equal(creates, decisionEvent === "agent-needs-human" ? 1 : 0);
+      }
+    }
+  }
 });
