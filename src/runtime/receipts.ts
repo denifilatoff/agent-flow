@@ -34,6 +34,7 @@ export interface DecisionExpectation {
   mode: AttemptMode;
   resultContract: ResultContract;
   configRevision: string;
+  activationLabel?: string;
   controllerId: string;
   publicationKeys: readonly string[];
   reusableCommentIds?: readonly string[];
@@ -137,7 +138,7 @@ export async function readDecisionAndBuildReceipt(
     invalidDecision("decision event is not allowed by the pinned flow state");
   }
 
-  const initialTicket = await decisionProviderRead(() => provider.readTicket(expected.ticket));
+  const initialTicket = await decisionProviderRead(() => provider.readTicket(expected.ticket, expected.activationLabel));
   assertDecisionTicket(initialTicket, expected.ticket);
   if (expected.resultContract === "verification" && decision.event === "agent-succeeded") {
     assertPinnedChange(initialTicket, expected, "verification");
@@ -197,7 +198,7 @@ export async function readDecisionAndBuildReceipt(
   }
 
   const finalTicket = await decisionProviderReadback(
-    () => provider.readTicket(expected.ticket),
+    () => provider.readTicket(expected.ticket, expected.activationLabel),
     "provider ticket disappeared during final readback",
   );
   assertDecisionTicket(finalTicket, expected.ticket);

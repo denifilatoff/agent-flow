@@ -383,6 +383,9 @@ async function reconcileLocal(
   }
 
   const observedKeys = markedObjectKeys(bundle, evidence, dependencies.providerApiUrl);
+  if (bundle.flow.spec.states[control.stateId]?.kind === "provider-wait") {
+    assertChangeIdentity(control.changeRequest, snapshot.changeRequest);
+  }
   let reviewRerouted = false;
   const reviewTarget = freshReviewTarget(bundle.flow, control.stateId, evidence, controllerId);
   if (reviewTarget) {

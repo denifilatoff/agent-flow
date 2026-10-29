@@ -279,8 +279,8 @@ export function createGitLabAdapter(
 
     readRepository,
 
-    async readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot> {
-      const data = await readSnapshotData(ref);
+    async readTicket(ref: TicketRef, pinnedActivationLabel?: string): Promise<ProviderTicketSnapshot> {
+      const data = await readSnapshotData(ref, pinnedActivationLabel);
       const { changes } = await readActiveChanges(ref, data, []);
       const change = uniqueChange(changes, "GitLab issue has multiple related merge requests");
       return {

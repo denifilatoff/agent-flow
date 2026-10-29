@@ -309,8 +309,8 @@ export function createGitHubAdapter(
 
     readRepository,
 
-    async readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot> {
-      const data = await readSnapshotData(ref);
+    async readTicket(ref: TicketRef, pinnedActivationLabel?: string): Promise<ProviderTicketSnapshot> {
+      const data = await readSnapshotData(ref, pinnedActivationLabel);
       const { changes } = await readActiveChanges(ref, data, []);
       const change = uniqueChange(changes, "GitHub issue has multiple related pull requests");
       return {

@@ -305,6 +305,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
             mode: request.mode,
             resultContract: request.resultContract,
             configRevision: control.configRevision,
+            activationLabel: control.activationLabel ?? request.bundle.flow.metadata.activationLabel,
             controllerId: request.controllerId,
             publicationKeys: request.publicationKeys,
             reusableCommentIds: request.snapshot.comments.filter((comment) => {

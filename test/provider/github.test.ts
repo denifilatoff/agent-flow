@@ -1070,3 +1070,40 @@ for (const edited of [false, true]) test(`GitHub existing owner anchor, PR descr
   assert.equal(JSON.parse(owner!.key)[3],"comment");
   assert.equal(decision.kind, "reassess");
 });
+
+test("receipt readback retains the pinned route's linked pull request after startup routes change", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-github-pinned-receipt-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const decision = join(root, "decision.json");
+  await writeFile(decision, '{"event":"agent-succeeded"}\n');
+  const repeated = (data: unknown, count = 3) => Array.from({ length: count }, () => ({ data }));
+  const issue = { ...fixture.issue as object,
+    labels: [{ name: "bugfix" }, { name: "agent-flow:managed" }, { name: "agent-stage:bug-development" }],
+  };
+  const timeline = [{ id: 1, event: "labeled", label: { name: "bugfix" },
+    created_at: "2026-08-25T10:00:00Z", actor: { id: 7, login: "maintainer" } },
+    (fixture.timelineSecond as unknown[])[1]];
+  const pull = { ...fixture.pull as object, state: "open", merged_at: null };
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", ...repeated(fixture.repository))
+    .add("GET", "repos/owner/repo/issues/17", ...repeated(issue))
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", ...repeated(timeline))
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", ...repeated([]))
+    .add("GET", "repos/owner/repo/pulls/31", ...repeated(pull, 4))
+    .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", { data: [] })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } })
+    .add("GET", "repos/owner/repo/collaborators/developer/permission", ...repeated({ permission: "write" }, 2));
+  const github = adapter(client);
+  const ref = { provider: "github", repository: REPOSITORY, number: 17 } as const;
+  const recovered = await github.readRecoveryEvidence(ref, "bugfix");
+  assert.equal(recovered.snapshot.changeRequest?.number, 31);
+  const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", "a".repeat(40));
+  const receipt = await readDecisionAndBuildReceipt(decision, {
+    flow: bundle.flow, stateId: "bug-development", mode: "stage", resultContract: "development",
+    configRevision: "a".repeat(40), controllerId: RECOVERY_CONTROLLER, activationLabel: "bugfix",
+    publicationKeys: [], flowInstanceId: "33333333-3333-4333-8333-333333333333",
+    attemptId: "44444444-4444-4444-8444-444444444444", ticket: ref,
+    sourceComment: null, pinnedChangeRequest: recovered.snapshot.changeRequest,
+  }, github, false);
+  assert.equal(receipt.artifacts[0]?.kind === "change-request" && receipt.artifacts[0].number, 31);
+});

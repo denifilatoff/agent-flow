@@ -2928,3 +2928,25 @@ test("an edited review approval returns warm local merge-wait work to fresh revi
   assert.ok(runtime.launcher.requests[0]?.publicationKeys.includes(publicationKey("review", "edited-review")));
   assert.equal(provider.snapshot.labels.includes("agent-flow:development"), true);
 });
+
+test("warm review rerouting rejects a replacement linked change request before changing state", async (t) => {
+  const provider = new FakeProvider();
+  const replacement = changeRequest({ number: 32,
+    url: "https://github.example.test/example-owner/example-repository/pull/32",
+    body: `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`,
+    createdAt: "2026-08-26T10:15:00.000Z",
+  });
+  provider.snapshot.labels.push("agent-stage:awaiting-merge");
+  provider.snapshot.changeRequest = replacement;
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+    key: publicationKey("change-request", "32"), createdAt: replacement.createdAt,
+    metadata: { config: SHA, controller: FLOW_1 },
+  }], { changes: [replacement] });
+  const runtime = await localRuntime(t, provider);
+  await runtime.writer(TICKET, null, controlState({ stateId: "awaiting-merge", changeRequest: controlChange() }));
+  await assert.rejects(reconcileTicket(runtime.configured, TICKET), /change request identity/);
+  assert.equal(runtime.launcher.requests.length, 0);
+  assert.equal(provider.events.includes("provider:set-labels"), false);
+  assert.equal(runtime.writer.load!(TICKET)?.value.control?.changeRequest?.number, 31);
+  assert.equal(runtime.writer.load!(TICKET)?.value.control?.stateId, "awaiting-merge");
+});

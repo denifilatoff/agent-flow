@@ -929,3 +929,37 @@ for (const edited of [false,true]) test(`GitLab existing owner anchor, MR descri
   assert.equal(JSON.parse(owner!.key)[3],"comment");
   assert.equal(decision.kind,"reassess");
 });
+
+test("receipt readback retains the pinned route's linked merge request after startup routes change", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-gitlab-pinned-receipt-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const decision = join(root, "decision.json");
+  await writeFile(decision, '{"event":"agent-succeeded"}\n');
+  const repeated = (data: unknown, count = 3) => Array.from({ length: count }, () => ({ data }));
+  const issue = { ...fixture.issue as object, labels: ["bugfix", "agent-flow:managed", "agent-stage:bug-development"] };
+  const events = [{ id: 1, action: "add", label: { name: "bugfix" },
+    created_at: "2026-08-25T10:00:00.000Z", user: { id: 7, username: "maintainer" } }];
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, ...repeated(fixture.project))
+    .add("GET", `${PROJECT}/issues/23`, ...repeated(issue))
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, ...repeated(events))
+    .add("GET", notes, ...repeated([]))
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, ...repeated(fixture.relatedMergeRequests))
+    .add("GET", `${PROJECT}/merge_requests/41`, ...repeated(fixture.mergeRequest, 4))
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, ...repeated({ id: 6, access_level: 30 }, 2));
+  const gitlab = adapter(client);
+  const recovered = await gitlab.readRecoveryEvidence(ref, "bugfix");
+  assert.equal(recovered.snapshot.changeRequest?.number, 41);
+  const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", "a".repeat(40));
+  const receipt = await readDecisionAndBuildReceipt(decision, {
+    flow: bundle.flow, stateId: "bug-development", mode: "stage", resultContract: "development",
+    configRevision: "a".repeat(40), controllerId: RECOVERY_CONTROLLER, activationLabel: "bugfix",
+    publicationKeys: [], flowInstanceId: "33333333-3333-4333-8333-333333333333",
+    attemptId: "44444444-4444-4444-8444-444444444444", ticket: ref,
+    sourceComment: null, pinnedChangeRequest: recovered.snapshot.changeRequest,
+  }, gitlab, false);
+  assert.equal(receipt.artifacts[0]?.kind === "change-request" && receipt.artifacts[0].number, 41);
+});

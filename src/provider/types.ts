@@ -101,7 +101,7 @@ export interface ProviderAdapter {
   discover(repository: string, window: DiscoveryWindow, cursor?: string): Promise<DiscoveryPage>;
   bootstrap(repository: string): Promise<TicketRef[]>;
   readRepository(repository: string): Promise<ProviderRepository>;
-  readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot>;
+  readTicket(ref: TicketRef, pinnedActivationLabel?: string): Promise<ProviderTicketSnapshot>;
   readRecoveryEvidence(ref: TicketRef, pinnedActivationLabel?: string): Promise<RecoveryEvidence>;
   permission(repository: string, actor: Actor): Promise<Permission>;
   readComment(ref: TicketRef, id: string): Promise<ProviderComment>;

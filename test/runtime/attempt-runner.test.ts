@@ -528,3 +528,11 @@ test("restart and failed recovery resolve readiness before a deferred retry dela
     assert.equal(subject.runner.isRunning(FLOW), false);
   }
 });
+
+test("passes the surviving control's activation pin to result verification", async () => {
+  const subject = fixture({ request: request({ control: control({ activationLabel: "bugfix" }) }) });
+  await subject.runner.start(subject.request);
+  subject.process.resolve(OK);
+  await waitIdle(subject);
+  assert.equal(subject.verifications[0]?.expected.activationLabel, "bugfix");
+});
