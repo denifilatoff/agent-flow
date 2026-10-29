@@ -34,6 +34,7 @@ export function createRateLimitedHttpClient(
   defaultHeaders: () => Record<string, string>,
   limiter: RateLimiter,
   fetchImpl: typeof fetch = globalThis.fetch,
+  beforeRequest?: () => Promise<void>,
 ): RateLimitedHttpClient {
   const apiBase = new URL(baseUrl);
   if (!apiBase.pathname.endsWith("/")) apiBase.pathname += "/";
@@ -43,6 +44,7 @@ export function createRateLimitedHttpClient(
     async request<T>(request: ProviderRequest): Promise<ProviderResponse<T>> {
       const url = resolveProviderUrl(request.path, apiBase);
 
+      await beforeRequest?.();
       await limiter.acquire(request.priority);
       const headers = new Headers(defaultHeaders());
       for (const [name, value] of Object.entries(request.headers ?? {})) headers.set(name, value);

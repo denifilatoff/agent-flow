@@ -1,4 +1,5 @@
 import { createHealthServer } from "/app/dist/health.js";
+import { RuntimeManager, readSecretFile } from "/app/dist/config/runtime.js";
 import { createProductionDependencies, main } from "/app/dist/main.js";
 import { runPreflight } from "/app/dist/preflight.js";
 
@@ -10,22 +11,14 @@ const rateLimiterClock = {
 
 const exitCode = await main(process.env, {
   createHealthServer,
-  createPreflightDependencies(environment, healthPort) {
-    const production = createProductionDependencies(environment, healthPort, rateLimiterClock);
-    return {
-      ...production,
-      createController(bundle, providers, harnesses) {
-        return production.createController({
-          ...bundle,
-          controller: {
-            ...bundle.controller,
-            polling: { ...bundle.controller.polling, intervalSeconds: 0.05 },
-          },
-        }, providers, harnesses);
-      },
-    };
+  async createRuntime() {
+    return RuntimeManager.create();
+  },
+  createPreflightDependencies(runtime) {
+    return createProductionDependencies(runtime, rateLimiterClock);
   },
   runPreflight,
+  readSecretFile,
   signals: process,
   reportError: (message) => console.error(message),
 });

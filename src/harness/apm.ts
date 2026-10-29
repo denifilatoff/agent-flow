@@ -67,7 +67,7 @@ export async function compileAgentContext(
     });
     await assertRegularTree(runtimeDirectory, "copied APM package");
 
-    await runApm(run, runtimeDirectory, "install", ["install", "--frozen", "--target", target]);
+    await runApm(run, runtimeDirectory, "install", ["install", "--frozen"]);
     await runApm(run, runtimeDirectory, "compile", ["compile", "--target", target]);
 
     const instructions = target === "claude"

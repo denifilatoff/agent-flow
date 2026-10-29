@@ -7,7 +7,9 @@ import { dirname, join, resolve } from "node:path";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
+import { stringify } from "yaml";
 
+import { RuntimeManager } from "../../src/config/runtime.ts";
 import { parseControlComment } from "../../src/provider/control-comment.ts";
 import type {
   AgentDecision,
@@ -165,35 +167,33 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   const home = join(root, "home");
   const eventsPath = join(root, "events.ndjson");
   await Promise.all([mkdir(dataDirectory, { mode: 0o700 }), mkdir(bin), mkdir(home)]);
-  const controllerPath = await createConfiguration(
+  await createTools(bin);
+  await createAuth(home);
+  const tokenFile = join(root, "provider-token");
+  const operatorAuthFile = join(root, "operator-password");
+  await Promise.all([
+    writeFile(tokenFile, "fixture\n", { mode: 0o600 }),
+    writeFile(operatorAuthFile, "operator-password-314159\n", { mode: 0o600 }),
+  ]);
+  const runtimePath = await createConfiguration(
     provider,
     configRepository,
     dataDirectory,
     state.apiUrl,
     address.port + 1,
+    configRepository,
+    dataDirectory,
+    tokenFile,
+    join(home, ".codex/auth.json"),
+    join(home, ".claude/.credentials.json"),
+    operatorAuthFile,
   );
-  await createTools(bin);
-  await createAuth(home);
 
   environmentChanged = true;
   process.env.PATH = `${bin}:${previous.PATH ?? ""}`;
   process.env.NODE_EXTRA_CA_CERTS = certificate;
-  const environment: NodeJS.ProcessEnv = {
-    ...process.env,
-    HOME: home,
-    PATH: process.env.PATH,
-    NODE_EXTRA_CA_CERTS: certificate,
-    AGENT_FLOW_CONFIG_REPOSITORY: configRepository,
-    AGENT_FLOW_DATA_DIRECTORY: dataDirectory,
-    AGENT_FLOW_CONTROLLER_CONFIG: controllerPath,
-    AGENT_FLOW_HEALTH_PORT: String(address.port + 1),
-    GH_ENTERPRISE_TOKEN: "fixture",
-    GITLAB_TOKEN: "fixture",
-    CODEX_HOME: join(home, ".codex"),
-    CLAUDE_CONFIG_DIR: join(home, ".claude"),
-  };
   if (options.forceStartupFailure) throw new Error("forced fixture startup failure");
-  running = await startController(environment);
+  running = await startController(runtimePath);
 
   async function reconcile(): Promise<void> {
     await running.ready.controller.reconcileNow(state.ref);
@@ -207,7 +207,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
 
   async function restart(): Promise<void> {
     await stopController();
-    running = await startController(environment);
+    running = await startController(runtimePath);
   }
 
   async function untilState(target: string): Promise<void> {
@@ -853,31 +853,60 @@ async function createConfiguration(
   healthPort: number,
   runtimeRepository = repository,
   runtimeDataDirectory = dataDirectory,
+  tokenFile = join(dirname(repository), "provider-token"),
+  codexAuthFile = join(dirname(repository), "auth/.codex/auth.json"),
+  claudeAuthFile = join(dirname(repository), "auth/.claude/.credentials.json"),
+  operatorAuthFile = join(dirname(repository), "operator-password"),
+  pollingIntervalSeconds = 60,
 ): Promise<string> {
   await mkdir(join(repository, "config/flows"), { recursive: true });
   await Promise.all([
     cp(join(ROOT, "schemas"), join(repository, "schemas"), { recursive: true }),
     cp(join(ROOT, "agent-packages"), join(repository, "agent-packages"), { recursive: true }),
     cp(join(ROOT, "config/flows/development.yaml"), join(repository, "config/flows/development.yaml")),
+    cp(join(ROOT, "config/stack.yaml"), join(repository, "config/stack.yaml")),
   ]);
-  const catalog = (await readFile(join(ROOT, "config/agents.yaml"), "utf8"))
-    .replaceAll("delaySeconds: 30", "delaySeconds: 0")
-    .replaceAll("timeoutSeconds: 2700", "timeoutSeconds: 5")
-    .replaceAll("timeoutSeconds: 7200", "timeoutSeconds: 5");
-  await writeFile(join(repository, "config/agents.yaml"), catalog);
-  const template = await readFile(join(ROOT, `test/fixtures/e2e-config/${provider}.yaml`), "utf8");
-  const controllerPath = "config/controller.e2e.yaml";
-  await writeFile(join(repository, controllerPath), template
-    .replace("__CONFIG_REPOSITORY__", runtimeRepository)
-    .replace("__DATA_DIRECTORY__", runtimeDataDirectory)
-    .replace("__API_URL__", apiUrl)
-    .replace("__HEALTH_PORT__", String(healthPort)));
+  await cp(join(ROOT, "config/agents.yaml"), join(repository, "config/agents.yaml"));
+  const stackFile = join(repository, "config/stack.yaml");
+  await writeFile(stackFile, (await readFile(stackFile, "utf8"))
+    .replace("config/flows/development-autonomous.yaml", "config/flows/development.yaml"));
   await execFile("git", ["init", repository]);
   await execFile("git", ["-C", repository, "config", "user.email", "fixture@example.test"]);
   await execFile("git", ["-C", repository, "config", "user.name", "Fixture"]);
   await execFile("git", ["-C", repository, "add", "."]);
   await execFile("git", ["-C", repository, "commit", "-m", "fixture config"]);
-  return controllerPath;
+  const revision = (await execFile("git", ["-C", repository, "rev-parse", "HEAD"])).stdout.trim();
+  const execution = (harness: "claude" | "codex") => ({
+    harness, model: "fixture-model", reasoning: "high",
+    maxAttempts: 3, delaySeconds: 0, timeoutSeconds: 5,
+  });
+  const runtimePath = join(dirname(repository), "runtime.yaml");
+  await writeFile(runtimePath, stringify({
+    apiVersion: "agent-flow/v1alpha1",
+    kind: "RuntimeConfig",
+    configuration: { repository: runtimeRepository, revision, stack: "config/stack.yaml" },
+    provider: {
+      type: provider,
+      apiUrl,
+      repositories: [provider === "github" ? "owner/repo" : "group/project"],
+      tokenFile,
+    },
+    execution: {
+      agents: {
+        architect: execution("claude"), planner: execution("claude"),
+        developer: execution("codex"), reviewer: execution("codex"),
+        "bug-investigator": execution("claude"), bugfixer: execution("codex"),
+      },
+      harnesses: { codex: { authFile: codexAuthFile }, claude: { authFile: claudeAuthFile } },
+    },
+    polling: { intervalSeconds: pollingIntervalSeconds, maxCallsPerMinute: 20, quotaReservePercent: 25 },
+    runtime: {
+      concurrency: 2,
+      dataDirectory: runtimeDataDirectory,
+      http: { address: "0.0.0.0", port: healthPort, authFile: operatorAuthFile },
+    },
+  }), { mode: 0o600 });
+  return runtimePath;
 }
 
 async function createTools(bin: string): Promise<void> {
@@ -903,14 +932,27 @@ async function runDockerFixture(root: string, port: number, healthPort: number):
   await createCertificate(certificate, key);
   const state = new FixtureState("github");
   state.origin = `https://host.docker.internal:${port}`;
-  await createConfiguration("github", repository, data, state.apiUrl, 8080, "/config", "/data");
   await createDockerTools(bin);
   await createAuth(auth);
+  const token = join(canonicalRoot, "provider-token");
+  const operatorAuth = join(canonicalRoot, "operator-password");
+  await Promise.all([
+    writeFile(token, "fixture\n", { mode: 0o644 }),
+    writeFile(operatorAuth, "operator-password-314159\n", { mode: 0o644 }),
+  ]);
+  const runtime = await createConfiguration(
+    "github", repository, data, state.apiUrl, 8080, "/config", "/var/lib/agent-flow",
+    "/run/secrets/agent-flow/provider-token",
+    "/run/secrets/agent-flow/codex-auth",
+    "/run/secrets/agent-flow/claude-auth",
+    "/run/secrets/agent-flow/operator-password",
+    0.05,
+  );
   await Promise.all([
     chmod(join(auth, ".codex/auth.json"), 0o644),
     chmod(join(auth, ".claude/.credentials.json"), 0o644),
   ]);
-  await writeFile(join(canonicalRoot, "compose.e2e.yaml"), `services:\n  controller:\n    restart: "no"\n    command: ["node", "/fixture-source/docker-controller.mjs"]\n    environment:\n      AGENT_FLOW_CONTROLLER_CONFIG: config/controller.e2e.yaml\n      GH_ENTERPRISE_TOKEN: fixture\n      NODE_EXTRA_CA_CERTS: /fixture/fixture.crt\n      PATH: /fixture-bin:/opt/tools/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n      HOME: /home/agent\n      CODEX_HOME: /home/agent/.codex\n      CLAUDE_CONFIG_DIR: /home/agent/.claude\n    ports: !override\n      - "${healthPort}:8080"\n    volumes: !override\n      - ${repository}:/config:ro\n      - ${data}:/data\n      - ${certificate}:/fixture/fixture.crt:ro\n      - ${bin}:/fixture-bin:ro\n      - ${resolve(ROOT, "test/fixtures")}:/fixture-source:ro\n      - ${join(auth, ".config/gh")}:/home/agent/.config/gh:ro\n      - ${join(auth, ".config/glab-cli")}:/home/agent/.config/glab-cli:ro\n      - ${join(auth, ".codex")}:/home/agent/.codex:ro\n      - ${join(auth, ".claude")}:/home/agent/.claude:ro\n`);
+  await writeFile(join(canonicalRoot, "compose.e2e.yaml"), `services:\n  controller:\n    restart: "no"\n    command: ["node", "/fixture-source/docker-controller.mjs"]\n    environment:\n      NODE_EXTRA_CA_CERTS: /fixture/fixture.crt\n      PATH: /fixture-bin:/opt/tools/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n      HOME: /home/agent\n    ports: !override\n      - "${healthPort}:8080"\n    volumes: !override\n      - ${runtime}:/etc/agent-flow/runtime.yaml:ro\n      - ${token}:/run/secrets/agent-flow/provider-token:ro\n      - ${join(auth, ".codex/auth.json")}:/run/secrets/agent-flow/codex-auth:ro\n      - ${join(auth, ".claude/.credentials.json")}:/run/secrets/agent-flow/claude-auth:ro\n      - ${operatorAuth}:/run/secrets/agent-flow/operator-password:ro\n      - ${repository}:/config:ro\n      - ${data}:/var/lib/agent-flow\n      - ${certificate}:/fixture/fixture.crt:ro\n      - ${bin}:/fixture-bin:ro\n      - ${resolve(ROOT, "test/fixtures")}:/fixture-source:ro\n`);
   const server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
     void state.handle(request, response).catch((error: unknown) => json(response, 500, {
       error: error instanceof Error ? error.message : "fixture failed",
@@ -960,10 +1002,10 @@ async function createAuth(home: string): Promise<void> {
   ]);
 }
 
-async function startController(environment: NodeJS.ProcessEnv): Promise<RunningController> {
-  const port = Number(environment.AGENT_FLOW_HEALTH_PORT);
+async function startController(runtimePath: string): Promise<RunningController> {
   let timestamp = Date.now();
-  const ready = await runPreflight(createProductionDependencies(environment, port, {
+  const runtime = await RuntimeManager.create(runtimePath);
+  const ready = await runPreflight(createProductionDependencies(runtime, {
     now: () => timestamp,
     sleep: async (milliseconds) => { timestamp += milliseconds; },
   }));

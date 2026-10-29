@@ -1,0 +1,9 @@
+name: bug-investigator
+version: 1.0.0
+description: Reproduce a reported bug and verify its fix.
+author: agent-flow
+targets: [claude, codex]
+dependencies:
+  apm:
+    - github/awesome-copilot/skills/bug-reproduction-brief#634b92f887487fc61cddc2f61d77830e09e8f589
+    - github/awesome-copilot/skills/bug-receipt#634b92f887487fc61cddc2f61d77830e09e8f589

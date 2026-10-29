@@ -65,6 +65,9 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
   if (events.length === 0) {
     throw new Error(`flow state ${input.stateId} has no permitted model event for ${input.mode} mode`);
   }
+  if (input.resultContract === "verification" && !input.changeRequest) {
+    throw new Error("verification requires a pinned change request");
+  }
 
   const lines = [
     `Read the attempt context from ${input.contextPath}.`,
@@ -126,6 +129,13 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
     if (input.resultContract === "plan") {
       return `a marked plan comment beginning exactly with ${marker(input, "plan")}`;
     }
+    if (input.resultContract === "diagnostic") {
+      return `a marked diagnostic comment beginning exactly with ${marker(input, "diagnostic")}`;
+    }
+    if (input.resultContract === "verification") {
+      return `a marked diagnostic comment beginning exactly with ${marker(input, "diagnostic")} followed by `
+        + `BUG RECEIPT · VERIFIED for pinned head ${input.changeRequest!.headSha}`;
+    }
     if (input.resultContract === "development") {
       if (!input.changeRequest) return "creation of one linked open change request during this attempt";
       const change = input.changeRequest;
@@ -136,6 +146,6 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
   throw new Error(`result contract ${input.resultContract} does not support ${event}`);
 }
 
-function marker(input: RuntimePromptInput, artifact: "assessment" | "plan" | "question" | "review"): string {
+function marker(input: RuntimePromptInput, artifact: "assessment" | "plan" | "diagnostic" | "question" | "review"): string {
   return `<!-- agent-flow:v1 flow=${input.flowInstanceId} attempt=${input.attemptId} artifact=${artifact} -->`;
 }

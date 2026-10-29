@@ -3,7 +3,6 @@ import {
   spawn as spawnChild,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   chmod,
@@ -22,17 +21,15 @@ import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
-import { stringify } from "yaml";
-
 import type { HarnessTarget } from "../config/types.ts";
 import { isProviderTokenEnvironment } from "../config/provider-credentials.ts";
-import { assertSafeDirectory, assertSafeFile, createSafeDirectory } from "../runtime/filesystem.ts";
+import { assertSafeFile, createSafeDirectory } from "../runtime/filesystem.ts";
 import type { AttemptSession } from "../runtime/sessions.ts";
 import type { HarnessResult, ProviderCredential } from "./types.ts";
 
 const MAX_PROMPT_BYTES = 1_048_576;
 const MAX_ENVIRONMENT_VALUE_BYTES = 4_096;
-const MAX_GLAB_METADATA_VALUE_BYTES = 1_024;
+const MAX_CREDENTIAL_BYTES = 65_536;
 const SAFE_ENVIRONMENT_NAME = /^[A-Z][A-Z0-9_]*$/;
 const POST_EXIT_DRAIN_MS = 1_000;
 const SIGNAL_FAILURE_SETTLE_MS = 1_000;
@@ -168,26 +165,38 @@ export function harnessEnvironment(overrides: Record<string, string>): NodeJS.Pr
 
 export async function providerCredentialEnvironment(
   credential: ProviderCredential,
-  glabConfigDirectory: string,
-  dependencies: ProcessDependencies,
+  _glabConfigDirectory: string,
+  _dependencies: ProcessDependencies,
 ): Promise<Record<string, string>> {
   if (!isProviderTokenEnvironment(credential.provider, credential.name)) {
     throw new Error("unsupported provider credential environment");
   }
-  if (credential.provider === "gitlab" && credential.name === "OAUTH_TOKEN") {
-    await seedGitLabOAuthConfig(credential.apiUrl, glabConfigDirectory, dependencies);
-    return {};
-  }
   return { [credential.name]: credential.value };
 }
 
-export async function createHarnessHome(session: AttemptSession, target: HarnessTarget): Promise<string> {
-  const harnessRoot = await assertSafeDirectory(
-    session.root,
-    session.harnessSessionDirectory,
-    "harness session directory",
-  );
-  return createSafeDirectory(harnessRoot, join(harnessRoot, `${target}-${randomUUID()}`), `${target} harness home`);
+export async function createHarnessHome(_session: AttemptSession, target: HarnessTarget): Promise<string> {
+  const harnessRoot = join(tmpdir(), "agent-flow");
+  await mkdir(harnessRoot, { recursive: true, mode: 0o700 });
+  return realpath(await mkdtemp(join(harnessRoot, `${target}-`)));
+}
+
+export async function readRegularFile(source: string, label: string): Promise<Buffer> {
+  const sourceHandle = await openRegularSource(source, label);
+  try {
+    const metadata = await sourceHandle.stat();
+    if (metadata.size > MAX_CREDENTIAL_BYTES) throw new Error(`${label} exceeds the maximum size`);
+    const buffer = Buffer.alloc(MAX_CREDENTIAL_BYTES + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await sourceHandle.read(buffer, length, buffer.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > MAX_CREDENTIAL_BYTES) throw new Error(`${label} exceeds the maximum size`);
+    return buffer.subarray(0, length);
+  } finally {
+    await sourceHandle.close();
+  }
 }
 
 export async function createCliConfigEnvironment(
@@ -199,68 +208,6 @@ export async function createCliConfigEnvironment(
     createSafeDirectory(root, join(root, "glab"), "GitLab CLI configuration directory"),
   ]);
   return { GH_CONFIG_DIR: github, GLAB_CONFIG_DIR: gitlab };
-}
-
-async function seedGitLabOAuthConfig(
-  apiUrl: string,
-  directory: string,
-  dependencies: ProcessDependencies,
-): Promise<void> {
-  const host = new URL(apiUrl).host;
-  const keys = [
-    "host",
-    "api_host",
-    "api_protocol",
-    "git_protocol",
-    "user",
-    "use_keyring",
-    "is_oauth2",
-    "oauth2_expiry_date",
-  ] as const;
-  const values = Object.fromEntries(await Promise.all(keys.map(async (key) => {
-    const { stdout } = await dependencies.runCommand(
-      "glab",
-      ["config", "get", key, "--host", host],
-      { env: harnessEnvironment({}) },
-    );
-    if (Buffer.byteLength(stdout) > MAX_GLAB_METADATA_VALUE_BYTES) {
-      throw new Error("GitLab OAuth metadata is invalid");
-    }
-    return [key, stdout.trim()];
-  }))) as Record<(typeof keys)[number], string>;
-  if (values.host !== host
-    || values.api_host !== host
-    || values.api_protocol !== "https"
-    || !["https", "ssh"].includes(values.git_protocol)
-    || !safeMetadataValue(values.user)
-    || values.use_keyring !== "true"
-    || values.is_oauth2 !== "true"
-    || !safeMetadataValue(values.oauth2_expiry_date)
-    || Number.isNaN(Date.parse(values.oauth2_expiry_date))) {
-    throw new Error("GitLab OAuth metadata is invalid");
-  }
-  const body = stringify({
-    host,
-    hosts: { [host]: {
-      api_host: values.api_host,
-      api_protocol: values.api_protocol,
-      git_protocol: values.git_protocol,
-      user: values.user,
-      use_keyring: values.use_keyring,
-      is_oauth2: values.is_oauth2,
-      oauth2_expiry_date: values.oauth2_expiry_date,
-    } },
-  });
-  const handle = await open(
-    join(directory, "config.yml"),
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-    0o600,
-  );
-  try {
-    await handle.writeFile(body, "utf8");
-  } finally {
-    await handle.close();
-  }
 }
 
 export async function copyRegularFile(source: string, destination: string, label: string): Promise<void> {
@@ -576,12 +523,6 @@ async function assertRegularSource(
 
 function safeEnvironmentValue(value: string): boolean {
   return !value.includes("\0") && Buffer.byteLength(value) <= MAX_ENVIRONMENT_VALUE_BYTES;
-}
-
-function safeMetadataValue(value: string): boolean {
-  return value.length > 0
-    && !/[\0\r\n]/.test(value)
-    && Buffer.byteLength(value) <= MAX_GLAB_METADATA_VALUE_BYTES;
 }
 
 function cancelledResult(): HarnessResult {

@@ -6,8 +6,16 @@ interface SchedulerOptions<T> {
 
 export interface Scheduler<T> {
   schedule(value: T): Promise<void>;
+  setConcurrency(concurrency: number): void;
   close(): void;
   drain(): Promise<void>;
+  snapshot(): SchedulerSnapshot;
+}
+
+export interface SchedulerSnapshot {
+  active: number;
+  queued: number;
+  concurrency: number;
 }
 
 interface Entry<T> {
@@ -29,6 +37,7 @@ export function createScheduler<T>(options: SchedulerOptions<T>): Scheduler<T> {
   const keyed = new Map<string, Entry<T>[]>();
   const drained: Array<() => void> = [];
   let active = 0;
+  let concurrency = options.concurrency;
   let closed = false;
 
   return {
@@ -53,6 +62,12 @@ export function createScheduler<T>(options: SchedulerOptions<T>): Scheduler<T> {
       return promise;
     },
 
+    setConcurrency(next): void {
+      if (!Number.isInteger(next) || next < 1) throw new Error("scheduler concurrency must be a positive integer");
+      concurrency = next;
+      pump();
+    },
+
     close(): void {
       if (closed) return;
       closed = true;
@@ -71,10 +86,14 @@ export function createScheduler<T>(options: SchedulerOptions<T>): Scheduler<T> {
       if (active === 0 && pending.length === 0) return Promise.resolve();
       return new Promise<void>((resolve) => drained.push(resolve));
     },
+
+    snapshot(): SchedulerSnapshot {
+      return { active, queued: pending.length, concurrency };
+    },
   };
 
   function pump(): void {
-    while (active < options.concurrency) {
+    while (active < concurrency) {
       const index = pending.findIndex((entry) => keyed.get(entry.id)?.[0] === entry);
       if (index < 0) return;
       const entry = pending.splice(index, 1)[0]!;

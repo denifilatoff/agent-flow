@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { gitAuthentication } from "../config/repository.ts";
+import type { ProviderCredential } from "../harness/types.ts";
 import type { ProviderRepository, TicketRef } from "../provider/types.js";
 import {
   assertCanonicalUuid,
@@ -76,13 +77,14 @@ export class WorkspaceManager {
     repository: ProviderRepository,
     ticket: TicketRef,
     flowInstanceId: string,
+    credential?: ProviderCredential,
   ): Promise<Workspace> {
     assertCanonicalUuid(flowInstanceId, "flow instance ID");
     const identity = repositoryIdentity(repository);
     assertTicket(identity, ticket);
     return this.#withFlowLock(
       flowInstanceId,
-      () => this.#prepareWorkspace(repository, ticket, flowInstanceId, identity),
+      () => this.#prepareWorkspace(repository, ticket, flowInstanceId, identity, credential),
     );
   }
 
@@ -91,6 +93,7 @@ export class WorkspaceManager {
     ticket: TicketRef,
     flowInstanceId: string,
     identity: RepositoryIdentity,
+    credential?: ProviderCredential,
   ): Promise<Workspace> {
     const dataRoot = await prepareDataRoot(this.#configuredDataDirectory);
     const repositoriesRoot = await ensureSafeDirectory(
@@ -132,7 +135,7 @@ export class WorkspaceManager {
       return workspace;
     }
 
-    await this.#prepareBaseClone(dataRoot, baseClone, repository, identity);
+    await this.#prepareBaseClone(dataRoot, baseClone, repository, identity, credential);
     let bindingCreated = false;
     if (bindingExists) {
       assertBinding(await readBinding(dataRoot, bindingPath), expectedBinding);
@@ -222,6 +225,7 @@ export class WorkspaceManager {
     baseClone: string,
     repository: ProviderRepository,
     identity: RepositoryIdentity,
+    credential?: ProviderCredential,
   ): Promise<void> {
     let preparation = this.#baseClonePreparations.get(baseClone);
     if (!preparation) {
@@ -229,7 +233,7 @@ export class WorkspaceManager {
         if (!(await pathExists(baseClone))) {
           await assertSafeWritableFile(dataRoot, baseClone, "base clone path");
           const executable = identity.provider === "github" ? "gh" : "glab";
-          const authentication = gitAuthentication(new URL(identity.cloneUrl));
+          const authentication = gitAuthentication(new URL(identity.cloneUrl), credential);
           await this.#run(executable, [
             "repo",
             "clone",

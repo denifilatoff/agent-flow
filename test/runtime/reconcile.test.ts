@@ -3,6 +3,7 @@ import test from "node:test";
 import { inspect } from "node:util";
 
 import { loadConfigBundle, type ConfigBundle } from "../../src/config/load.ts";
+import { parseYaml, validateDocument } from "../../src/config/schema-validator.ts";
 import type {
   Actor,
   AgentReceipt,
@@ -37,6 +38,7 @@ import {
 import { deriveEvent } from "../../src/runtime/derive-event.ts";
 
 const SHA = "a".repeat(40);
+const OLD_SHA = "b".repeat(40);
 const OLD_HEAD = "1".repeat(40);
 const NEW_HEAD = "2".repeat(40);
 const FLOW_1 = "11111111-1111-4111-8111-111111111111";
@@ -45,8 +47,13 @@ const ATTEMPT = "33333333-3333-4333-8333-333333333333";
 const SERIES = "44444444-4444-4444-8444-444444444444";
 const NOW = "2026-08-26T12:00:00.000Z";
 const PROVIDER_CREDENTIAL = {
-  provider: "github", name: "GITHUB_TOKEN", value: "fixture-token", apiUrl: "https://api.github.com",
+  provider: "github", name: "GH_TOKEN", value: "fixture-token", apiUrl: "https://api.github.com",
 } as const;
+const EXECUTION = {
+  harness: "claude", model: "fixture-model", reasoning: "high",
+  maxAttempts: 3, delaySeconds: 0, timeoutSeconds: 60,
+} as const;
+const execution = async () => ({ runtimeDigest: "b".repeat(64), executionSnapshot: EXECUTION });
 const TICKET: TicketRef = {
   provider: "github",
   repository: "example-owner/example-repository",
@@ -55,7 +62,8 @@ const TICKET: TicketRef = {
 const MAINTAINER: Actor = { login: "maintainer", providerId: "7" };
 const OUTSIDER: Actor = { login: "outsider", providerId: "8" };
 
-const BUNDLE = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", SHA);
+const BUNDLE = await loadConfigBundle(process.cwd(), "config/stack.yaml", SHA);
+BUNDLE.flow = validateDocument("Flow", await parseYaml("config/flows/development.yaml"));
 
 function repository(): ProviderRepository {
   return {
@@ -120,6 +128,7 @@ function snapshot(patch: Partial<ProviderTicketSnapshot> = {}): ProviderTicketSn
     updatedAt: "2026-08-26T11:45:00.000Z",
     activation: {
       present: true,
+      label: "agent-flow:development",
       eventId: "803",
       actor: MAINTAINER,
       occurredAt: "2026-08-26T10:00:00.000Z",
@@ -386,13 +395,19 @@ async function assertRunnerAccepts(request: AttemptRequest, provider: ProviderAd
   const runner = createAttemptRunner({
     dataDirectory: "/data",
     provider,
-    providerCredential: () => PROVIDER_CREDENTIAL,
+    providerConfig: { apiUrl: PROVIDER_CREDENTIAL.apiUrl, repositories: [request.ref.repository] },
+    providerCredential: PROVIDER_CREDENTIAL,
+    preparePinnedAgent: async () => ({
+      bundle: request.bundle,
+      packageDirectory: "/config/agent-packages/developer",
+    }),
+    execution,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: request.ref.repository,
       ticketNumber: request.ref.number, flowInstanceId: request.control.flowInstanceId,
     }; } },
-    harnesses: { [request.bundle.catalog.agents[request.agentId]!.target]: {
-      target: request.bundle.catalog.agents[request.agentId]!.target,
+    harnesses: { [EXECUTION.harness]: {
+      target: EXECUTION.harness,
       async preflight() {},
       async run(input) {
         return new Promise((resolve) => input.signal.addEventListener("abort", () => resolve({
@@ -438,6 +453,9 @@ test("accepts one authorized activation and owns one stage label", async () => {
   const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
 
   assert.equal(outcome.stateId, "assessment");
+  assert.equal(outcome.repositoryUrl, "https://github.example.test/example-owner/example-repository");
+  assert.equal(outcome.ticketUrl, "https://github.example.test/example-owner/example-repository/issues/17");
+  assert.equal(outcome.actionUrl, outcome.ticketUrl);
   assert.equal(provider.created, 1);
   assert.deepEqual(
     provider.snapshot.labels.filter((label) => label.startsWith("agent-")),
@@ -448,6 +466,74 @@ test("accepts one authorized activation and owns one stage label", async () => {
   assert.equal(launcher.requests[0]?.control.sequence, 0);
   assert.equal(launcher.requests[0]?.control.activationEventId, "803");
   assert.ok(provider.events.indexOf("provider:read-control") < provider.events.indexOf("provider:set-labels"));
+});
+
+test("routes the exact bugfix label to the bugfix branch", async () => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["bugfix"];
+  provider.snapshot.activation.label = "bugfix";
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.stateId, "bug-reproduction");
+  assert.equal(launcher.requests[0]?.agentId, "bug-investigator");
+  assert.ok(provider.snapshot.labels.includes("bugfix"));
+});
+
+test("routes by the authorized activation event when both labels are present", async () => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["bugfix", "agent-flow:development"];
+  provider.snapshot.activation.label = "agent-flow:development";
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.stateId, "assessment");
+  assert.equal(launcher.requests[0]?.agentId, "architect");
+  assert.equal(launcher.requests[0]?.control.activationLabel, "agent-flow:development");
+});
+
+test("keeps a pinned bugfix flow active when startup activation routes change", async () => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["bugfix"];
+  provider.snapshot.activation = {
+    present: false,
+    label: null,
+    eventId: null,
+    actor: null,
+    occurredAt: null,
+  };
+  installControl(provider, controlState({
+    stateId: "bug-reproduction",
+    activationLabel: "bugfix",
+  }));
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.stateId, "bug-reproduction");
+  assert.equal(launcher.requests[0]?.agentId, "bug-investigator");
+  assert.deepEqual(launcher.cancelled, []);
+});
+
+test("keeps retry identity pinned to the accepted activation event", async () => {
+  async function inputRevision(eventId: string | null): Promise<string> {
+    const provider = new FakeProvider();
+    provider.snapshot.labels = ["bugfix"];
+    provider.snapshot.activation.eventId = eventId;
+    installControl(provider, controlState({
+      stateId: "bug-reproduction",
+      activationLabel: "bugfix",
+    }));
+    const launcher = new FakeLauncher();
+
+    await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+    return launcher.requests[0]!.inputRevision;
+  }
+
+  assert.equal(await inputRevision("new-route-event"), await inputRevision(null));
 });
 
 test("accepts a GitLab control creation readback without the final newline", async () => {
@@ -468,7 +554,17 @@ test("ignores an activation by an actor below write permission", async () => {
 
   const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
 
-  assert.equal(outcome.stateId, null);
+  assert.deepEqual(outcome, {
+    flowInstanceId: null,
+    stateId: null,
+    configRevision: null,
+    stateKind: null,
+    repositoryUrl: "https://github.example.test/example-owner/example-repository",
+    ticketUrl: "https://github.example.test/example-owner/example-repository/issues/17",
+    actionUrl: "https://github.example.test/example-owner/example-repository/issues/17",
+    changed: false,
+    started: false,
+  });
   assert.equal(provider.created, 0);
   assert.equal(provider.updated, 0);
   assert.deepEqual(launcher.requests, []);
@@ -476,7 +572,9 @@ test("ignores an activation by an actor below write permission", async () => {
 });
 
 for (const scenario of [
-  { name: "activation removal", patch: { labels: ["bug"], activation: { present: false, eventId: null, actor: null, occurredAt: null } } },
+  { name: "activation removal", patch: { labels: ["bug"], activation: {
+    present: false, label: null, eventId: null, actor: null, occurredAt: null,
+  } } },
   { name: "ordinary ticket closure", patch: { open: false } },
 ] as const) {
   test(`cancels on ${scenario.name} and preserves the managed label`, async () => {
@@ -601,7 +699,10 @@ test("reconciler owns terminal cancellation for an actual running attempt", asyn
   const runner = createAttemptRunner({
     dataDirectory: "/data",
     provider,
-    providerCredential: () => PROVIDER_CREDENTIAL,
+    providerConfig: { apiUrl: PROVIDER_CREDENTIAL.apiUrl, repositories: [TICKET.repository] },
+    providerCredential: PROVIDER_CREDENTIAL,
+    preparePinnedAgent: async () => ({ bundle: BUNDLE, packageDirectory: "/config/agent-packages/architect" }),
+    execution,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: TICKET.repository,
       ticketNumber: TICKET.number, flowInstanceId: FLOW_1,
@@ -652,7 +753,11 @@ test("terminal cancellation overrides an in-flight success from the same attempt
   const releaseSuccessCas = deferred<void>();
   const abortObserved = deferred<void>();
   const runner = createAttemptRunner({
-    dataDirectory: "/data", provider, providerCredential: () => PROVIDER_CREDENTIAL,
+    dataDirectory: "/data", provider,
+    providerConfig: { apiUrl: PROVIDER_CREDENTIAL.apiUrl, repositories: [TICKET.repository] },
+    providerCredential: PROVIDER_CREDENTIAL,
+    preparePinnedAgent: async () => ({ bundle: BUNDLE, packageDirectory: "/config/agent-packages/architect" }),
+    execution,
     workspaceManager: { async prepareWorkspace() { return {
       baseClone: "/data/repository", worktree: "/data/worktree", repository: TICKET.repository,
       ticketNumber: TICKET.number, flowInstanceId: FLOW_1,
@@ -734,6 +839,7 @@ test("reactivation creates a new flow and preserves terminal control history", a
   installControl(provider, controlState({ stateId: "done" }));
   provider.snapshot.activation = {
     present: true,
+    label: "agent-flow:development",
     eventId: "804",
     actor: MAINTAINER,
     occurredAt: "2026-08-26T10:00:00.000Z",
@@ -744,8 +850,8 @@ test("reactivation creates a new flow and preserves terminal control history", a
   assert.equal(provider.created, 1);
   assert.equal(provider.updated, 0);
   assert.equal(provider.snapshot.comments.length, 2);
-  assert.ok(provider.snapshot.comments[0]?.body.includes(FLOW_1));
-  assert.ok(provider.snapshot.comments[1]?.body.includes(FLOW_2));
+  assert.equal(parseControlComment(provider.snapshot.comments[0]!.body)?.flowInstanceId, FLOW_1);
+  assert.equal(parseControlComment(provider.snapshot.comments[1]!.body)?.flowInstanceId, FLOW_2);
   assert.equal(launcher.requests[0]?.control.flowInstanceId, FLOW_2);
 });
 
@@ -756,6 +862,7 @@ test("finishes crash-window cleanup instead of reactivating the original label e
   installControl(provider, terminal);
   provider.snapshot.activation = {
     present: true,
+    label: "agent-flow:development",
     eventId: "803",
     actor: MAINTAINER,
     occurredAt: "2026-08-26T13:00:00.000Z",
@@ -770,9 +877,60 @@ test("finishes crash-window cleanup instead of reactivating the original label e
   assert.deepEqual(launcher.requests, []);
 });
 
+test("keeps terminal history independent from unavailable pinned revisions", async (t) => {
+  await t.test("terminal control", async () => {
+    const provider = new FakeProvider();
+    provider.snapshot.activation = { present: false, eventId: null, actor: null, occurredAt: null };
+    installControl(provider, controlState({ configRevision: OLD_SHA, stateId: "done" }));
+    const current = structuredClone(BUNDLE);
+    current.flow.spec.states.done = { kind: "paused" };
+    const deps = dependencies(provider);
+    deps.config.loadCurrent = async () => current;
+    deps.config.loadPinned = async () => { throw new Error("old revision unavailable"); };
+
+    const outcome = await reconcileTicket(deps, TICKET);
+
+    assert.deepEqual(outcome, {
+      flowInstanceId: FLOW_1,
+      stateId: "done",
+      configRevision: OLD_SHA,
+      stateKind: "final",
+      repositoryUrl: "https://github.example.test/example-owner/example-repository",
+      ticketUrl: "https://github.example.test/example-owner/example-repository/issues/17",
+      actionUrl: "https://github.example.test/example-owner/example-repository/issues/17",
+      changed: false,
+      started: false,
+    });
+  });
+
+  await t.test("unfinished control", async () => {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({ configRevision: OLD_SHA }));
+    const deps = dependencies(provider);
+    deps.config.loadPinned = async () => { throw new Error("old revision unavailable"); };
+
+    await assert.rejects(reconcileTicket(deps, TICKET), /pinned configuration load failed/);
+  });
+});
+
+test("cleans a terminal pinned activation after its route is removed from current configuration", async () => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["bugfix", "bug"];
+  provider.snapshot.activation = { present: false, label: null, eventId: null, actor: null, occurredAt: null };
+  installControl(provider, controlState({ stateId: "done", configRevision: OLD_SHA, activationLabel: "bugfix" }));
+  const deps = dependencies(provider);
+  const current = structuredClone(BUNDLE);
+  delete current.flow.spec.activationRoutes;
+  deps.config.loadCurrent = async () => current;
+  deps.config.loadPinned = async () => { throw new Error("old revision unavailable"); };
+
+  assert.equal((await reconcileTicket(deps, TICKET)).stateId, "done");
+  assert.deepEqual(provider.snapshot.labels.toSorted(), ["agent-flow:managed", "agent-stage:done", "bug"]);
+});
+
 test("repairs the permanent managed label for terminal history", async () => {
   const provider = new FakeProvider();
-  provider.snapshot.activation = { present: false, eventId: null, actor: null, occurredAt: null };
+  provider.snapshot.activation = { present: false, label: null, eventId: null, actor: null, occurredAt: null };
   provider.snapshot.labels = ["bug", "agent-stage:planning"];
   provider.snapshot.comments.push(controlComment(controlState({ stateId: "done" })));
 
@@ -886,6 +1044,24 @@ test("enters needs-human for a closed change and reviews a new head", async (t) 
     const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
 
     assert.equal(outcome.stateId, "review");
+    assert.equal(launcher.requests[0]?.agentId, "reviewer");
+    assert.equal(launcher.requests[0]?.snapshot.changeRequest?.headSha, NEW_HEAD);
+  });
+
+  await t.test("verification head change", async () => {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({
+      stateId: "bug-verification",
+      activationLabel: "bugfix",
+      changeRequest: controlChange(),
+    }));
+    provider.snapshot.labels = ["bugfix", "agent-flow:managed", "agent-stage:bug-verification"];
+    provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD });
+    const launcher = new FakeLauncher();
+
+    const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+    assert.equal(outcome.stateId, "bug-review");
     assert.equal(launcher.requests[0]?.agentId, "reviewer");
     assert.equal(launcher.requests[0]?.snapshot.changeRequest?.headSha, NEW_HEAD);
   });
@@ -1241,6 +1417,93 @@ test("an authorized blocked comment resets the series and resumes the stage", as
   assert.equal(launcher.requests[0]?.agentId, "developer");
   assert.equal(launcher.requests[0]?.control.attemptSeries?.consumed, 0);
   assert.equal(launcher.requests[0]?.control.attemptSeries?.current, null);
+});
+
+test("unblocks a pinned bugfix flow when the current adapter no longer recognizes its label", async () => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["bugfix"];
+  provider.snapshot.activation = { present: false, label: null, eventId: null, actor: null, occurredAt: null };
+  installControl(provider, controlState({
+    stateId: "blocked", resumeStateId: "bug-development", activationLabel: "bugfix",
+  }));
+  provider.snapshot.comments.push(comment("reset", "Retry.", MAINTAINER, "2026-08-26T10:46:00.000Z"));
+  const launcher = new FakeLauncher();
+
+  const result = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(result.stateId, "bug-development");
+  assert.equal(launcher.requests[0]?.agentId, "bugfixer");
+  assert.equal(launcher.requests[0]?.snapshot.activation.label, "bugfix");
+});
+
+test("routes a moved verification head back through review when unblocked", async () => {
+  const provider = new FakeProvider();
+  installControl(provider, controlState({
+    stateId: "blocked",
+    resumeStateId: "bug-verification",
+    activationLabel: "bugfix",
+    attemptSeries: attemptSeries({ agentId: "bug-investigator", stateId: "bug-verification" }),
+    changeRequest: controlChange(),
+  }));
+  provider.snapshot.labels = ["bugfix"];
+  provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD });
+  provider.snapshot.comments.push(comment(
+    "unblock",
+    "Retry after the head update.",
+    MAINTAINER,
+    "2026-08-26T12:02:00.000Z",
+  ));
+  const launcher = new FakeLauncher();
+
+  const outcome = await reconcileTicket(dependencies(provider, launcher), TICKET);
+
+  assert.equal(outcome.stateId, "bug-review");
+  assert.equal(launcher.requests[0]?.agentId, "reviewer");
+  assert.equal(launcher.requests[0]?.control.changeRequest?.headSha, NEW_HEAD);
+});
+
+test("reviews a moved verification head after an accepted human answer", async () => {
+  for (const headSha of [OLD_HEAD, NEW_HEAD]) {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({
+      stateId: "needs-human", resumeStateId: "bug-verification", activationLabel: "bugfix",
+      attemptSeries: attemptSeries({ agentId: "bug-investigator", stateId: "needs-human" }),
+      latestReceipt: humanReceipt("approved", "answer"), changeRequest: controlChange(),
+    }));
+    provider.snapshot.labels = ["bugfix"];
+    provider.snapshot.changeRequest = changeRequest({ headSha });
+    const launcher = new FakeLauncher();
+    const result = await reconcileTicket(dependencies(provider, launcher), TICKET);
+    assert.equal(result.stateId, headSha === NEW_HEAD ? "bug-review" : "bug-verification");
+    assert.equal(launcher.requests[0]?.agentId, headSha === NEW_HEAD ? "reviewer" : "bug-investigator");
+  }
+});
+
+test("preserves the reviewed head through clarification before resuming verification", async () => {
+  for (const verdict of ["unclear", "question"] as const) {
+    const provider = new FakeProvider();
+    installControl(provider, controlState({
+      stateId: "needs-human", resumeStateId: "bug-verification", activationLabel: "bugfix",
+      attemptSeries: attemptSeries({ agentId: "bug-investigator", stateId: "needs-human" }),
+      latestReceipt: humanReceipt(verdict, "answer1"), changeRequest: controlChange(),
+    }));
+    provider.snapshot.labels = ["bugfix"];
+    provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD });
+    const launcher = new FakeLauncher();
+    const deps = dependencies(provider, launcher);
+    await reconcileTicket(deps, TICKET);
+    const stored = provider.snapshot.comments.find((comment) => parseControlComment(comment.body))!;
+    const paused = parseControlComment(stored.body)!;
+    assert.equal(paused.changeRequest?.headSha, OLD_HEAD);
+    stored.body = renderControlComment({
+      ...paused,
+      attemptSeries: attemptSeries({ agentId: "bug-investigator", stateId: "needs-human" }),
+      latestReceipt: humanReceipt("approved", "answer2"),
+    });
+    const result = await reconcileTicket(deps, TICKET);
+    assert.equal(result.stateId, "bug-review");
+    assert.equal(launcher.requests.at(-1)?.agentId, "reviewer");
+  }
 });
 
 test("rejects an event that the current XState state cannot accept", async () => {

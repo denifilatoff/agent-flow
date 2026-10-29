@@ -1,15 +1,32 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import { createDocumentValidator, parseYaml } from "./schema-validator.ts";
-import type { AgentCatalog, ControllerConfig, FlowDefinition } from "./types.js";
+import { createDocumentValidator, parseYaml, validateDocument, type DocumentValidator } from "./schema-validator.ts";
+import type { AgentCatalog, FlowDefinition, SchemaKind, StackDefinition } from "./types.js";
 
 export interface ConfigBundle {
   revision: string;
   root: string;
-  controller: ControllerConfig;
+  stack: StackDefinition;
   flow: FlowDefinition;
   catalog: AgentCatalog;
+}
+
+const bundleValidators = new WeakMap<ConfigBundle, DocumentValidator>();
+const requiredContracts = [
+  "schemas/v1/agent-decision.schema.json",
+  "schemas/v1/agent-receipt.schema.json",
+  "schemas/v1/control-state.schema.json",
+] as const;
+const requiredSchemas = [
+  "schemas/v1/stack.schema.json",
+  "schemas/v1/flow.schema.json",
+  "schemas/v1/agent-catalog.schema.json",
+  ...requiredContracts,
+] as const;
+
+export function validateBundleDocument<T>(bundle: ConfigBundle, kind: SchemaKind, value: unknown): T {
+  return (bundleValidators.get(bundle) ?? validateDocument)<T>(kind, value);
 }
 
 function isInside(root: string, path: string): boolean {
@@ -30,21 +47,46 @@ async function pinnedFile(root: string, path: string): Promise<string> {
   return canonical;
 }
 
-export async function loadConfigBundle(root: string, controllerPath: string, revision: string): Promise<ConfigBundle> {
+export async function loadConfigBundle(root: string, stackPath: string, revision: string): Promise<ConfigBundle> {
   const canonicalRoot = await realpath(resolve(root));
-  const validatePinnedDocument = await createDocumentValidator(await pinnedFile(canonicalRoot, "schemas/v1"));
-  const controller = validatePinnedDocument<ControllerConfig>(
-    "ControllerConfig",
-    await parseYaml(await pinnedFile(canonicalRoot, controllerPath)),
+  let stackFile: string;
+  try {
+    stackFile = await pinnedFile(canonicalRoot, stackPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new Error(`Configuration revision ${revision} has no Stack at ${stackPath}. `
+      + "Check the stack path. For pre-Stack instances, restore the previous controller and finish or cancel them "
+      + "before upgrading; see docs/upgrading.md. Pinned revisions must not be rewritten.", { cause: error });
+  }
+  const stack = validateDocument<StackDefinition>(
+    "Stack",
+    await parseYaml(stackFile),
   );
+  for (const path of requiredContracts) {
+    if (!stack.spec.contracts.includes(path)) throw new Error(`stack contract ${path} is required`);
+  }
+  for (const path of requiredSchemas) {
+    if (!stack.spec.schemas.includes(path)) throw new Error(`stack schema ${path} is required`);
+  }
+  for (const contract of stack.spec.contracts) {
+    if (!stack.spec.schemas.includes(contract)) throw new Error(`stack contract ${contract} is not included in schemas`);
+  }
+  for (const path of [...stack.spec.contracts, ...stack.spec.schemas]) await pinnedFile(canonicalRoot, path);
+  const validatePinnedDocument = await createDocumentValidator(
+    await pinnedFile(canonicalRoot, "schemas/v1"),
+    stack.spec.schemas.map((path) => path.slice("schemas/v1/".length)),
+  );
+  validatePinnedDocument<StackDefinition>("Stack", stack);
   const flow = validatePinnedDocument<FlowDefinition>(
     "Flow",
-    await parseYaml(await pinnedFile(canonicalRoot, controller.configuration.flow)),
+    await parseYaml(await pinnedFile(canonicalRoot, stack.spec.flow)),
   );
   const catalog = validatePinnedDocument<AgentCatalog>(
     "AgentCatalog",
-    await parseYaml(await pinnedFile(canonicalRoot, controller.configuration.catalog)),
+    await parseYaml(await pinnedFile(canonicalRoot, stack.spec.catalog)),
   );
 
-  return { revision, root: canonicalRoot, controller, flow, catalog };
+  const bundle = { revision, root: canonicalRoot, stack, flow, catalog };
+  bundleValidators.set(bundle, validatePinnedDocument);
+  return bundle;
 }

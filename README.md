@@ -9,10 +9,18 @@ current design and invariants.
 
 ## Run with Docker Compose
 
-Update `config/controller.example.yaml` with the repositories to process, authorize the required local CLIs, and run:
+For an existing pre-Stack deployment, follow the [upgrade procedure](docs/upgrading.md) first.
+Update `config/runtime.example.yaml` with the repositories to process, authorize the required local CLIs, and run:
 
 ```bash
 docker compose up --build
+```
+
+The default Compose configuration mounts the runtime YAML as a single file. Atomic replacement on the host does not
+guarantee hot reload through this mount. After replacing the file, recreate the controller:
+
+```bash
+docker compose up -d --force-recreate controller
 ```
 
 The controller stores disposable workspaces and session logs under `.agent-flow-data` by default. GitHub or GitLab

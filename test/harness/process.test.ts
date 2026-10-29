@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import {
   access,
   appendFile,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -10,7 +11,6 @@ import {
   realpath,
   rename,
   rm,
-  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -19,7 +19,6 @@ import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { parse } from "yaml";
 
 import { createClaudeAdapter } from "../../src/harness/claude.ts";
 import { createCodexAdapter } from "../../src/harness/codex.ts";
@@ -37,6 +36,7 @@ import type { CompiledAgent } from "../../src/harness/apm.ts";
 import type { HarnessRunInput } from "../../src/harness/types.ts";
 import type { AttemptSession } from "../../src/runtime/sessions.ts";
 import type { Workspace } from "../../src/runtime/workspaces.ts";
+import { createStartupRedactor } from "../../src/redaction.ts";
 
 interface SpawnCall {
   file: string;
@@ -45,17 +45,6 @@ interface SpawnCall {
   env: NodeJS.ProcessEnv;
   child: FakeChild;
 }
-
-const GITLAB_OAUTH_METADATA: Record<string, string> = {
-  host: "gitlab.test",
-  api_host: "gitlab.test",
-  api_protocol: "https",
-  git_protocol: "https",
-  user: "operator",
-  use_keyring: "true",
-  is_oauth2: "true",
-  oauth2_expiry_date: "2026-08-27T12:00:00Z",
-};
 
 class FakeChild extends EventEmitter implements SpawnedProcess {
   readonly stdout = new PassThrough();
@@ -170,11 +159,21 @@ async function runFixture(target: "codex" | "claude"): Promise<{
   if (target === "claude") {
     await mkdir(join(runtimeDirectory, ".claude/agents"), { recursive: true });
     await mkdir(join(runtimeDirectory, ".claude/rules"), { recursive: true });
+    await mkdir(join(runtimeDirectory, ".claude/skills/review-change"), { recursive: true });
     await writeFile(
       join(runtimeDirectory, ".claude/agents/developer.md"),
       "---\nname: developer\n---\n\nDevelop the change.\n",
     );
     await writeFile(join(runtimeDirectory, ".claude/rules/root.md"), "Follow repository rules.\n");
+    await writeFile(join(runtimeDirectory, ".claude/skills/review-change/SKILL.md"), "# Review change\n");
+  } else {
+    await mkdir(join(runtimeDirectory, ".codex/agents"), { recursive: true });
+    await mkdir(join(runtimeDirectory, ".agents/skills/review-change"), { recursive: true });
+    await writeFile(
+      join(runtimeDirectory, ".codex/agents/developer.toml"),
+      'name = "developer"\ndeveloper_instructions = "Develop the change.\\n"\n',
+    );
+    await writeFile(join(runtimeDirectory, ".agents/skills/review-change/SKILL.md"), "# Review change\n");
   }
 
   const authFile = join(root, target === "codex" ? "auth.json" : ".credentials.json");
@@ -217,9 +216,17 @@ async function runFixture(target: "codex" | "claude"): Promise<{
       signal: new AbortController().signal,
       providerCredential: {
         provider: target === "codex" ? "github" : "gitlab",
-        name: target === "codex" ? "GITHUB_TOKEN" : "GITLAB_TOKEN",
+        name: target === "codex" ? "GH_TOKEN" : "GITLAB_TOKEN",
         value: "fixture-provider-token",
         apiUrl: target === "codex" ? "https://api.github.com" : "https://gitlab.test/api/v4",
+      },
+      execution: {
+        harness: target,
+        model: `${target}-fixture-model`,
+        reasoning: "high",
+        maxAttempts: 3,
+        delaySeconds: 30,
+        timeoutSeconds: 60,
       },
     },
   };
@@ -265,7 +272,7 @@ test("runs Codex with canonical, unambiguous private attempt paths", async (t) =
   );
   Object.assign(fixture.input, {
     providerCredential: {
-      provider: "github", name: "GITHUB_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
+      provider: "github", name: "GH_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
     },
   });
 
@@ -276,6 +283,10 @@ test("runs Codex with canonical, unambiguous private attempt paths", async (t) =
   assert.deepEqual([call.file, ...call.args], [
     "codex",
     "exec",
+    "--model",
+    "codex-fixture-model",
+    "--config",
+    'model_reasoning_effort="high"',
     "--approve-for-me",
     "--add-dir",
     fixture.input.session.root,
@@ -292,11 +303,16 @@ test("runs Codex with canonical, unambiguous private attempt paths", async (t) =
   assert.equal(call.env.GLAB_CONFIG_DIR, join(call.env.CODEX_HOME!, "cli-config/glab"));
   assert.deepEqual(await readdir(call.env.GH_CONFIG_DIR!), []);
   assert.deepEqual(await readdir(call.env.GLAB_CONFIG_DIR!), []);
-  assert.equal(call.env.GITHUB_TOKEN, "github-ticket-token");
-  for (const name of inheritedSecrets.filter((name) => name !== "GITHUB_TOKEN")) {
+  assert.equal(call.env.GH_TOKEN, "github-ticket-token");
+  for (const name of inheritedSecrets.filter((name) => name !== "GH_TOKEN")) {
     assert.equal(call.env[name], undefined);
   }
-  assert.match(call.env.CODEX_HOME!, /harness-session\/codex-/);
+  assert.match(call.env.CODEX_HOME!, /agent-flow\/codex-/);
+  const authInfo = await lstat(join(call.env.CODEX_HOME!, "auth.json"));
+  assert.equal(authInfo.isFile(), true);
+  assert.equal(authInfo.mode & 0o777, 0o600);
+  assert.equal(await readFile(join(call.env.CODEX_HOME!, "auth.json"), "utf8"), "{}\n");
+  assert.equal(await readFile(join(call.env.CODEX_HOME!, "config.toml"), "utf8"), "{}\n");
   assert.equal(
     Buffer.concat(call.child.input).toString(),
     `Follow repository rules.
@@ -313,12 +329,19 @@ If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_D
   );
   call.child.stdout.write("stdout line\n");
   call.child.stderr.write("stderr line\n");
+  assert.match(
+    await readFile(join(call.env.CODEX_HOME!, "agents/developer.toml"), "utf8"),
+    /name = "developer"/,
+  );
+  assert.equal(
+    await readFile(join(call.env.CODEX_HOME!, "skills/review-change/SKILL.md"), "utf8"),
+    "# Review change\n",
+  );
   call.child.finish(0, null);
 
   assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
   assert.equal(await readFile(fixture.input.session.logPath, "utf8"), "stdout line\nstderr line\n");
-  assert.equal(await readFile(join(call.env.CODEX_HOME!, "auth.json"), "utf8"), "{}\n");
-  assert.equal(await readFile(join(call.env.CODEX_HOME!, "config.toml"), "utf8"), "{}\n");
+  await assert.rejects(access(call.env.CODEX_HOME!), { code: "ENOENT" });
 });
 
 test("keeps late stdio errors guarded after a normal close", async (t) => {
@@ -355,16 +378,11 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
   Object.assign(fixture.input, {
     providerCredential: {
       provider: "gitlab",
-      name: "OAUTH_TOKEN",
+      name: "GITLAB_TOKEN",
       value: "gitlab-ticket-token",
       apiUrl: "https://gitlab.test/api/v4",
     },
   });
-  const metadataCalls: string[][] = [];
-  processes.dependencies.runCommand = async (file, args) => {
-    metadataCalls.push([file, ...args]);
-    return { stdout: `${GITLAB_OAUTH_METADATA[args[2]!]}\n`, stderr: "" };
-  };
   const adapter = createClaudeAdapter(
     { credentialsFile: fixture.authFile, settingsFile: fixture.configFile },
     processes.dependencies,
@@ -374,37 +392,20 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
   await waitForSpawn(processes.calls);
   const call = processes.calls[0]!;
   t.after(() => call.child.finish(0, null));
-  assert.deepEqual([call.file, ...call.args], ["claude", "--agent", "developer", "-p"]);
+  assert.deepEqual([call.file, ...call.args], [
+    "claude", "--agent", "developer", "--model", "claude-fixture-model", "--effort", "high", "-p",
+  ]);
   assert.deepEqual(call.args.filter((argument) => argument.includes("ticket 17")), []);
-  assert.match(call.env.CLAUDE_CONFIG_DIR!, /harness-session\/claude-/);
+  assert.match(call.env.CLAUDE_CONFIG_DIR!, /agent-flow\/claude-/);
   assert.equal(call.env.GH_CONFIG_DIR, join(call.env.CLAUDE_CONFIG_DIR!, "cli-config/gh"));
   assert.equal(call.env.GLAB_CONFIG_DIR, join(call.env.CLAUDE_CONFIG_DIR!, "cli-config/glab"));
-  assert.equal(call.env.OAUTH_TOKEN, undefined);
+  assert.equal(call.env.GITLAB_TOKEN, "gitlab-ticket-token");
   assert.equal(call.env.AGENT_FLOW_CONTEXT_PATH, fixture.input.session.contextPath);
   assert.equal(call.env.AGENT_FLOW_DECISION_PATH, fixture.input.session.decisionPath);
   assert.equal(call.env.AGENT_FLOW_RECEIPT_PATH, undefined);
-  for (const name of inheritedSecrets) {
+  for (const name of inheritedSecrets.filter((name) => name !== "GITLAB_TOKEN")) {
     assert.equal(call.env[name], undefined);
   }
-  assert.deepEqual(metadataCalls, Object.keys(GITLAB_OAUTH_METADATA).map((key) => [
-    "glab", "config", "get", key, "--host", "gitlab.test",
-  ]));
-  const glabConfigPath = join(call.env.GLAB_CONFIG_DIR!, "config.yml");
-  const glabConfigBody = await readFile(glabConfigPath, "utf8");
-  assert.equal((await stat(glabConfigPath)).mode & 0o777, 0o600);
-  assert.deepEqual(parse(glabConfigBody), {
-    host: "gitlab.test",
-    hosts: { "gitlab.test": {
-      api_host: "gitlab.test",
-      api_protocol: "https",
-      git_protocol: "https",
-      user: "operator",
-      use_keyring: "true",
-      is_oauth2: "true",
-      oauth2_expiry_date: "2026-08-27T12:00:00Z",
-    } },
-  });
-  assert.doesNotMatch(glabConfigBody, /token|refresh|gitlab-ticket-token/i);
   assert.equal(Buffer.concat(call.child.input).toString(), `Follow repository rules.
 
 Develop the change.
@@ -424,36 +425,12 @@ If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_D
     await readFile(join(call.env.CLAUDE_CONFIG_DIR!, "rules/root.md"), "utf8"),
     "Follow repository rules.\n",
   );
+  assert.equal(
+    await readFile(join(call.env.CLAUDE_CONFIG_DIR!, "skills/review-change/SKILL.md"), "utf8"),
+    "# Review change\n",
+  );
   call.child.finish(0, null);
   assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
-});
-
-test("fails GitLab OAuth metadata validation before spawning", async (t) => {
-  for (const invalid of [
-    { ...GITLAB_OAUTH_METADATA, use_keyring: "" },
-    { ...GITLAB_OAUTH_METADATA, host: "other.test" },
-  ]) {
-    const fixture = await runFixture("codex");
-    t.after(() => rm(fixture.root, { recursive: true, force: true }));
-    fixture.input.providerCredential = {
-      provider: "gitlab",
-      name: "OAUTH_TOKEN",
-      value: "gitlab-ticket-token",
-      apiUrl: "https://gitlab.test/api/v4",
-    };
-    const processes = processFixture();
-    processes.dependencies.runCommand = async (_file, args) => ({
-      stdout: `${invalid[args[2]!] ?? ""}\n`,
-      stderr: "",
-    });
-    const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
-
-    const pending = assert.rejects(adapter.run(fixture.input), HarnessPreflightError);
-    await delay(5);
-    processes.children[0]?.finish(0, null);
-    await pending;
-    assert.equal(processes.calls.length, 0);
-  }
 });
 
 test("passes a GitLab personal token without seeding OAuth metadata", async (t) => {
@@ -479,34 +456,6 @@ test("passes a GitLab personal token without seeding OAuth metadata", async (t) 
   assert.equal(call.env.GITLAB_TOKEN, "gitlab-ticket-token");
   assert.equal(metadataCalls, 0);
   assert.deepEqual(await readdir(call.env.GLAB_CONFIG_DIR!), []);
-  call.child.finish(0, null);
-  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
-});
-
-test("instructs the Codex entry agent to elevate a sandbox-blocked GitLab keyring retry", async (t) => {
-  const fixture = await runFixture("codex");
-  t.after(() => rm(fixture.root, { recursive: true, force: true }));
-  fixture.input.providerCredential = {
-    provider: "gitlab",
-    name: "OAUTH_TOKEN",
-    value: "gitlab-ticket-token",
-    apiUrl: "https://gitlab.test/api/v4",
-  };
-  const processes = processFixture();
-  processes.dependencies.runCommand = async (_file, args) => ({
-    stdout: `${GITLAB_OAUTH_METADATA[args[2]!] ?? ""}\n`,
-    stderr: "",
-  });
-  const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
-
-  const pending = adapter.run(fixture.input);
-  await waitForSpawn(processes.calls);
-  const call = processes.calls[0]!;
-  t.after(() => call.child.finish(0, null));
-  assert.match(
-    Buffer.concat(call.child.input).toString(),
-    /When invoking the configured APM entry agent, include this instruction:\nFor this GitLab OAuth attempt, retry a `glab` authentication or API command with elevated permissions if it fails because the sandbox cannot access the keyring\. Do not declare GitLab authentication unavailable unless that elevated retry also fails\./,
-  );
   call.child.finish(0, null);
   assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
 });
@@ -786,6 +735,7 @@ test("preflight verifies the binary and isolated authentication source", async (
   assert.notEqual(commands[0]!.env!.CODEX_HOME, dirname(mountedAuth));
   assert.equal(commands[0]!.env!.CODEX_HOME, commands[1]!.env!.CODEX_HOME);
   await assert.rejects(access(commands[0]!.env!.CODEX_HOME!), { code: "ENOENT" });
+
 });
 
 test("preflights Claude from a canonical isolated credential copy", async (t) => {
@@ -812,6 +762,76 @@ test("preflights Claude from a canonical isolated credential copy", async (t) =>
 
   assert.deepEqual(commands, [["claude", "--version"], ["claude", "auth", "status"]]);
   await assert.rejects(access(preflightHome), { code: "ENOENT" });
+});
+
+test("stages the startup snapshot after a mounted harness credential is replaced", async (t) => {
+  for (const target of ["codex", "claude"] as const) {
+    const fixture = await runFixture(target);
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const processes = processFixture();
+    const adapter = target === "codex"
+      ? createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies)
+      : createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies);
+    const startupCredential = `{"source":"${target}-startup"}\n`;
+
+    await writeFile(fixture.authFile, startupCredential, { mode: 0o600 });
+    await adapter.preflight();
+    const replacement = join(fixture.root, `${target}-replacement`);
+    await writeFile(replacement, `{"source":"${target}-replacement"}\n`, { mode: 0o600 });
+    await rename(replacement, fixture.authFile);
+
+    const pending = adapter.run(fixture.input);
+    await waitForSpawn(processes.calls);
+    const home = processes.calls[0]!.env[target === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]!;
+    const credentialPath = join(home, target === "codex" ? "auth.json" : ".credentials.json");
+    const stagedCredential = await readFile(credentialPath, "utf8");
+    const stagedMode = (await lstat(credentialPath)).mode & 0o777;
+    processes.children[0]!.finish(0, null);
+    await pending;
+
+    assert.equal(stagedCredential, startupCredential, target);
+    assert.equal(stagedMode, 0o600, target);
+  }
+});
+
+test("registers the exact cached harness credential once at first load", async (t) => {
+  for (const target of ["codex", "claude"] as const) {
+    const fixture = await runFixture(target);
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const processes = processFixture();
+    const redactor = createStartupRedactor();
+    const startup = Buffer.from(`{"token":"${target}-startup-secret"}\n`);
+    const replacement = `{"token":"${target}-replacement-secret"}\n`;
+    await writeFile(fixture.authFile, startup, { mode: 0o600 });
+    const adapter = target === "codex"
+      ? createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies, redactor.register)
+      : createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies, redactor.register);
+
+    await adapter.preflight();
+    await writeFile(fixture.authFile, replacement, { mode: 0o600 });
+    const pending = adapter.run(fixture.input);
+    await waitForSpawn(processes.calls);
+    processes.children[0]!.finish(0, null);
+    await pending;
+
+    assert.equal(redactor.redact(startup.toString()), "[REDACTED]", target);
+    assert.equal(redactor.redact(replacement), replacement, target);
+  }
+});
+
+test("rejects harness credential sources larger than 65536 bytes", async (t) => {
+  for (const target of ["codex", "claude"] as const) {
+    const fixture = await runFixture(target);
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    await writeFile(fixture.authFile, "x".repeat(65_537), { mode: 0o600 });
+    const processes = processFixture();
+    const adapter = target === "codex"
+      ? createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies)
+      : createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies);
+
+    await assert.rejects(adapter.preflight(), HarnessPreflightError, target);
+    assert.equal(processes.calls.length, 0, target);
+  }
 });
 
 test("classifies missing or failed authentication as sanitized non-retryable preflight errors", async (t) => {

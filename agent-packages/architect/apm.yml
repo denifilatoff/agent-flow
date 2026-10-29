@@ -1,5 +1,8 @@
 name: architect
-version: 1.0.2
+version: 1.0.3
 description: Assess a ticket and publish its architecture assessment.
 author: agent-flow
 targets: [claude, codex]
+dependencies:
+  apm:
+    - addyosmani/agent-skills/skills/spec-driven-development#f63ec56a3cc936408d792956ae583c3c96a825bd

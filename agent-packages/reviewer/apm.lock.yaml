@@ -1,5 +1,63 @@
 lockfile_version: '1'
-generated_at: '2026-08-26T00:41:22.885447+00:00'
+generated_at: '2026-08-27T15:53:54.346106+00:00'
 apm_version: 0.28.0
-dependencies: []
-deployments: []
+dependencies:
+- repo_url: netcracker/qubership-ai-packages
+  materialization_repo_url: Netcracker/qubership-ai-packages
+  name: adversarial-code-review
+  host: github.com
+  resolved_commit: 9b0af51d160b866548f97af0ee50c9467766815d
+  resolved_ref: 9b0af51d160b866548f97af0ee50c9467766815d
+  version: 1.0.0
+  virtual_path: agent-packages/adversarial-code-review
+  is_virtual: true
+  package_type: apm_package
+  deployed_files:
+  - .agents/skills/adversarial-code-review
+  - .agents/skills/adversarial-code-review/SKILL.md
+  - .agents/skills/adversarial-code-review/references/gitlab.md
+  deployed_file_hashes:
+    .agents/skills/adversarial-code-review/SKILL.md: sha256:65d362b73882b5f37121ba674b6983c43a994dd2006e3afb25db4d29b2a7f6be
+    .agents/skills/adversarial-code-review/references/gitlab.md: sha256:fc575a799b7b3beec00962121c13dd5c77717dba9b3cd79b949c201901493dcf
+  content_hash: sha256:27352486db08f0f0062f80ddbf4ec7f30a0fd1fca55a6657c55c7680499a5c47
+deployments:
+- kind: project-relative
+  target: codex
+  value: .agents/skills/adversarial-code-review
+  runtime: null
+  scope: project
+  owners:
+  - netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  active_owner: netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/adversarial-code-review/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  active_owner: netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  content_hash: sha256:65d362b73882b5f37121ba674b6983c43a994dd2006e3afb25db4d29b2a7f6be
+- kind: project-relative
+  target: codex
+  value: .agents/skills/adversarial-code-review/references/gitlab.md
+  runtime: null
+  scope: project
+  owners:
+  - netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  active_owner: netcracker/qubership-ai-packages/agent-packages/adversarial-code-review
+  content_hash: sha256:fc575a799b7b3beec00962121c13dd5c77717dba9b3cd79b949c201901493dcf
+- kind: project-relative
+  target: codex
+  value: .codex/agents/reviewer.toml
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:1db5e91501db6a183b315a28d571ff847dc5e51c67119131678385ad9f5d6137
+local_deployed_files:
+- .codex/agents/reviewer.toml
+local_deployed_file_hashes:
+  .codex/agents/reviewer.toml: sha256:1db5e91501db6a183b315a28d571ff847dc5e51c67119131678385ad9f5d6137

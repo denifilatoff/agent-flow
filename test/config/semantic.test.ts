@@ -20,21 +20,15 @@ async function rejection(promise: Promise<unknown>): Promise<Error> {
   assert.fail("expected the promise to reject");
 }
 
-async function loadFixture(name: "invalid-target" | "duplicate-repository"): Promise<void> {
-  const controllerPath = name === "duplicate-repository"
-    ? `test/fixtures/config/${name}/controller.yaml`
-    : "config/controller.example.yaml";
-  const bundle = await loadConfigBundle(process.cwd(), controllerPath, REVISION);
-
-  if (name === "invalid-target") {
-    bundle.flow = validateDocument("Flow", await parseYaml(`test/fixtures/config/${name}/flow.yaml`));
-  }
+async function loadFixture(name: "invalid-target"): Promise<void> {
+  const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", REVISION);
+  bundle.flow = validateDocument("Flow", await parseYaml(`test/fixtures/config/${name}/flow.yaml`));
 
   await validateSemantics(bundle);
 }
 
 test("accepts the shipped bundle", async () => {
-  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
+  const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", REVISION);
   assert.deepEqual(bundle.flow.spec.states["needs-human"].on?.["agent-needs-human"], {
     target: "needs-human",
     guards: ["receipt-valid"],
@@ -43,13 +37,16 @@ test("accepts the shipped bundle", async () => {
   await assert.doesNotReject(validateSemantics(bundle));
 });
 
-test("accepts the all-Codex catalog without changing the mixed default", async () => {
-  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
-  assert.deepEqual(Object.values(bundle.catalog.agents).map((agent) => agent.target), [
-    "claude", "claude", "codex", "codex",
-  ]);
-  bundle.catalog = validateDocument("AgentCatalog", await parseYaml("config/agents-codex.yaml"));
-  assert.deepEqual(new Set(Object.values(bundle.catalog.agents).map((agent) => agent.target)), new Set(["codex"]));
+test("loads the autonomous development flow without mandatory human gates", async () => {
+  const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", REVISION);
+
+  assert.equal(bundle.flow.metadata.id, "development-autonomous");
+  assert.equal(bundle.flow.spec.states.assessment.on?.["agent-succeeded"]?.target, "planning");
+  assert.equal(bundle.flow.spec.states.planning.on?.["agent-succeeded"]?.target, "development");
+  assert.equal(
+    Object.values(bundle.flow.spec.states).some((state) => state.kind === "human-gate"),
+    false,
+  );
   await assert.doesNotReject(validateSemantics(bundle));
 });
 
@@ -66,19 +63,19 @@ test("uses and requires schemas from the pinned root", async () => {
     await writeFile(flowSchemaPath, JSON.stringify(flowSchema));
 
     await assert.rejects(
-      loadConfigBundle(root, "config/controller.example.yaml", REVISION),
+      loadConfigBundle(root, "config/stack.yaml", REVISION),
       /Flow validation failed.*must be equal to constant/,
     );
 
     const receiptSchemaPath = join(root, "schemas/v1/agent-receipt.schema.json");
     await unlink(receiptSchemaPath);
     await assert.rejects(
-      loadConfigBundle(root, "config/controller.example.yaml", REVISION),
-      /pinned schema agent-receipt\.schema\.json.*could not be read/,
+      loadConfigBundle(root, "config/stack.yaml", REVISION),
+      /agent-receipt\.schema\.json/,
     );
     await writeFile(receiptSchemaPath, "{");
     await assert.rejects(
-      loadConfigBundle(root, "config/controller.example.yaml", REVISION),
+      loadConfigBundle(root, "config/stack.yaml", REVISION),
       /pinned schema agent-receipt\.schema\.json.*invalid JSON/,
     );
   } finally {
@@ -100,56 +97,20 @@ test("rejects a pinned schema symlink outside the pinned root", async () => {
     await symlink(outsideSchemaPath, flowSchemaPath);
 
     await assert.rejects(
-      loadConfigBundle(root, "config/controller.example.yaml", REVISION),
-      /pinned schema flow\.schema\.json.*escapes the pinned root/,
+      loadConfigBundle(root, "config/stack.yaml", REVISION),
+      /schemas\/v1\/flow\.schema\.json escapes the pinned root/,
     );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
-test("rejects missing targets and duplicate repositories", async () => {
+test("rejects missing transition targets", async () => {
   await assert.rejects(loadFixture("invalid-target"), /transition target .* does not exist/);
-  await assert.rejects(loadFixture("duplicate-repository"), /repository .* is configured more than once/);
-});
-
-test("rejects provider token environment names that bypass schema validation", async () => {
-  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
-  bundle.controller.providers.github!.tokenEnv = "HOME";
-  await assert.rejects(
-    validateSemantics(bundle),
-    /controller\.providers\.github\.tokenEnv: token environment HOME is not supported for GitHub API host api\.github\.com/,
-  );
-});
-
-test("binds GitHub token environment names to the configured API host", async () => {
-  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
-  const github = bundle.controller.providers.github!;
-
-  github.apiUrl = "https://api.github.com";
-  github.tokenEnv = "GITHUB_TOKEN";
-  await validateSemantics(bundle);
-  github.apiUrl = "https://example.ghe.com/api/v3";
-  await validateSemantics(bundle);
-  github.apiUrl = "https://api.github.com";
-  github.tokenEnv = "GH_ENTERPRISE_TOKEN";
-  await assert.rejects(
-    validateSemantics(bundle),
-    /GH_ENTERPRISE_TOKEN is not supported for GitHub API host api\.github\.com/,
-  );
-
-  github.apiUrl = "https://github.enterprise.test/api/v3";
-  github.tokenEnv = "GITHUB_ENTERPRISE_TOKEN";
-  await validateSemantics(bundle);
-  github.tokenEnv = "GH_TOKEN";
-  await assert.rejects(
-    validateSemantics(bundle),
-    /GH_TOKEN is not supported for GitHub API host github\.enterprise\.test/,
-  );
 });
 
 test("reports every flow error in deterministic path order", async () => {
-  const bundle = await loadConfigBundle(process.cwd(), "config/controller.example.yaml", REVISION);
+  const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", REVISION);
   bundle.flow.spec.initial = "missing-initial";
   bundle.flow.spec.states.assessment.agent = "missing-agent";
   bundle.flow.spec.states.assessment.on!["agent-succeeded"] = {
@@ -158,7 +119,7 @@ test("reports every flow error in deterministic path order", async () => {
     guards: ["missing-guard"],
     actions: ["missing-action"],
   } as never;
-  delete bundle.flow.spec.states["assessment-review"].on;
+  delete bundle.flow.spec.states["awaiting-merge"].on;
   bundle.flow.spec.states.done.on = {
     "authorized-comment": { target: "missing-final-target" },
   };
@@ -190,7 +151,7 @@ test("rejects incomplete packages and paths outside the pinned root", async () =
     await unlink(join(root, "agent-packages/planner/apm.yml"));
     await writeFile(join(root, "agent-packages/developer/.apm/agents/extra.agent.md"), "---\nname: extra\n---\n");
 
-    const bundle = await loadConfigBundle(root, "config/controller.example.yaml", REVISION);
+    const bundle = await loadConfigBundle(root, "config/stack.yaml", REVISION);
     bundle.catalog.agents.reviewer.package = "../outside";
 
     const error = await rejection(validateSemantics(bundle));

@@ -56,14 +56,15 @@ class FixtureClient implements RateLimitedHttpClient {
 function adapter(
   client: FixtureClient,
   apiUrl = "https://gitlab.example.test/api/v4",
+  activationLabels?: readonly string[],
 ) {
   return createGitLabAdapter(
     {
       apiUrl,
-      tokenEnv: "GITLAB_TOKEN",
       repositories: [REPOSITORY],
     },
     client,
+    activationLabels,
   );
 }
 
@@ -151,6 +152,7 @@ test("uses updated_after and normalizes an issue snapshot", async () => {
   assert.equal(ticket.title, "Fix the edge case");
   assert.equal(ticket.description, "Handle the documented edge case without changing existing behavior.");
   assert.equal(ticket.activation.present, true);
+  assert.equal(ticket.activation.label, "agent-flow:development");
   assert.equal(ticket.activation.eventId, "802");
   assert.equal(ticket.activation.actor?.login, "maintainer");
   assert.deepEqual(ticket.labels, ["bug", "agent-flow:development", "agent-stage:review"]);
@@ -339,6 +341,18 @@ test("updates only reserved labels and preserves concurrent user labels", async 
     add_labels: "agent-stage:done",
   });
   await assert.rejects(gitlab.setControllerLabels(ref, ["bug"], []), /not controller-owned/);
+});
+
+test("removes an activation label pinned by an older flow revision", async () => {
+  const issue = { ...(fixture.issue as Record<string, unknown>), labels: [] };
+  const client = new FixtureClient()
+    .add("PUT", `${PROJECT}/issues/23`, { data: issue })
+    .add("GET", `${PROJECT}/issues/23`, { data: issue });
+
+  assert.deepEqual(
+    await adapter(client).setControllerLabels(ref, ["legacy-bugfix"], [], ["legacy-bugfix"]),
+    [],
+  );
 });
 
 test("ignores related merge requests from another project", async () => {

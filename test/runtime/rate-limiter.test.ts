@@ -124,3 +124,16 @@ test("does not let a reserve-blocked background call hold active work", async ()
   }
   assert.deepEqual(order, ["active", "background"]);
 });
+
+test("applies updated spacing and quota reserve to the next acquisition", async () => {
+  const fake = fakeClock();
+  const limiter = new RateLimiter({ maxCallsPerMinute: 20, quotaReservePercent: 25 }, fake.clock);
+  await limiter.acquire("active");
+  limiter.update({ maxCallsPerMinute: 60, quotaReservePercent: 10 });
+  await limiter.acquire("active");
+  assert.deepEqual(fake.delays, [1_000]);
+
+  limiter.observe({ remaining: 15, limit: 100, resetAt: fake.now + 60_000 });
+  await limiter.acquire("background");
+  assert.equal(fake.delays.at(-1), 1_000);
+});

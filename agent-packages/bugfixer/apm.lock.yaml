@@ -1,0 +1,84 @@
+lockfile_version: '1'
+generated_at: '2026-08-27T20:04:15.306512+00:00'
+apm_version: 0.28.0
+dependencies:
+- repo_url: addyosmani/agent-skills
+  name: debugging-and-error-recovery
+  host: github.com
+  resolved_commit: f63ec56a3cc936408d792956ae583c3c96a825bd
+  resolved_ref: f63ec56a3cc936408d792956ae583c3c96a825bd
+  version: unknown
+  virtual_path: skills/debugging-and-error-recovery
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/debugging-and-error-recovery
+  - .agents/skills/debugging-and-error-recovery/SKILL.md
+  deployed_file_hashes:
+    .agents/skills/debugging-and-error-recovery/SKILL.md: sha256:67ce2c9442da0c5a6e3515617fc9c4003cfe232ef7c7210da342f40f508f9958
+  content_hash: sha256:1a119d27e8f1d27ed6317adf3115826336491346780dcb7d7a7a7f79fe3ffe10
+- repo_url: addyosmani/agent-skills
+  name: test-driven-development
+  host: github.com
+  resolved_commit: f63ec56a3cc936408d792956ae583c3c96a825bd
+  resolved_ref: f63ec56a3cc936408d792956ae583c3c96a825bd
+  version: unknown
+  virtual_path: skills/test-driven-development
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/test-driven-development
+  - .agents/skills/test-driven-development/SKILL.md
+  deployed_file_hashes:
+    .agents/skills/test-driven-development/SKILL.md: sha256:440fb3c9b76f4f1b0b564dfbaec19d370beab0167a3e2ab048ce59c5a865ecef
+  content_hash: sha256:a8fef2b010af8402fd2979bdb2e5e39e5baa1ca14b5cdec366ee75df5e1dec68
+deployments:
+- kind: project-relative
+  target: codex
+  value: .agents/skills/debugging-and-error-recovery
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/debugging-and-error-recovery
+  active_owner: addyosmani/agent-skills/skills/debugging-and-error-recovery
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/debugging-and-error-recovery/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/debugging-and-error-recovery
+  active_owner: addyosmani/agent-skills/skills/debugging-and-error-recovery
+  content_hash: sha256:67ce2c9442da0c5a6e3515617fc9c4003cfe232ef7c7210da342f40f508f9958
+- kind: project-relative
+  target: codex
+  value: .agents/skills/test-driven-development
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/test-driven-development
+  active_owner: addyosmani/agent-skills/skills/test-driven-development
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/test-driven-development/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/test-driven-development
+  active_owner: addyosmani/agent-skills/skills/test-driven-development
+  content_hash: sha256:440fb3c9b76f4f1b0b564dfbaec19d370beab0167a3e2ab048ce59c5a865ecef
+- kind: project-relative
+  target: codex
+  value: .codex/agents/bugfixer.toml
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:ee3f1312e57e10d56845bd29a78bdff15f18cb91c98fb8a5d04b6421b33354a6
+local_deployed_files:
+- .codex/agents/bugfixer.toml
+local_deployed_file_hashes:
+  .codex/agents/bugfixer.toml: sha256:ee3f1312e57e10d56845bd29a78bdff15f18cb91c98fb8a5d04b6421b33354a6

@@ -5,18 +5,20 @@ import test from "node:test";
 import { parse } from "yaml";
 
 const requiredMounts = [
-  { source: "${AGENT_FLOW_CONFIG_PATH:-.}", target: "/config", readOnly: true },
-  { source: "${AGENT_FLOW_DATA_PATH:-./.agent-flow-data}", target: "/data", readOnly: false },
-  { source: "${HOME}/.config/gh", target: "/home/agent/.config/gh", readOnly: true },
-  { source: "${HOME}/.config/glab-cli", target: "/home/agent/.config/glab-cli", readOnly: true },
-  { source: "${HOME}/.codex", target: "/home/agent/.codex", readOnly: true },
-  { source: "${HOME}/.claude", target: "/home/agent/.claude", readOnly: true },
-  { source: "${HOME}/.claude.json", target: "/home/agent/.claude.json", readOnly: true },
+  { source: "${AGENT_FLOW_RUNTIME_PATH:-./config/runtime.example.yaml}", target: "/etc/agent-flow/runtime.yaml", readOnly: true },
+  { source: "${AGENT_FLOW_PROVIDER_TOKEN_PATH:?set AGENT_FLOW_PROVIDER_TOKEN_PATH}", target: "/run/secrets/agent-flow/provider-token", readOnly: true },
+  { source: "${AGENT_FLOW_CODEX_AUTH_PATH:?set AGENT_FLOW_CODEX_AUTH_PATH}", target: "/run/secrets/agent-flow/codex-auth", readOnly: true },
+  { source: "${AGENT_FLOW_CLAUDE_AUTH_PATH:?set AGENT_FLOW_CLAUDE_AUTH_PATH}", target: "/run/secrets/agent-flow/claude-auth", readOnly: true },
+  { source: "${AGENT_FLOW_OPERATOR_PASSWORD_PATH:?set AGENT_FLOW_OPERATOR_PASSWORD_PATH}", target: "/run/secrets/agent-flow/operator-password", readOnly: true },
+  { source: "${AGENT_FLOW_DATA_PATH:-./.agent-flow-data}", target: "/var/lib/agent-flow", readOnly: false },
 ];
 
 test("locks the runtime image, tools, and controller service", async () => {
   const dockerfile = uncomment(await readFile("Dockerfile", "utf8"));
   assertDockerfileContract(dockerfile);
+  const applicationPackage = JSON.parse(await readFile("package.json", "utf8")) as { scripts?: Record<string, string> };
+  assert.equal(applicationPackage.scripts?.build, "tsc && rm -rf dist/ui && cp -R src/ui dist/ui");
+  assert.match(dockerfile, /^COPY --from=build --chown=agent:agent \/app\/dist \.\/dist$/m);
 
   const toolsLock = JSON.parse(await readFile("docker/tools/package-lock.json", "utf8")) as {
     packages: Record<string, { version?: string }>;
@@ -39,10 +41,8 @@ test("locks the runtime image, tools, and controller service", async () => {
   assert.deepEqual(Object.keys(compose.services ?? {}), ["controller"]);
   const controller = compose.services!.controller!;
   assert.equal(controller.init, true);
-  assert.deepEqual(controller.ports, ["8080:8080"]);
-  assert.deepEqual(Object.keys(controller.environment ?? {}).sort(), [
-    "AGENT_FLOW_CONFIG_REPOSITORY", "AGENT_FLOW_CONTROLLER_CONFIG", "GITHUB_TOKEN", "GITLAB_TOKEN",
-  ]);
+  assert.deepEqual(controller.ports, ["127.0.0.1:${AGENT_FLOW_HTTP_PORT:-8080}:8080"]);
+  assert.equal(controller.environment, undefined);
   assert.match(JSON.stringify(controller.healthcheck), /health\/ready/);
   assert.doesNotMatch(JSON.stringify(controller), /docker\.sock/);
   assertMountContract(controller.volumes ?? []);
@@ -175,6 +175,8 @@ function assertRuntimeStage(stage: string): void {
   assert.match(stage, /python3 -m pip install[\s\\]+--break-system-packages[\s\S]*--require-hashes[\s\\]+--requirement \/tmp\/apm-requirements\.txt/);
   assert.match(stage, /^COPY --from=tools .+\/tools\/node_modules \/opt\/tools\/node_modules$/m);
   assert.match(stage, /^COPY .+schemas .+schemas$/m);
+  assert.match(stage, /mkdir -p \/etc\/agent-flow \/run\/secrets\/agent-flow \/var\/lib\/agent-flow \/tmp\/agent-flow/);
+  assert.doesNotMatch(stage, /AGENT_FLOW_|GITHUB_TOKEN|GITLAB_TOKEN|CODEX_HOME|CLAUDE_CONFIG_DIR/);
   assert.match(stage, /^EXPOSE 8080$/m);
   assert.deepEqual(stage.match(/^CMD .+$/gm), ['CMD ["node", "dist/main.js"]']);
 

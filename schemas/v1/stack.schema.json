@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-flow.dev/schemas/v1/stack.schema.json",
+  "title": "Agent Flow stack",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "spec"],
+  "properties": {
+    "apiVersion": { "const": "agent-flow/v1alpha1" },
+    "kind": { "const": "Stack" },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["flow", "catalog", "contracts", "schemas"],
+      "properties": {
+        "flow": { "type": "string", "pattern": "^config/flows/[a-z][a-z0-9-]*\\.ya?ml$" },
+        "catalog": { "type": "string", "const": "config/agents.yaml" },
+        "contracts": {
+          "type": "array",
+          "minItems": 3,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^schemas/v1/[a-z][a-z0-9-]*\\.schema\\.json$" }
+        },
+        "schemas": {
+          "type": "array",
+          "minItems": 6,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^schemas/v1/[a-z][a-z0-9-]*\\.schema\\.json$" }
+        }
+      }
+    }
+  }
+}

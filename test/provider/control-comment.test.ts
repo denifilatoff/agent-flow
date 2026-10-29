@@ -42,16 +42,35 @@ function comment(state: ControlState, id = state.flowInstanceId): ProviderCommen
   return { id, body: renderControlComment(state) };
 }
 
-test("round trips the exact control marker and increments sequence", () => {
+function legacyComment(json: string): string {
+  return `<!-- agent-flow-control:v1 -->\n\`\`\`json\n${json}\n\`\`\`\n`;
+}
+
+test("renders machine state as a hidden comment and increments sequence", () => {
   const body = renderControlComment(controlState({ sequence: 4 }));
-  assert.equal(body.split("\n")[0], "<!-- agent-flow-control:v1 -->");
-  assert.equal((body.match(/```/g) ?? []).length, 2);
-  assert.ok(body.endsWith("```\n"));
+  assert.equal(body.split("\n")[0], "<!-- agent-flow-control:v1");
+  assert.equal(body.includes("```"), false);
+  assert.equal(body.includes('"flowInstanceId"'), false);
+  assert.ok(body.endsWith("-->\n"));
 
   const next = advanceControlState(parseControlComment(body)!, { stateId: "planning" }, NOW);
   assert.equal(next.sequence, 5);
   assert.equal(next.stateId, "planning");
   assert.equal(next.updatedAt, NOW);
+});
+
+test("reads legacy visible control comments", () => {
+  const state = controlState({ sequence: 4 });
+  assert.deepEqual(parseControlComment(legacyComment(JSON.stringify(state, null, 2))), state);
+});
+
+test("reads collapsed comments from the UI branch without losing the pinned state", () => {
+  const state = controlState({ sequence: 4 });
+  const body = `<!-- agent-flow-control:v1 -->\n<details>\n<summary>Agent Flow · assessment</summary>\n\n\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\`\n\n</details>\n`;
+  assert.deepEqual(parseControlComment(body), state);
+  assert.deepEqual(parseControlComment(body.trimEnd()), state);
+  assert.throws(() => parseControlComment(body.replace("Agent Flow · assessment", "Agent Flow · planning")),
+    /control comment summary/);
 });
 
 test("round trips a control comment after GitLab removes its final newline", () => {
@@ -70,7 +89,7 @@ test("rejects any other trailing control comment format", () => {
     `${canonical}\n`,
     `${withoutFinalNewline} `,
     `${withoutFinalNewline}text`,
-    canonical.replace("\n```\n", "```\n"),
+    canonical.replace("\n-->\n", "-->\n"),
   ]) {
     assert.throws(() => parseControlComment(body), /control comment/);
     assert.equal(parseExpectedControlComment(body, expected), null);
@@ -87,16 +106,16 @@ test("rejects any other trailing control comment format", () => {
 test("returns null only for bodies without the marker on the first line", () => {
   assert.equal(parseControlComment("ordinary comment"), null);
   assert.equal(parseControlComment(`preface\n${renderControlComment(controlState())}`), null);
-  assert.throws(() => parseControlComment("<!-- agent-flow-control:v1 -->\nnot-json\n"), /control comment/);
+  assert.throws(() => parseControlComment("<!-- agent-flow-control:v1\nnot-base64\n-->\n"), /control comment/);
 });
 
 test("rejects malformed JSON and schema-invalid state", () => {
   assert.throws(
-    () => parseControlComment("<!-- agent-flow-control:v1 -->\n```json\n{\n```\n"),
+    () => parseControlComment(legacyComment("{")),
     /control comment/,
   );
   assert.throws(
-    () => parseControlComment(renderControlComment(controlState()).replace('"sequence": 0', '"sequence": -1')),
+    () => parseControlComment(legacyComment(JSON.stringify({ ...controlState(), sequence: -1 }))),
     /ControlState validation failed/,
   );
   assert.throws(
@@ -174,10 +193,7 @@ test("rejects sequences that cannot be incremented safely", () => {
     /safe integer/,
   );
 
-  const unsafeBody = renderControlComment(controlState()).replace(
-    '"sequence": 0',
-    '"sequence": 9007199254740992',
-  );
+  const unsafeBody = legacyComment(JSON.stringify({ ...controlState(), sequence: 9007199254740992 }));
   const unsafe = parseControlComment(unsafeBody)!;
   assert.equal(Number.isSafeInteger(unsafe.sequence), false);
   assert.throws(() => advanceControlState(unsafe, {}, NOW), /safe integer/);

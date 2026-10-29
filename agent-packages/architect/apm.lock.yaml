@@ -1,5 +1,83 @@
 lockfile_version: '1'
-generated_at: '2026-08-26T00:36:57.360275+00:00'
+generated_at: '2026-08-27T20:04:11.911158+00:00'
 apm_version: 0.28.0
-dependencies: []
-deployments: []
+dependencies:
+- repo_url: addyosmani/agent-skills
+  name: spec-driven-development
+  host: github.com
+  resolved_commit: f63ec56a3cc936408d792956ae583c3c96a825bd
+  resolved_ref: f63ec56a3cc936408d792956ae583c3c96a825bd
+  version: unknown
+  virtual_path: skills/spec-driven-development
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/spec-driven-development
+  - .agents/skills/spec-driven-development/SKILL.md
+  - .claude/skills/spec-driven-development
+  - .claude/skills/spec-driven-development/SKILL.md
+  deployed_file_hashes:
+    .agents/skills/spec-driven-development/SKILL.md: sha256:615ff006266af06f36195a46e7db864512fc9b272fcb653bb51d601214701d04
+    .claude/skills/spec-driven-development/SKILL.md: sha256:615ff006266af06f36195a46e7db864512fc9b272fcb653bb51d601214701d04
+  content_hash: sha256:aca026683acdae1cd8a58f335fb26e60fb5db11ae81461a6896b0bf561aacb75
+deployments:
+- kind: project-relative
+  target: claude
+  value: .claude/agents/architect.md
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:d603805ab04430527510e10210cdb921b73dda375ca9734d0d10e9834ac8dd8c
+- kind: project-relative
+  target: claude
+  value: .claude/rules/architect.md
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:889b39d11bc579cbf89f5fd28501dd9517512ab8f02c9c81a5b5a4891625c50c
+- kind: project-relative
+  target: claude
+  value: .claude/skills/spec-driven-development
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/spec-driven-development
+  active_owner: addyosmani/agent-skills/skills/spec-driven-development
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/spec-driven-development/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/spec-driven-development
+  active_owner: addyosmani/agent-skills/skills/spec-driven-development
+  content_hash: sha256:615ff006266af06f36195a46e7db864512fc9b272fcb653bb51d601214701d04
+- kind: project-relative
+  target: codex
+  value: .agents/skills/spec-driven-development
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/spec-driven-development
+  active_owner: addyosmani/agent-skills/skills/spec-driven-development
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/spec-driven-development/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/spec-driven-development
+  active_owner: addyosmani/agent-skills/skills/spec-driven-development
+  content_hash: sha256:615ff006266af06f36195a46e7db864512fc9b272fcb653bb51d601214701d04
+local_deployed_files:
+- .claude/agents/architect.md
+- .claude/rules/architect.md
+local_deployed_file_hashes:
+  .claude/agents/architect.md: sha256:d603805ab04430527510e10210cdb921b73dda375ca9734d0d10e9834ac8dd8c
+  .claude/rules/architect.md: sha256:889b39d11bc579cbf89f5fd28501dd9517512ab8f02c9c81a5b5a4891625c50c

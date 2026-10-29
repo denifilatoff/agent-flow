@@ -16,7 +16,17 @@ function key(ref: TicketRef): string {
 }
 
 function outcome(ref: TicketRef): ReconcileOutcome {
-  return { flowInstanceId: key(ref), stateId: "assessment", changed: false, started: false };
+  return {
+    flowInstanceId: key(ref),
+    stateId: "assessment",
+    configRevision: "a".repeat(40),
+    stateKind: "agent",
+    repositoryUrl: `https://github.example.test/${ref.repository}`,
+    ticketUrl: `https://github.example.test/${ref.repository}/issues/${ref.number}`,
+    actionUrl: `https://github.example.test/${ref.repository}/issues/${ref.number}`,
+    changed: false,
+    started: false,
+  };
 }
 
 function launcher(): AttemptLauncher & { cancelled: string[] } {
@@ -39,6 +49,7 @@ function idleGitHub(): DiscoveryAdapter {
 
 test("bootstraps the unique union returned by every allowlisted repository", async () => {
   const reconciled: string[] = [];
+  const prepared: string[][] = [];
   const github: DiscoveryAdapter = {
     kind: "github",
     async bootstrap(repository) {
@@ -61,6 +72,7 @@ test("bootstraps the unique union returned by every allowlisted repository", asy
       { adapter: gitlab, repositories: ["group/one"] },
     ],
     concurrency: 2,
+    prepareBootstrap: async (refs) => { prepared.push(refs.map(key)); },
     reconcile: async (ref) => { reconciled.push(key(ref)); return outcome(ref); },
     launcher: launcher(),
     now: () => "2026-08-25T10:00:00.000Z",
@@ -69,6 +81,7 @@ test("bootstraps the unique union returned by every allowlisted repository", asy
   await controller.bootstrap();
 
   assert.deepEqual(reconciled, [key(GITHUB_ONE), key(GITLAB_ONE)]);
+  assert.deepEqual(prepared, [[key(GITHUB_ONE), key(GITLAB_ONE)]]);
 });
 
 test("polls serialized repository scans with an in-memory cursor and one-second overlap", async () => {
@@ -146,6 +159,28 @@ test("polls serialized repository scans with an in-memory cursor and one-second 
   assert.deepEqual(reconciled.toSorted(), [
     key(GITHUB_ONE), key(GITHUB_ONE), key(GITHUB_TWO), key(GITHUB_TWO),
   ].toSorted());
+});
+
+test("reloads runtime after sleeping before starting a polling sweep", async () => {
+  const abort = new AbortController();
+  let delays = 0;
+  let discoveries = 0;
+  const adapter: DiscoveryAdapter = {
+    kind: "github",
+    async bootstrap() { return []; },
+    async discover() { discoveries += 1; return { tickets: [], nextCursor: null }; },
+  };
+  const controller = createController({
+    providers: [{ adapter, repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => outcome(ref),
+    launcher: launcher(),
+    runtimeState: async () => ({ mayStartWork: false, pollingIntervalSeconds: 300, concurrency: 1 }),
+    delay: async () => { if (++delays === 2) abort.abort(); },
+  });
+  await controller.bootstrap();
+  await controller.run(abort.signal);
+  assert.equal(discoveries, 0);
 });
 
 test("reconciles active tickets when their provider discovery timestamp does not change", async () => {
@@ -640,4 +675,285 @@ test("reconcileNow is available only while ready or running", async () => {
   abort.abort();
   await running;
   await assert.rejects(controller.reconcileNow(GITHUB_ONE), /ready or running/);
+});
+
+test("reports controller work from its ephemeral collections", async () => {
+  const gate = Promise.withResolvers<void>();
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => {
+      await gate.promise;
+      return {
+        ...outcome(ref),
+        stateId: "awaiting-merge",
+        stateKind: "provider-wait",
+        actionUrl: `https://github.example.test/${ref.repository}/pull/2`,
+      };
+    },
+    launcher: launcher(),
+    now: () => "2026-08-29T10:00:00.000Z",
+  });
+
+  assert.deepEqual(controller.snapshot(), {
+    lifecycle: "created",
+    repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: null }],
+    tickets: [],
+    queue: { active: 0, queued: 0, concurrency: 1 },
+    locks: [],
+    activeWork: [],
+    errors: [],
+  });
+
+  await controller.bootstrap();
+  const scheduled = controller.reconcileNow(GITHUB_ONE);
+  await Promise.resolve();
+
+  assert.deepEqual(controller.snapshot(), {
+    lifecycle: "ready",
+    repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: "2026-08-29T10:00:00.000Z" }],
+    tickets: [{
+      ...GITHUB_ONE,
+      flowInstanceId: null,
+      stateId: null,
+      configRevision: null,
+      stateKind: null,
+      repositoryUrl: null,
+      ticketUrl: null,
+      actionUrl: null,
+      observedAt: null,
+    }],
+    queue: { active: 1, queued: 0, concurrency: 1 },
+    locks: [GITHUB_ONE],
+    activeWork: [],
+    errors: [],
+  });
+
+  gate.resolve();
+  await scheduled;
+
+  assert.deepEqual(controller.snapshot(), {
+    lifecycle: "ready",
+    repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: "2026-08-29T10:00:00.000Z" }],
+    tickets: [{
+      ...GITHUB_ONE,
+      flowInstanceId: key(GITHUB_ONE),
+      stateId: "awaiting-merge",
+      configRevision: "a".repeat(40),
+      stateKind: "provider-wait",
+      repositoryUrl: "https://github.example.test/owner/one",
+      ticketUrl: "https://github.example.test/owner/one/issues/1",
+      actionUrl: "https://github.example.test/owner/one/pull/2",
+      observedAt: "2026-08-29T10:00:00.000Z",
+    }],
+    queue: { active: 0, queued: 0, concurrency: 1 },
+    locks: [],
+    activeWork: [GITHUB_ONE],
+    errors: [],
+  });
+});
+
+test("keeps the accepted observation when same-ticket work coalesces before start", async () => {
+  let calls = 0;
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => { calls += 1; return outcome(ref); },
+    launcher: launcher(),
+    now: () => "2026-08-29T11:00:00.000Z",
+  });
+  await controller.bootstrap();
+
+  const first = controller.reconcileNow(GITHUB_ONE);
+  const coalesced = controller.reconcileNow(GITHUB_ONE);
+  assert.deepEqual(controller.snapshot().locks, [GITHUB_ONE]);
+  await Promise.all([first, coalesced]);
+
+  assert.equal(calls, 1);
+  assert.deepEqual(controller.snapshot().locks, []);
+  assert.deepEqual(controller.snapshot().tickets, [{
+    ...GITHUB_ONE,
+    flowInstanceId: key(GITHUB_ONE),
+    stateId: "assessment",
+    configRevision: "a".repeat(40),
+    stateKind: "agent",
+    repositoryUrl: "https://github.example.test/owner/one",
+    ticketUrl: "https://github.example.test/owner/one/issues/1",
+    actionUrl: "https://github.example.test/owner/one/issues/1",
+    observedAt: "2026-08-29T11:00:00.000Z",
+  }]);
+});
+
+test("keeps the last completed observation visible while the ticket refreshes", async () => {
+  const refresh = Promise.withResolvers<void>();
+  let calls = 0;
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => {
+      if (++calls === 2) await refresh.promise;
+      return outcome(ref);
+    },
+    launcher: launcher(),
+    now: () => "2026-08-29T11:00:00.000Z",
+  });
+  await controller.bootstrap();
+  await controller.reconcileNow(GITHUB_ONE);
+
+  const refreshing = controller.reconcileNow(GITHUB_ONE);
+  await Promise.resolve();
+  assert.equal(controller.snapshot().tickets[0]?.stateId, "assessment");
+  assert.equal(controller.snapshot().tickets[0]?.observedAt, "2026-08-29T11:00:00.000Z");
+
+  refresh.resolve();
+  await refreshing;
+});
+
+test("keeps only bounded generic polling errors in its snapshot", async () => {
+  const abort = new AbortController();
+  let delays = 0;
+  const controller = createController({
+    providers: [{
+      adapter: {
+        kind: "github",
+        async bootstrap() { return []; },
+        async discover() { throw new Error("provider response body: credential=secret"); },
+      },
+      repositories: ["owner/one"],
+    }],
+    concurrency: 1,
+    reconcile: async (ref) => outcome(ref),
+    launcher: launcher(),
+    delay: async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (++delays === 12) abort.abort();
+    },
+  });
+
+  await controller.bootstrap();
+  await controller.run(abort.signal);
+
+  assert.deepEqual(controller.snapshot().errors, Array(10).fill("controller error"));
+});
+
+test("keeps a newer coalesced ticket observation after an earlier reconcile fails", async () => {
+  const firstStarted = Promise.withResolvers<void>();
+  const failFirst = Promise.withResolvers<void>();
+  const finishLater = Promise.withResolvers<void>();
+  let calls = 0;
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: ["owner/one"] }],
+    concurrency: 1,
+    reconcile: async (ref) => {
+      if (++calls === 1) {
+        firstStarted.resolve();
+        await failFirst.promise;
+        throw new Error("first reconcile failed");
+      }
+      await finishLater.promise;
+      return outcome(ref);
+    },
+    launcher: launcher(),
+  });
+
+  await controller.bootstrap();
+  const first = controller.reconcileNow(GITHUB_ONE);
+  await firstStarted.promise;
+  const later = controller.reconcileNow(GITHUB_ONE);
+  assert.deepEqual(controller.snapshot().locks, [GITHUB_ONE]);
+  failFirst.resolve();
+
+  await assert.rejects(first, /first reconcile failed/);
+  assert.deepEqual(controller.snapshot().locks, [GITHUB_ONE]);
+  assert.deepEqual(controller.snapshot().tickets.map(({ provider, repository, number }) => ({
+    provider, repository, number,
+  })), [GITHUB_ONE]);
+
+  finishLater.resolve();
+  await later;
+  assert.deepEqual(controller.snapshot().locks, []);
+});
+
+test("removes an observation rejected after the ticket scheduler closes", async () => {
+  const cancellationStarted = Promise.withResolvers<void>();
+  const releaseCancellation = Promise.withResolvers<void>();
+  let cancellations = 0;
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: ["owner/one", "owner/two"] }],
+    concurrency: 1,
+    reconcile: async (ref) => outcome(ref),
+    launcher: {
+      async start() {},
+      async cancel() {
+        if (++cancellations === 1) {
+          cancellationStarted.resolve();
+          await releaseCancellation.promise;
+        }
+      },
+      isRunning: () => true,
+    },
+  });
+  const abort = new AbortController();
+
+  await controller.bootstrap();
+  await controller.reconcileNow(GITHUB_ONE);
+  abort.abort();
+  const stopping = controller.run(abort.signal);
+  await cancellationStarted.promise;
+
+  await assert.rejects(controller.reconcileNow(GITHUB_TWO), /scheduler is closed/);
+  assert.deepEqual(controller.snapshot().tickets.map(({ provider, repository, number }) => ({
+    provider, repository, number,
+  })), [GITHUB_ONE]);
+
+  releaseCancellation.resolve();
+  await stopping;
+});
+
+test("reports running and stopped snapshots around a polling repository scan", async () => {
+  const abort = new AbortController();
+  const discovered: Array<{ updatedAfter: string; overlapSeconds: number }> = [];
+  let delays = 0;
+  const controller = createController({
+    providers: [{
+      adapter: {
+        kind: "github",
+        async bootstrap() { return []; },
+        async discover(_repository, window) {
+          discovered.push(window);
+          return { tickets: [], nextCursor: null };
+        },
+      },
+      repositories: ["owner/one"],
+    }],
+    concurrency: 1,
+    reconcile: async (ref) => outcome(ref),
+    launcher: launcher(),
+    now: (() => {
+      const values = ["2026-08-29T10:00:00.000Z", "2026-08-29T10:05:00.000Z"];
+      return () => values.shift() ?? "2026-08-29T10:10:00.000Z";
+    })(),
+    delay: async () => {
+      if (++delays === 1) return;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      abort.abort();
+    },
+  });
+
+  await controller.bootstrap();
+  const running = controller.run(abort.signal);
+
+  assert.equal(controller.snapshot().lifecycle, "running");
+  await running;
+
+  assert.deepEqual(controller.snapshot(), {
+    lifecycle: "stopped",
+    repositories: [{ provider: "github", repository: "owner/one", nextWindowStartedAt: "2026-08-29T10:05:00.000Z" }],
+    tickets: [],
+    queue: { active: 0, queued: 0, concurrency: 1 },
+    locks: [],
+    activeWork: [],
+    errors: [],
+  });
+  assert.deepEqual(discovered, [{ updatedAfter: "2026-08-29T10:00:00.000Z", overlapSeconds: 1 }]);
 });

@@ -1,5 +1,8 @@
 name: planner
-version: 1.0.2
+version: 1.0.3
 description: Turn an accepted assessment into a complete implementation plan.
 author: agent-flow
 targets: [claude, codex]
+dependencies:
+  apm:
+    - addyosmani/agent-skills/skills/planning-and-task-breakdown#f63ec56a3cc936408d792956ae583c3c96a825bd

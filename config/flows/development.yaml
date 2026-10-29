@@ -6,7 +6,123 @@ metadata:
   managedLabel: agent-flow:managed
 spec:
   initial: assessment
+  activationRoutes:
+    bugfix: bug-reproduction
   states:
+    bug-reproduction:
+      kind: agent
+      agent: bug-investigator
+      resultContract: diagnostic
+      context: [ticket, control-state, human-comment]
+      "on":
+        agent-succeeded:
+          target: bug-reproduction-review
+          guards: [receipt-valid, activation-present, ticket-open]
+          actions: [record-receipt]
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt, remember-resume-state]
+        attempts-exhausted:
+          target: blocked
+          actions: [remember-resume-state]
+    bug-reproduction-review:
+      kind: human-gate
+      agent: bug-investigator
+      resultContract: human-gate
+      context: [ticket, control-state, diagnostic, human-comment]
+      "on":
+        human-approved:
+          target: bug-development
+          guards: [authorized-actor, receipt-valid]
+          actions: [record-receipt]
+        human-changes-requested:
+          target: bug-reproduction
+          guards: [authorized-actor, receipt-valid]
+          actions: [record-receipt]
+        human-question:
+          target: bug-reproduction-review
+          guards: [authorized-actor, receipt-valid]
+          actions: [record-receipt]
+        human-unclear:
+          target: bug-reproduction-review
+          guards: [authorized-actor, receipt-valid]
+          actions: [record-receipt]
+        human-cancelled:
+          target: cancelled
+          guards: [authorized-actor, receipt-valid]
+          actions: [record-receipt, clear-resume-state, remove-activation-label]
+    bug-development:
+      kind: agent
+      agent: bugfixer
+      resultContract: development
+      context: [ticket, control-state, diagnostic, change-request, review, human-comment]
+      "on":
+        agent-succeeded:
+          target: bug-review
+          guards: [receipt-valid, activation-present, ticket-open]
+          actions: [record-receipt]
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt, remember-resume-state]
+        attempts-exhausted:
+          target: blocked
+          actions: [remember-resume-state]
+    bug-review:
+      kind: agent
+      agent: reviewer
+      resultContract: review
+      context: [ticket, control-state, diagnostic, change-request, review, human-comment]
+      "on":
+        review-approved:
+          target: bug-verification
+          guards: [receipt-valid, head-matches, activation-present, ticket-open]
+          actions: [record-receipt]
+        review-changes-requested:
+          target: bug-development
+          guards: [receipt-valid, head-matches, activation-present, ticket-open]
+          actions: [record-receipt]
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt, remember-resume-state]
+        attempts-exhausted:
+          target: blocked
+          actions: [remember-resume-state]
+    bug-verification:
+      kind: agent
+      agent: bug-investigator
+      resultContract: verification
+      context: [ticket, control-state, diagnostic, change-request, review, human-comment]
+      "on":
+        change-request-updated:
+          target: bug-review
+          guards: [activation-present, ticket-open]
+        agent-succeeded:
+          target: bug-awaiting-merge
+          guards: [receipt-valid, activation-present, ticket-open]
+          actions: [record-receipt]
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt, remember-resume-state]
+        attempts-exhausted:
+          target: blocked
+          actions: [remember-resume-state]
+    bug-awaiting-merge:
+      kind: provider-wait
+      "on":
+        change-request-updated:
+          target: bug-review
+          guards: [activation-present, ticket-open]
+        change-request-merged:
+          target: done
+          actions: [remove-activation-label]
+        change-request-closed:
+          target: needs-human
+          resumeTarget: bug-review
+          actions: [remember-resume-state]
     assessment:
       kind: agent
       agent: architect

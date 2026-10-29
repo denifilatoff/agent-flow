@@ -1,5 +1,83 @@
 lockfile_version: '1'
-generated_at: '2026-08-26T00:38:14.445183+00:00'
+generated_at: '2026-08-27T20:04:12.757737+00:00'
 apm_version: 0.28.0
-dependencies: []
-deployments: []
+dependencies:
+- repo_url: addyosmani/agent-skills
+  name: planning-and-task-breakdown
+  host: github.com
+  resolved_commit: f63ec56a3cc936408d792956ae583c3c96a825bd
+  resolved_ref: f63ec56a3cc936408d792956ae583c3c96a825bd
+  version: unknown
+  virtual_path: skills/planning-and-task-breakdown
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/planning-and-task-breakdown
+  - .agents/skills/planning-and-task-breakdown/SKILL.md
+  - .claude/skills/planning-and-task-breakdown
+  - .claude/skills/planning-and-task-breakdown/SKILL.md
+  deployed_file_hashes:
+    .agents/skills/planning-and-task-breakdown/SKILL.md: sha256:ea6e7529be29098f3e02c8b3da79c0dfddd56e45eaec1248aefd5fc6a62491a8
+    .claude/skills/planning-and-task-breakdown/SKILL.md: sha256:ea6e7529be29098f3e02c8b3da79c0dfddd56e45eaec1248aefd5fc6a62491a8
+  content_hash: sha256:f6c2cc012101225c58e5886e847342d1efaf0336a8e150b833d617fdf092952c
+deployments:
+- kind: project-relative
+  target: claude
+  value: .claude/agents/planner.md
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:a73be700be9d81a01784ee093130576427a2a4deea1730f513e938a954d52380
+- kind: project-relative
+  target: claude
+  value: .claude/rules/planner.md
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:b7819dacca29cdaf806db18fec68f565827e75e91081716662c8e1a74c871037
+- kind: project-relative
+  target: claude
+  value: .claude/skills/planning-and-task-breakdown
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/planning-and-task-breakdown
+  active_owner: addyosmani/agent-skills/skills/planning-and-task-breakdown
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/planning-and-task-breakdown/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/planning-and-task-breakdown
+  active_owner: addyosmani/agent-skills/skills/planning-and-task-breakdown
+  content_hash: sha256:ea6e7529be29098f3e02c8b3da79c0dfddd56e45eaec1248aefd5fc6a62491a8
+- kind: project-relative
+  target: codex
+  value: .agents/skills/planning-and-task-breakdown
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/planning-and-task-breakdown
+  active_owner: addyosmani/agent-skills/skills/planning-and-task-breakdown
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/planning-and-task-breakdown/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/planning-and-task-breakdown
+  active_owner: addyosmani/agent-skills/skills/planning-and-task-breakdown
+  content_hash: sha256:ea6e7529be29098f3e02c8b3da79c0dfddd56e45eaec1248aefd5fc6a62491a8
+local_deployed_files:
+- .claude/agents/planner.md
+- .claude/rules/planner.md
+local_deployed_file_hashes:
+  .claude/agents/planner.md: sha256:a73be700be9d81a01784ee093130576427a2a4deea1730f513e938a954d52380
+  .claude/rules/planner.md: sha256:b7819dacca29cdaf806db18fec68f565827e75e91081716662c8e1a74c871037

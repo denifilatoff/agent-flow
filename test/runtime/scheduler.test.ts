@@ -152,3 +152,44 @@ test("preserves an undefined worker rejection", async () => {
 
   await assert.rejects(scheduler.schedule("ticket"), () => true);
 });
+
+test("applies reduced concurrency only to work not yet claimed", async () => {
+  const gates = [deferred(), deferred(), deferred()];
+  const started: number[] = [];
+  const scheduler = createScheduler<number>({
+    concurrency: 2,
+    key: String,
+    run: async (value) => { started.push(value); await gates[value]!.promise; },
+  });
+  const work = [0, 1, 2].map((value) => scheduler.schedule(value));
+  await Promise.resolve();
+  scheduler.setConcurrency(1);
+  assert.deepEqual(started, [0, 1]);
+  gates[0]!.resolve();
+  await Promise.resolve();
+  assert.deepEqual(started, [0, 1]);
+  gates[1]!.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, [0, 1, 2]);
+  gates[2]!.resolve();
+  await Promise.all(work);
+});
+
+test("reports active and queued work counts", async () => {
+  const gate = deferred();
+  const scheduler = createScheduler<string>({
+    concurrency: 1,
+    key: (value) => value,
+    run: async () => gate.promise,
+  });
+
+  const active = scheduler.schedule("active");
+  const queued = scheduler.schedule("queued");
+  await Promise.resolve();
+
+  assert.deepEqual(scheduler.snapshot(), { active: 1, queued: 1, concurrency: 1 });
+
+  gate.resolve();
+  await Promise.all([active, queued]);
+  assert.deepEqual(scheduler.snapshot(), { active: 0, queued: 0, concurrency: 1 });
+});

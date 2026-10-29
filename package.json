@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && rm -rf dist/ui && cp -R src/ui dist/ui",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts test/config/*.test.ts test/flow/*.test.ts test/harness/*.test.ts test/provider/*.test.ts test/runtime/*.test.ts",
     "test:e2e": "node --test --test-concurrency=1 test/e2e/*.test.ts"
