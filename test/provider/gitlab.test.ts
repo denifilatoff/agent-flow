@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+import { loadConfigBundle } from "../../src/config/load.ts";
 import { createGitLabAdapter } from "../../src/provider/gitlab.ts";
 import { ProviderHttpError } from "../../src/provider/http.ts";
+import { electOwner } from "../../src/provider/publication.ts";
 import type {
   ProviderRequest,
   ProviderResponse,
   RateLimitedHttpClient,
 } from "../../src/provider/types.ts";
+import { readDecisionAndBuildReceipt } from "../../src/runtime/receipts.ts";
 
 const SINCE = "2026-08-25T10:00:00.000Z";
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -160,8 +166,346 @@ test("uses updated_after and normalizes an issue snapshot", async () => {
   assert.equal(ticket.changeRequest?.number, 41);
   assert.equal(ticket.changeRequest?.state, "open");
   assert.equal(ticket.changeRequest?.headSha, HEAD_SHA);
+  assert.equal(ticket.changeRequest?.body.includes("agent-flow:v1"), true);
+  assert.equal(ticket.changeRequest?.createdAt, "2026-08-25T10:00:05.000Z");
   assert.equal(client.calls[0]!.priority, "background");
   assert.ok(client.calls.slice(1).every(({ priority }) => priority === "active"));
+});
+
+test("C17 reads complete recovery evidence from paginated notes, linked merge requests, and reviews", async () => {
+  const notePath = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: fixture.labelEventsFirst, next: `${PROJECT}/issues/23/resource_label_events?per_page=100&page=2` })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100&page=2`, { data: fixture.labelEventsSecond })
+    .add("GET", notePath, { data: fixture.commentsFirst, next: `${notePath}&page=2` })
+    .add("GET", `${notePath}&page=2`, { data: [fixture.recoveryComment] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, {
+      data: [
+        ...(fixture.relatedMergeRequests as unknown[]),
+        { id: 4200, iid: 42, project_id: 100, references: { full: "group/project!42" } },
+      ],
+    })
+    .add("GET", `${PROJECT}/merge_requests/41`, {
+      data: { ...fixture.mergeRequest, updated_at: "2026-08-25T10:01:00.000Z" },
+    })
+    .add("GET", `${PROJECT}/merge_requests/42`, { data: fixture.secondMergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [fixture.recoveryReviewNote] })
+    .add("GET", `${PROJECT}/merge_requests/42/notes?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } })
+    .add("GET", `${PROJECT}/members/all/9`, { data: { id: 9, username: "reviewer", access_level: 40 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.complete, true);
+  assert.equal(evidence.activeBoundary, "fresh");
+  assert.equal(evidence.legacyActive, false);
+  assert.equal(evidence.snapshot.changeRequest, null);
+  assert.equal(evidence.changes.length, 2);
+  assert.equal(evidence.reviews.length, 1);
+  assert.ok(evidence.publications.some(({ key }) => key.includes("change-request")));
+  assert.ok(!evidence.ambiguities.some((value) => value.includes("change-request")
+    && value.includes("provenance")));
+  assert.ok(evidence.publications.some(({ key }) => key.includes("comment")));
+  assert.ok(evidence.publications.some(({ key }) => key.includes("review")));
+  assert.ok(electOwner(evidence.publications)?.key.includes("change-request"));
+  assert.ok(evidence.ambiguities.some((value) => value.includes("multiple linked")));
+  assert.ok(client.calls.some(({ path }) => path.endsWith("members/all/6")));
+  assert.ok(client.calls.some(({ path }) => path.endsWith("members/all/9")));
+  assert.ok(client.calls.every(({ priority }) => priority === "active"));
+});
+
+test("rejects a GitLab merge request whose publication marker was added after creation", async () => {
+  const notePath = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: fixture.labelEventsSecond })
+    .add("GET", notePath, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: fixture.relatedMergeRequests })
+    .add("GET", `${PROJECT}/merge_requests/41`, {
+      data: { ...fixture.mergeRequest, updated_at: "2026-08-25T10:01:00.000Z" },
+    })
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, {
+      data: [{
+        id: 999,
+        body: "changed the description",
+        system: true,
+        author: { id: 6, username: "developer" },
+        created_at: "2026-08-25T10:01:00.000Z",
+        updated_at: "2026-08-25T10:01:00.000Z",
+      }],
+    })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.publications.some(({ key }) => key.includes("change-request")), false);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("publication provenance")));
+});
+
+test("marks a first activation without managed or stage history as fresh", async () => {
+  const issue = {
+    ...(fixture.issue as Record<string, unknown>),
+    labels: ["bug", "agent-flow:development"],
+  };
+  const activation = (fixture.labelEventsSecond as unknown[])[0];
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: [activation] })
+    .add("GET", notes, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/7`, {
+      data: { id: 7, username: "maintainer", access_level: 40 },
+    });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.activeBoundary, "fresh");
+  assert.deepEqual(evidence.publications, []);
+  assert.deepEqual(evidence.ambiguities, []);
+});
+
+test("selects the latest activation from descending paginated label events", async () => {
+  const oldActivation = {
+    id: 800,
+    action: "add",
+    label: { name: "agent-flow:development" },
+    user: { id: 6, username: "developer" },
+    created_at: "2026-08-25T09:00:00.000Z",
+  };
+  const eventsPath = `${PROJECT}/issues/23/resource_label_events?per_page=100`;
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const removal = {
+    ...((fixture.labelEventsFirst as unknown[])[0] as Record<string, unknown>),
+    created_at: "2026-08-25T10:00:00.000Z",
+  };
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", eventsPath, {
+      data: [...(fixture.labelEventsSecond as unknown[]), removal],
+      next: `${eventsPath}&page=2`,
+    })
+    .add("GET", `${eventsPath}&page=2`, { data: [oldActivation] })
+    .add("GET", notes, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.snapshot.activation.eventId, "802");
+  assert.equal(evidence.snapshot.activation.actor?.login, "maintainer");
+  assert.equal(evidence.snapshot.activation.occurredAt, "2026-08-25T10:00:00.000Z");
+  assert.equal(evidence.activeBoundary, "fresh");
+});
+
+test("fresh recovery ignores merge requests created before the latest activation", async () => {
+  const oldMergeRequest = {
+    ...(fixture.mergeRequest as Record<string, unknown>),
+    created_at: "2026-08-25T09:05:00.000Z",
+    updated_at: "2026-08-25T09:05:00.000Z",
+  };
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
+      data: [...(fixture.labelEventsFirst as unknown[]), ...(fixture.labelEventsSecond as unknown[])],
+    })
+    .add("GET", notes, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: fixture.relatedMergeRequests })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: oldMergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [fixture.recoveryReviewNote] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.activeBoundary, "fresh");
+  assert.deepEqual(evidence.changes, []);
+  assert.deepEqual(evidence.reviews, []);
+  assert.deepEqual(evidence.publications, []);
+  assert.equal(evidence.ambiguities.some((value) => value.includes("multiple linked")), false);
+});
+
+test("treats a publication with the activation timestamp as ambiguous", async () => {
+  const comment = {
+    ...(fixture.recoveryComment as Record<string, unknown>),
+    created_at: "2026-08-25T10:00:00.000Z",
+    updated_at: "2026-08-25T10:00:00.000Z",
+  };
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
+      data: [...(fixture.labelEventsFirst as unknown[]), ...(fixture.labelEventsSecond as unknown[])],
+    })
+    .add("GET", notes, { data: [comment] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.deepEqual(evidence.publications, []);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("activation timestamp")));
+});
+
+test("development verification selects the merge request from the second activation", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-gitlab-reactivation-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const decision = join(root, "decision.json");
+  await writeFile(decision, '{"event":"agent-succeeded"}\n');
+  const oldMerge = {
+    ...(fixture.mergeRequest as Record<string, unknown>),
+    created_at: "2026-08-25T09:05:00.000Z",
+    updated_at: "2026-08-25T09:05:00.000Z",
+  };
+  const currentMerge = {
+    ...(fixture.secondMergeRequest as Record<string, unknown>),
+    description: (fixture.mergeRequest as { description: string }).description,
+  };
+  const related = [
+    ...(fixture.relatedMergeRequests as unknown[]),
+    { id: 4200, iid: 42, project_id: 100, references: { full: "group/project!42" } },
+  ];
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const events = [...(fixture.labelEventsFirst as unknown[]), ...(fixture.labelEventsSecond as unknown[])];
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project }, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue }, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: events }, { data: events })
+    .add("GET", notes, { data: [] }, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: related }, { data: related })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: oldMerge }, { data: oldMerge })
+    .add("GET", `${PROJECT}/merge_requests/42`, { data: currentMerge }, { data: currentMerge }, { data: currentMerge })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } });
+  const bundle = await loadConfigBundle(process.cwd(), "config/stack.yaml", "a".repeat(40));
+
+  const receipt = await readDecisionAndBuildReceipt(decision, {
+    flow: bundle.flow,
+    stateId: "development",
+    mode: "stage",
+    resultContract: "development",
+    configRevision: "a".repeat(40),
+    controllerId: "11111111-1111-4111-8111-111111111111",
+    publicationKeys: [],
+    flowInstanceId: "33333333-3333-4333-8333-333333333333",
+    attemptId: "44444444-4444-4444-8444-444444444444",
+    ticket: ref,
+    sourceComment: null,
+    pinnedChangeRequest: null,
+  }, adapter(client), false);
+
+  assert.equal(receipt.artifacts[0]?.kind, "change-request");
+  assert.equal(receipt.artifacts[0]?.kind === "change-request" ? receipt.artifacts[0].number : null, 42);
+});
+
+test("recovery preserves a GitLab review marker for its historical head", async () => {
+  const currentHead = "2".repeat(40);
+  const changedMergeRequest = {
+    ...(fixture.mergeRequest as Record<string, unknown>),
+    sha: currentHead,
+  };
+  const notes = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
+      data: [...(fixture.labelEventsFirst as unknown[]), ...(fixture.labelEventsSecond as unknown[])],
+    })
+    .add("GET", notes, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: fixture.relatedMergeRequests })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: changedMergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [fixture.recoveryReviewNote] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } })
+    .add("GET", `${PROJECT}/members/all/9`, { data: { id: 9, username: "reviewer", access_level: 40 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.reviews.length, 1);
+  assert.equal(evidence.reviews[0]?.headSha, HEAD_SHA);
+  assert.ok(evidence.publications.some(({ key }) => key.includes("review")));
+  assert.equal(evidence.ambiguities.some((value) => value.includes("head SHA")), false);
+});
+
+test("C17 rejects incomplete GitLab recovery evidence pages", async () => {
+  const notePath = `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`;
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: [] })
+    .add("GET", notePath, { data: fixture.commentsFirst, next: `${notePath}&page=2` })
+    .add("GET", `${notePath}&page=2`, { data: null, error: new Error("page failed") });
+
+  await assert.rejects(adapter(client).readRecoveryEvidence(ref), /page failed/);
+});
+
+test("marks a changed GitLab review note as ambiguous instead of electing it at creation time", async () => {
+  const changedReview = {
+    ...(fixture.recoveryReviewNote as Record<string, unknown>),
+    updated_at: "2026-08-25T10:06:00.000Z",
+  };
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
+      data: fixture.labelEventsFirst,
+      next: `${PROJECT}/issues/23/resource_label_events?per_page=100&page=2`,
+    })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100&page=2`, { data: fixture.labelEventsSecond })
+    .add("GET", `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: fixture.relatedMergeRequests })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: fixture.mergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [changedReview] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, username: "developer", access_level: 30 } })
+    .add("GET", `${PROJECT}/members/all/9`, { data: { id: 9, username: "reviewer", access_level: 40 } });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.reviews.length, 1);
+  assert.equal(evidence.publications.some(({ key }) => key.includes("review")), false);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("publication provenance")));
+});
+
+test("reports a removed GitLab publisher as unauthorized recovery evidence", async () => {
+  const publisherComment = {
+    ...(fixture.recoveryComment as Record<string, unknown>),
+    author: { id: 10, username: "former-developer" },
+  };
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, {
+      data: [{
+        id: 802,
+        action: "add",
+        label: { name: "agent-flow:development" },
+        user: { id: 7, username: "maintainer" },
+        created_at: "2026-08-25T10:00:00.000Z",
+      }],
+    })
+    .add("GET", `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`, { data: [publisherComment] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, username: "maintainer", access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/10`, {
+      data: null,
+      error: new ProviderHttpError("member not found", 404, false, null, {}),
+    });
+
+  const evidence = await adapter(client).readRecoveryEvidence(ref);
+
+  assert.equal(evidence.publications.some(({ key }) => key.includes("comment")), false);
+  assert.ok(evidence.ambiguities.some((value) => value.includes("publication author is not authorized")));
 });
 
 test("binds discovery cursors to the exact project and window", async () => {
@@ -231,42 +575,37 @@ test("rejects provider pagination that changes routes or omits an advancing page
     /pagination.*page/,
   );
 
-  const managed = `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100`;
-  const crossProjectClient = new FixtureClient().add("GET", managed, {
+  const activation = `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100`;
+  const crossProjectClient = new FixtureClient().add("GET", activation, {
     data: [{ iid: 23 }],
     next:
-      "/api/v4/projects/other%2Fproject/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100&page=2",
+      "/api/v4/projects/other%2Fproject/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100&page=2",
   });
   await assert.rejects(adapter(crossProjectClient).bootstrap(REPOSITORY), /pagination.*route/);
 
-  const changedFilterClient = new FixtureClient().add("GET", managed, {
+  const changedFilterClient = new FixtureClient().add("GET", activation, {
     data: [{ iid: 23 }],
     next:
-      `/api/v4/${PROJECT}/issues?scope=all&state=opened&labels=agent-flow%3Amanaged&per_page=100&page=2`,
+      `/api/v4/${PROJECT}/issues?scope=all&state=opened&labels=agent-flow%3Adevelopment&per_page=100&page=2`,
   });
   await assert.rejects(adapter(changedFilterClient).bootstrap(REPOSITORY), /pagination.*filters/);
 });
 
-test("bootstraps the union of managed and activation labels across pages", async () => {
-  const managed = `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100`;
+test("bootstraps only active tickets across pages", async () => {
   const activation =
     `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100`;
   const client = new FixtureClient()
-    .add("GET", managed, {
+    .add("GET", activation, {
       data: [{ iid: 23 }],
       next:
-        `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100&page=2`,
+        `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100&page=2`,
     })
-    .add(
-      "GET",
-      `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100&page=2`,
-      { data: [{ iid: 24 }] },
-    )
-    .add("GET", activation, { data: [{ iid: 23 }, { iid: 25 }] });
+    .add("GET", `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100&page=2`, {
+      data: [{ iid: 25 }],
+    });
 
   assert.deepEqual(await adapter(client).bootstrap(REPOSITORY), [
     { provider: "gitlab", repository: REPOSITORY, number: 23 },
-    { provider: "gitlab", repository: REPOSITORY, number: 24 },
     { provider: "gitlab", repository: REPOSITORY, number: 25 },
   ]);
   assert.ok(client.calls.every(({ priority }) => priority === "background"));
@@ -382,7 +721,7 @@ test("rejects ambiguous related merge requests in the same project", async () =>
   const client = new FixtureClient()
     .add("GET", PROJECT, { data: fixture.project })
     .add("GET", `${PROJECT}/issues/23`, { data: fixture.issue })
-    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: fixture.labelEventsSecond })
     .add(
       "GET",
       `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`,
@@ -393,7 +732,9 @@ test("rejects ambiguous related merge requests in the same project", async () =>
         { iid: 41, project_id: 100, references: { full: "group/project!41" } },
         { iid: 42, project_id: 100, references: { full: "group/project!42" } },
       ],
-    });
+    })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: fixture.mergeRequest })
+    .add("GET", `${PROJECT}/merge_requests/42`, { data: fixture.secondMergeRequest });
 
   await assert.rejects(adapter(client).readTicket(ref), /multiple related merge requests/);
 });
@@ -457,7 +798,7 @@ test("returns null when no GitLab review note starts with the exact marker", asy
   assert.equal(await adapter(client).findReview(ref, 41, REVIEW_MARKER), null);
 });
 
-test("rejects duplicate GitLab review notes with the same attempt marker", async () => {
+test("rejects duplicate GitLab review notes with the same publication marker", async () => {
   const duplicate = { ...(fixture.reviewNote as Record<string, unknown>), id: 703 };
   const client = new FixtureClient().add(
     "GET",
@@ -467,8 +808,17 @@ test("rejects duplicate GitLab review notes with the same attempt marker", async
 
   await assert.rejects(
     adapter(client).findReview(ref, 41, REVIEW_MARKER),
-    /multiple GitLab review notes.*attempt marker/,
+    /multiple GitLab review notes.*publication marker/,
   );
+});
+
+test("excludes baseline GitLab reviews when locating the current result", async () => {
+  const duplicate = { ...(fixture.reviewNote as Record<string, unknown>), id: 703 };
+  const client = new FixtureClient()
+    .add("GET", `${PROJECT}/merge_requests/41/notes?per_page=100`, { data: [fixture.reviewNote, duplicate] })
+    .add("GET", `${PROJECT}/merge_requests/41`, { data: fixture.mergeRequest });
+
+  assert.equal((await adapter(client).findReview(ref, 41, REVIEW_MARKER, ["702"]))?.id, "703");
 });
 
 test("preserves a self-managed GitLab relative URL root for note artifacts", async () => {

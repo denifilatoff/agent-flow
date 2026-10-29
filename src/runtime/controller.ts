@@ -51,6 +51,8 @@ export interface ControllerTicketObservation extends TicketRef {
   ticketUrl: string | null;
   actionUrl: string | null;
   observedAt: string | null;
+  recoveryDisposition?: ReconcileOutcome["recoveryDisposition"];
+  recoveryReason?: string | null;
 }
 
 interface RepositoryScan {
@@ -108,12 +110,21 @@ export function createController(dependencies: ControllerDependencies): Controll
         observation.repositoryUrl = result.repositoryUrl;
         observation.ticketUrl = result.ticketUrl;
         observation.actionUrl = result.actionUrl;
+        if (result.recoveryDisposition) {
+          observation.recoveryDisposition = result.recoveryDisposition;
+          observation.recoveryReason = result.recoveryReason ?? null;
+        } else {
+          delete observation.recoveryDisposition;
+          delete observation.recoveryReason;
+        }
         observation.observedAt = now();
         if (result.flowInstanceId) flowInstances.add(result.flowInstanceId);
-        if (result.flowInstanceId && result.stateId !== "done" && result.stateId !== "cancelled") {
+        if (result.runnable !== false && result.flowInstanceId && result.stateId !== "done" && result.stateId !== "cancelled") {
           activeTickets.set(id, ref);
         } else {
-          removeObservation(id, observation);
+          if (result.recoveryDisposition !== "ambiguous" && result.recoveryDisposition !== "foreign") {
+            removeObservation(id, observation);
+          }
           activeTickets.delete(id);
         }
       } catch (error) {

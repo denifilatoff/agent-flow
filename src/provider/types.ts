@@ -1,4 +1,5 @@
 import type { Actor } from "../config/types.js";
+import type { Publication } from "./publication.js";
 
 export type { Actor } from "../config/types.js";
 
@@ -37,6 +38,8 @@ export interface NormalizedChangeRequest {
   headSha: string;
   state: "open" | "closed" | "merged";
   actor: Actor;
+  body: string;
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -71,6 +74,17 @@ export interface ProviderTicketSnapshot {
   changeRequest: NormalizedChangeRequest | null;
 }
 
+export interface RecoveryEvidence {
+  snapshot: ProviderTicketSnapshot;
+  publications: Publication[];
+  changes: NormalizedChangeRequest[];
+  reviews: NormalizedReview[];
+  ambiguities: string[];
+  complete: boolean;
+  activeBoundary: "known" | "fresh" | "ambiguous";
+  legacyActive: boolean;
+}
+
 export interface DiscoveryWindow {
   updatedAfter: string;
   overlapSeconds: number;
@@ -88,6 +102,7 @@ export interface ProviderAdapter {
   bootstrap(repository: string): Promise<TicketRef[]>;
   readRepository(repository: string): Promise<ProviderRepository>;
   readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot>;
+  readRecoveryEvidence(ref: TicketRef): Promise<RecoveryEvidence>;
   permission(repository: string, actor: Actor): Promise<Permission>;
   readComment(ref: TicketRef, id: string): Promise<ProviderComment>;
   createComment(ref: TicketRef, body: string): Promise<ProviderComment>;
@@ -99,7 +114,12 @@ export interface ProviderAdapter {
     pinnedActivationLabels?: readonly string[],
   ): Promise<string[]>;
   readChangeRequest(ref: TicketRef, number: number): Promise<NormalizedChangeRequest>;
-  findReview(ref: TicketRef, changeNumber: number, marker: string): Promise<NormalizedReview | null>;
+  findReview(
+    ref: TicketRef,
+    changeNumber: number,
+    marker: string,
+    excludedIds?: readonly string[],
+  ): Promise<NormalizedReview | null>;
   readReview(ref: TicketRef, changeNumber: number, id: string): Promise<NormalizedReview>;
 }
 

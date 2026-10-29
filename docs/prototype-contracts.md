@@ -2,14 +2,18 @@
 
 ## Implementation status
 
-The runtime agent protocol is implemented. Agent attempts write a minimal local `AgentDecision`; the controller reads
-provider evidence and builds the verified `AgentReceipt` stored in the control comment.
+[ADR 0001](adr/0001-provider-commit-points-and-local-execution.md), the
+[architecture](agent-flow-architecture.md), and [data model](recovery-data-model.md) define the implemented contract:
+SQLite-local execution, `config`/`controller` publication metadata, and ownership observed on ordinary reconciliation.
+No second ownership read is added before publication. Agent attempts write a minimal local `AgentDecision`; the
+controller reads provider evidence and stores the verified `AgentReceipt` in local SQLite.
 
 ## Scope
 
 The prototype runs one polling controller in one Docker container. It supports GitHub and GitLab through separate REST
 adapters, compiles data-only flow YAML into XState v5, and launches Codex or Claude through fixed harness adapters. It
-does not include webhooks, a database, a durable queue, multiple controller replicas, a UI, or automatic merge.
+uses one disposable local SQLite database and does not include webhooks, a durable queue, multiple cooperating
+controller replicas or automatic merge. Its operator UI is read-only.
 
 GitHub or GitLab remains the canonical operational store. Local repositories, worktrees, compiled APM output, context
 files, decisions, and harness sessions are replaceable execution artifacts.
@@ -34,17 +38,20 @@ compose.yaml                   macOS-oriented local deployment
 
 ## Versioned inputs
 
-Every YAML or JSON contract except the local one-field `AgentDecision` has `apiVersion: agent-flow/v1alpha1` and a
-fixed `kind`. The controller rejects unknown fields and unsupported versions before reconciliation starts.
+Stack, runtime configuration, flow, catalog, control-state, and receipt documents have `apiVersion: agent-flow/v1alpha1` and a fixed
+`kind`. `AgentDecision` is a local one-field document, and `LocalExecution` is the local SQLite wrapper. The controller
+rejects unknown fields and unsupported versions before reconciliation starts.
 
 - `schemas/v1/flow.schema.json` defines states, agent references, context inputs, transitions, guards, and actions.
 - `schemas/v1/stack.schema.json` defines the flow, catalog, schemas, and contracts owned by one Git revision.
 - `schemas/v1/agent-catalog.schema.json` maps logical agent IDs to APM packages.
-- `schemas/v1/runtime-config.schema.json` defines deployment-specific provider, execution, polling, and runtime values.
-- `schemas/v1/control-state.schema.json` defines the JSON payload inside the ticket's mutable control comment.
+- `schemas/v1/runtime-config.schema.json` defines provider, execution, polling, and local runtime values.
+- `schemas/v1/control-state.schema.json` defines local flow and attempt bookkeeping retained inside a local execution
+  record.
+- `schemas/v1/local-execution.schema.json` defines the validated JSON stored in SQLite.
 - `schemas/v1/agent-decision.schema.json` defines the minimal local JSON decision returned by a completed agent attempt.
 - `schemas/v1/agent-receipt.schema.json` defines the controller-built, provider-verified attempt record stored in the
-  control comment. The model does not write this record.
+  local execution record. The model does not write this record.
 
 The initial schemas use `v1alpha1` because the prototype may change them incompatibly. A running flow still pins the
 configuration repository commit SHA, so a schema change cannot alter an existing instance without explicit migration.
@@ -126,7 +133,7 @@ record fields.
 The runtime section contains:
 
 - the context and decision file paths;
-- the exact marker to place on each required provider publication;
+- the exact `config`/`controller` marker to place on each required provider publication;
 - the pinned change-request identity and head when the stage needs them;
 - the allowed model-origin events and one exact JSON example for each;
 - the provider evidence required for each event; and
@@ -155,7 +162,7 @@ After a successful harness exit, the controller reads the decision and discovers
 - human gate question or unclear events require one marked clarification question; and
 - human gate approval, changes-requested, and cancellation events require no new publication.
 
-The controller reads every discovered object back and constructs the `AgentReceipt` stored in the control comment. It
+The controller reads every discovered object back and constructs the `AgentReceipt` stored in SQLite. It
 fills flow and attempt IDs, provider IDs and URLs, head SHA, normalized change-request state, and other deterministic
 fields. The model never supplies those values.
 
@@ -172,66 +179,58 @@ JSON Schema validates file shape. Before polling, the controller also verifies t
 - every agent reference exists in the catalog and its package contains one `apm.yml` that supports the selected target;
 - every final state has no transitions and every non-final state has at least one transition;
 - every referenced action and guard is implemented by the controller;
-- configured repositories are unique across provider entries; and
+- configured repositories are unique in the runtime provider allowlist; and
 - the checked-out configuration revision contains the applicable `apm.lock.yaml` files.
 
-## Control comment
+## Local execution record
 
-The controller owns one mutable ticket comment per flow instance. The comment is a hidden machine record:
+The controller stores flow identity, retry accounting, receipts, and cached provider interpretation in
+`/var/lib/agent-flow/execution.sqlite`. It validates each JSON payload with `local-execution.schema.json` and uses a local revision
+for compare-and-swap updates. Attempt starts are committed before harness launch. Surviving local state preserves retry
+consumption on an ordinary restart; an empty database reconstructs active work from provider evidence.
 
-```text
-<!-- agent-flow-control:v1
-<base64-encoded-control-state>
--->
-```
-
-The payload is the Base64 encoding of one compact JSON object validated by `control-state.schema.json`. GitHub and
-GitLab hide the complete record when they render the comment. The controller also reads the legacy visible fenced-JSON
-format so an existing flow migrates on its next state update. The controller edits this comment in place and increments
-`sequence` for each accepted change. It records the pinned config SHA, current state, resume state, accepted activation
-label and event ID, current attempt series, latest validated receipt, human gate result, and linked change request. A
-terminal flow starts again only for a different authorized activation event ID; timestamps do not determine
-reactivation because provider and controller clocks may differ. Legacy records without the activation label use the
-pinned flow's default activation label.
-
-The controller writes an attempt with status `started` and reads the comment back before launching a harness. A restart
-therefore cannot restore a consumed retry. Older attempt series do not need to remain in the control comment because
-they cannot affect the next transition.
+`/var/lib/agent-flow/controller-id` contains the installation UUID outside SQLite. Startup rejects a corrupt identity, corrupt
+database, or unsupported `user_version` without replacing it. The SQLite connection opens before readiness and closes
+after controller work drains.
 
 ## Agent publication markers
 
-Every agent-authored provider comment starts with this marker:
+Every substantive agent publication contains this standalone block in raw Markdown:
 
-```text
-<!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=<artifact-kind> -->
+```html
+<!-- agent-flow:v1 {"config":"<configuration-sha>","controller":"<controller-id>"} -->
 ```
 
-`artifact-kind` is `assessment`, `plan`, `question`, `review`, or `diagnostic`. The generated runtime prompt supplies
-the exact marker. The controller compares it with the active attempt and reads the provider object back before
-accepting it.
+The controller supplies the exact block to runtime prompts and reads the provider object back before accepting it.
+The fields identify the pinned configuration and installation. They do not identify an attempt, prove completion, or
+authorize an actor. Result identity comes from provider object metadata, current stage context, and the publication
+keys captured before an attempt.
 
 Every stage-mode review publication, including a comment-style provider review, starts with these two lines in this
 order:
 
-```text
-<!-- agent-flow:v1 flow=<flow-instance-id> attempt=<attempt-id> artifact=review -->
+```html
+<!-- agent-flow:v1 {"config":"<configuration-sha>","controller":"<controller-id>"} -->
 <!-- agent-flow-review:v1 head=<sha> verdict=<verdict> -->
 ```
 
 `head` is the pinned 40-character lowercase hexadecimal SHA. `verdict` is exactly `approved`, `changes-requested`, or
 `commented`. The controller reads both lines back before accepting the review. A changed head invalidates the review,
-so the agent must publish no verdict after observing a different provider head. Human-input questions remain ordinary
-`artifact=question` publications and do not include review metadata.
+so the agent must publish no verdict after observing a different provider head. Human-input questions use only the
+common publication block.
 
 When GitHub prevents self-approval, the agent submits a native pull-request review with event `COMMENT`. Its second
-marker line carries the intended logical verdict, such as `approved`. The controller locates that review by the active
-attempt marker and reads it back from the pull-request reviews API. The fallback is not an issue comment. For native
-`APPROVED` and `CHANGES_REQUESTED` states, the marker verdict must agree with the provider state.
+marker line carries the intended logical verdict, such as `approved`. The controller locates a review with the exact
+common marker, excludes reviews present before the attempt, and reads the result back from the pull-request reviews
+API. The fallback is not an issue comment. For native `APPROVED` and `CHANGES_REQUESTED` states, the marker verdict must
+agree with the provider state. Recovery reads native review edit provenance through batched GraphQL node queries.
+An edit after submission or unavailable edit provenance cannot establish original publication; equal timestamps do
+not prove that a draft edit preceded submission. The ownership timestamp remains the native submission time.
 
 Only an open linked change request follows the pinned-head review path and produces a verified review result. A closed,
 unmerged linked change request may run the reviewer in stage mode only once after the flow enters `needs-human` with
 `review` as the resume state. This run does not inspect the closed head or publish review metadata or a verdict. It
-publishes one reopen-or-cancel question with the supplied `artifact=question` marker and writes
+publishes one reopen-or-cancel question with the common publication block and writes
 `{"event":"agent-needs-human"}`. A merged change request never uses this path.
 
 The first later authorized unmarked answer runs the reviewer in human-input mode. The reviewer interprets reopen,
@@ -240,12 +239,17 @@ cancel, or unclear intent without reviewing code. Reopen produces `human-answer-
 question. Cancellation removes the activation label, preserves `agent-flow:managed`, and exposes only
 `agent-stage:cancelled`. Human-input mode never publishes a review verdict.
 
+The reader recognizes the previous `agent-flow-control:v1` comment and space-delimited `agent-flow:v1 flow=...`
+publication marker. Neither is human input. Active legacy work records a migration-required local status and causes no
+provider writes. Finish or cancel it with the old controller before switching. Inactive history remains unchanged; the
+new controller does not migrate, rewrite, adopt, or dual-write legacy state.
+
 ## Attempt files
 
 The controller creates one immutable session directory per attempt:
 
 ```text
-/data/sessions/<flow-instance-id>/<attempt-id>/
+/var/lib/agent-flow/sessions/<flow-instance-id>/<attempt-id>/
   context.json
   decision.json
   harness.log
@@ -254,7 +258,7 @@ The controller creates one immutable session directory per attempt:
 
 The harness receives `AGENT_FLOW_CONTEXT_PATH` and `AGENT_FLOW_DECISION_PATH`. The controller treats `decision.json` as
 untrusted input, validates it, discovers and reads the required provider artifacts, then stores its own verified result
-in the control comment. Losing the session directory does not lose operational state.
+in SQLite. Losing the session directory does not lose provider-committed work.
 
 ## Repository workspaces
 
@@ -270,17 +274,19 @@ from `/etc/agent-flow/runtime.yaml`. That file selects an exact 40-character con
 the provider repository allowlist, and the execution bindings. The controller scopes the mounted provider token to a
 matching configuration Git host and keeps verified revision materializations for offline recovery.
 
-The container runs as one controller process and mounts:
-
 - runtime configuration at `/etc/agent-flow/runtime.yaml` as one read-only file;
 - provider and harness credentials under `/run/secrets/agent-flow/` as individual read-only files;
-- persistent Git caches, materialized revisions, worktrees, and sessions at `/var/lib/agent-flow/`;
+- persistent identity, SQLite, Git caches, worktrees, and sessions at `/var/lib/agent-flow/`;
 - temporary harness homes under `/tmp/agent-flow/`.
 
-The controller performs a startup preflight for every harness and provider enabled by the pinned catalog. Missing
-binaries, authentication, or writable mounts fail startup before polling begins.
+The controller creates or validates `controller-id`, opens `execution.sqlite`, binds each provider API scope, and then
+performs startup preflight for every harness and provider enabled by the pinned catalog. Corrupt identities,
+unsupported database versions, missing binaries, failed authentication, or unwritable mounts fail startup before
+readiness. Bootstrap schedules only tickets with the activation label; ordinary polling continues to observe
+cancellation for active workers. Shutdown drains controller work before closing SQLite.
 
-The prototype exposes a health endpoint on the runtime-configured address and port. `/health/live` reports process
-liveness. `/health/ready` returns success only while the controller may start work. `/api/status` reports the pinned
-configuration revision, runtime digest, validation and restart state, active attempt count, and safe restart status.
-These endpoints are read-only and never return secret values or paths.
+The prototype exposes health endpoints on the runtime-configured address and port. `/health/live` reports process
+liveness. `/health/ready` returns success after configuration validation, identity and SQLite initialization, provider
+authentication, filesystem checks, harness preflight, and startup reconciliation complete. `/api/status` exposes safe
+runtime and restart status. The read-only dashboard includes recovery disposition and reason for paused tickets,
+including tickets whose local flow identity could not be reconstructed. Secret values and paths remain excluded.

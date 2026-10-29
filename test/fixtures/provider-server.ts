@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { cp, chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { cp, chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:https";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -11,6 +11,7 @@ import { stringify } from "yaml";
 
 import { RuntimeManager } from "../../src/config/runtime.ts";
 import { parseControlComment } from "../../src/provider/control-comment.ts";
+import { electOwner, parsePublication, type Publication } from "../../src/provider/publication.ts";
 import type {
   AgentDecision,
   AgentReceipt,
@@ -19,6 +20,7 @@ import type {
 import type { NormalizedChangeRequest, ProviderComment, ProviderKind } from "../../src/provider/types.ts";
 import { createProductionDependencies } from "../../src/main.ts";
 import { runPreflight, type ReadyDependencies } from "../../src/preflight.ts";
+import { providerScope } from "../../src/runtime/local-store.ts";
 
 const execFile = promisify(execFileCallback);
 const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../..");
@@ -27,7 +29,7 @@ const NEXT_HEAD = "1111111111111111111111111111111111111111";
 const MAINTAINER = { login: "maintainer", providerId: "7" };
 const CONTROLLER = { login: "controller", providerId: "51" };
 
-type AttemptMode = "success" | "exit-failure" | "block" | "late";
+type AttemptMode = "success" | "exit-failure" | "block" | "late" | "crash-after-publish" | "reuse" | "race";
 
 interface FixtureOptions {
   firstAttempt?: AttemptMode;
@@ -47,6 +49,8 @@ interface StoredChange {
   headSha: string;
   state: "open" | "closed" | "merged";
   updatedAt: string;
+  createdAt: string;
+  body: string;
 }
 
 interface StoredReview {
@@ -63,10 +67,27 @@ interface RoutingEvent {
   target: "claude" | "codex";
 }
 
+interface LabelEvent {
+  id: number;
+  action: "add" | "remove";
+  createdAt: string;
+}
+
 interface RunningController {
   ready: ReadyDependencies;
   abort: AbortController;
   run: Promise<void>;
+}
+
+export interface CollisionResult {
+  ownerSeenByA: string | null;
+  ownerSeenByB: string | null;
+  loserCancelled: boolean;
+  loserWritesAfterObservation: number;
+  loserDisposition: string | null;
+  duplicateCommentsDeleted: number;
+  extraOwnershipReadsBeforePublication: number;
+  requestLog: Array<{ method: string; path: string; phase: string; installation: string | null }>;
 }
 
 export interface FixtureRun {
@@ -79,10 +100,9 @@ export interface FixtureRun {
   close(): Promise<void>;
   closeChangeRequest(): Promise<void>;
   control(): Promise<ControlState>;
-  controlComments(): Promise<ProviderComment[]>;
-  controlStates(): Promise<ControlState[]>;
   controllerLabels(): Promise<string[]>;
   compilations(): Promise<Array<Omit<RoutingEvent, "kind">>>;
+  collide(): Promise<CollisionResult>;
   decisions(): Promise<AgentDecision[]>;
   finish(): Promise<void>;
   humanAnswers(): Promise<ProviderComment[]>;
@@ -92,11 +112,16 @@ export interface FixtureRun {
   reconcile(): Promise<void>;
   receipts(): Promise<AgentReceipt[]>;
   reviewRequests(): Promise<string[]>;
+  controllerCommentWrites(): Promise<number>;
   removeActivation(): Promise<void>;
   restart(): Promise<void>;
+  resetDatabaseAndRestart(): Promise<void>;
+  reactivateAfterStop(): Promise<void>;
+  controllerId(): Promise<string>;
   routing(): Promise<Array<Omit<RoutingEvent, "kind">>>;
   sessions(): Promise<string[]>;
   untilAttempt(status: "started" | "succeeded"): Promise<void>;
+  untilAgentComments(count: number): Promise<void>;
   untilState(state: string): Promise<void>;
   unauthenticatedProviderStatus(): Promise<number>;
 }
@@ -107,6 +132,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   const previous = { PATH: process.env.PATH, NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS };
   let server: Server | undefined;
   let running: RunningController | undefined;
+  let competitor: RunningController | undefined;
   let cleanupPromise: Promise<void> | undefined;
   let certificatesChanged = false;
   let environmentChanged = false;
@@ -118,8 +144,20 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
       running.abort.abort();
       operations.push(running.run);
     }
+    if (competitor) {
+      competitor.abort.abort();
+      operations.push(competitor.run);
+    }
     if (server?.listening) operations.push(closeServer(server));
     const results = await Promise.allSettled(operations);
+    for (const controller of [running, competitor]) {
+      if (!controller) continue;
+      try {
+        controller.ready.store.close();
+      } catch (error) {
+        results.push({ status: "rejected", reason: error });
+      }
+    }
     if (environmentChanged) {
       if (previous.PATH === undefined) delete process.env.PATH;
       else process.env.PATH = previous.PATH;
@@ -195,14 +233,20 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   if (options.forceStartupFailure) throw new Error("forced fixture startup failure");
   running = await startController(runtimePath);
 
+  function currentControl(): ControlState | null {
+    return running!.ready.store.load(providerScope(provider, state.apiUrl), state.ref)?.value.control ?? null;
+  }
+
   async function reconcile(): Promise<void> {
     await running.ready.controller.reconcileNow(state.ref);
-    await waitFor(() => !state.hasUnsettledSuccess());
+    await waitFor(() => !hasUnsettledSuccess(currentControl(), state));
   }
 
   async function stopController(): Promise<void> {
-    running!.abort.abort();
-    await running!.run;
+    const controller = running!;
+    controller.abort.abort();
+    await controller.run;
+    controller.ready.store.close();
   }
 
   async function restart(): Promise<void> {
@@ -210,20 +254,26 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     running = await startController(runtimePath);
   }
 
+  async function resetDatabaseAndRestart(): Promise<void> {
+    await stopController();
+    await unlink(join(dataDirectory, "execution.sqlite"));
+    running = await startController(runtimePath);
+  }
+
   async function untilState(target: string): Promise<void> {
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
-      const control = state.latestControl();
+      const control = currentControl();
       if (control?.stateId === target) return;
       await reconcile();
       await waitFor(() => {
-        const current = state.latestControl();
+        const current = currentControl();
         return current?.stateId === target
           || current?.attemptSeries?.current?.status === "succeeded"
           || current?.attemptSeries?.current?.status === "failed";
       });
     }
-    throw new Error(`fixture did not reach state ${target}: ${JSON.stringify(state.latestControl())}`);
+    throw new Error(`fixture did not reach state ${target}: ${JSON.stringify(currentControl())}`);
   }
 
   async function events(kind: RoutingEvent["kind"]): Promise<Array<Omit<RoutingEvent, "kind">>> {
@@ -245,17 +295,88 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
       await cleanup();
     },
     async closeChangeRequest() { state.setChangeState("closed"); },
-    control: async () => requireControl(state),
-    async controlComments() {
-      return state.comments.filter((comment) => parseControlComment(comment.body) !== null)
-        .map((comment) => state.normalizedComment(comment));
-    },
-    async controlStates() {
-      return state.comments.map((comment) => parseControlComment(comment.body))
-        .filter((control): control is ControlState => control !== null);
-    },
+    control: async () => requireControl(currentControl()),
+    controllerId: async () => (await readFile(join(dataDirectory, "controller-id"), "utf8")).trim(),
     controllerLabels: async () => state.labels.filter((label) => label.startsWith("agent-")).sort(),
     compilations: async () => events("compile"),
+    async collide() {
+      if (options.firstAttempt !== "race") throw new Error("collision fixture requires race mode");
+      const competitorData = join(root, "competitor-data");
+      const competitorHome = join(root, "competitor-home");
+      const competitorRepository = join(root, "competitor-config-repository");
+      await Promise.all([mkdir(competitorData, { mode: 0o700 }), mkdir(competitorHome)]);
+      const competitorToken = join(root, "competitor-token");
+      await writeFile(competitorToken, "fixture-b", { mode: 0o600 });
+      const competitorControllerPath = await createConfiguration(
+        provider,
+        competitorRepository,
+        competitorData,
+        state.apiUrl,
+        address.port + 2,
+        competitorRepository, competitorData, competitorToken,
+        join(competitorHome, ".codex/auth.json"),
+        join(competitorHome, ".claude/.credentials.json"), operatorAuthFile,
+      );
+      await createAuth(competitorHome);
+      competitor = await startController(competitorControllerPath);
+      await waitFor(() => state.currentPublications().length === 2);
+
+      const installations = [
+        { name: "a", running: running!, data: dataDirectory },
+        { name: "b", running: competitor, data: competitorData },
+      ];
+      const publications = state.currentPublications();
+      const publicationBaseline = publications.map(({ key }) => key).sort();
+      const owner = electOwner(publications)!;
+      const scope = providerScope(provider, state.apiUrl);
+      const publicationControllers = publications
+        .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt) || left.key.localeCompare(right.key))
+        .map(({ metadata }) => metadata.controller);
+      const identified = await Promise.all(installations.map(async (installation) => ({
+        ...installation,
+        id: (await readFile(join(installation.data, "controller-id"), "utf8")).trim(),
+      })));
+      const byController = new Map(identified.map((installation) => [installation.id, installation]));
+      const loserId = publicationControllers.find((id) => id !== owner.metadata.controller)!;
+      const loserAttemptId = state.raceAttemptId(loserId);
+      const loserInstallation = byController.get(loserId)!;
+      const reconcileOrder = publicationControllers.toReversed().map((id) => byController.get(id)!);
+      let loserObservedAt = -1;
+      for (const installation of reconcileOrder) {
+        state.phase = `reconcile-${installation.name}`;
+        await installation.running.ready.controller.reconcileNow(state.ref);
+        if (installation.id === loserId) loserObservedAt = state.requestLog.length;
+      }
+      const loserPhase = `reconcile-${loserInstallation.name}`;
+      const firstPublish = state.requestLog.findIndex(({ method }) => method === "PUBLISH");
+      const readsBeforePublish = state.requestLog.slice(0, firstPublish)
+        .filter(({ method, path }) => method === "GET" && path.endsWith(`/issues/${state.number}/comments`)).length;
+      state.phase = "release";
+      state.releaseRace();
+      await waitFor(() => state.activeAttempts.size === 0);
+      const ownerInstallation = byController.get(owner.metadata.controller)!;
+      await waitFor(() => ownerInstallation.running.ready.store.load(scope, state.ref)?.value.owner?.controllerId
+        === owner.metadata.controller);
+      const ownerSeenByA = identified[0]!.running.ready.store.load(scope, state.ref)?.value.owner?.controllerId ?? null;
+      const ownerSeenByB = identified[1]!.running.ready.store.load(scope, state.ref)?.value.owner?.controllerId ?? null;
+      const loserDisposition = loserInstallation.running.ready.store.load(scope, state.ref)?.value.disposition ?? null;
+      const writes = state.requestLog.filter(({ phase, installation, method, path }, index) =>
+        method !== "GET" && path.startsWith("/api/") && installation === loserInstallation.name
+        && (phase === loserPhase || index >= loserObservedAt));
+      const remainingPublications = state.currentPublications().map(({ key }) => key).sort();
+      assert.deepEqual(remainingPublications, publicationBaseline);
+      assert.equal(remainingPublications.length, 2);
+      return {
+        ownerSeenByA,
+        ownerSeenByB,
+        loserCancelled: state.cancelledAttempts.has(loserAttemptId),
+        loserWritesAfterObservation: writes.length,
+        loserDisposition,
+        duplicateCommentsDeleted: publicationBaseline.length - remainingPublications.length,
+        extraOwnershipReadsBeforePublication: Math.max(0, readsBeforePublish - 2),
+        requestLog: [...state.requestLog],
+      };
+    },
     async decisions() {
       const decisions: AgentDecision[] = [];
       for (const session of await run.sessions()) {
@@ -285,10 +406,24 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     async maximumConcurrentAttempts() { return state.maximumActiveAttempts; },
     async mergeChangeRequest() { state.setChangeState("merged"); },
     reconcile,
-    async receipts() { return state.acceptedReceipts; },
+    async receipts() {
+      const latest = currentControl()?.latestReceipt;
+      if (latest) state.recordAcceptedReceipt(latest);
+      return state.acceptedReceipts;
+    },
     async reviewRequests() { return [...state.reviewRequests]; },
+    async controllerCommentWrites() {
+      return state.requestLog.filter(({ method, path }) => ["POST", "PUT", "PATCH"].includes(method)
+        && (/\/issues(?:\/\d+)?\/(?:comments|notes)(?:\/\d+)?$/.test(path))).length;
+    },
     async removeActivation() { state.removeActivation(); },
     restart,
+    resetDatabaseAndRestart,
+    async reactivateAfterStop() {
+      await stopController();
+      state.activate();
+      running = await startController(runtimePath);
+    },
     routing: async () => state.routing,
     async sessions() {
       const sessions = join(dataDirectory, "sessions");
@@ -299,12 +434,15 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     },
     async untilAttempt(status) {
       await waitFor(() => {
-        const control = state.latestControl();
+        const control = currentControl();
         const current = control?.attemptSeries?.current;
         return control?.attemptSeries?.stateId === control?.stateId
           && current?.status === status
           && (status !== "started" || state.readyAttempts.has(current.attemptId));
       });
+    },
+    async untilAgentComments(count) {
+      await waitFor(() => state.comments.filter((comment) => comment.body.startsWith("<!-- agent-flow:v1 {")).length >= count);
     },
     untilState,
     async unauthenticatedProviderStatus() {
@@ -333,14 +471,20 @@ class FixtureState {
   readonly acceptedReceipts: AgentReceipt[] = [];
   readonly nextModes = new Map<string, AttemptMode[]>();
   readonly activeAttempts = new Set<string>();
+  readonly cancelledAttempts = new Set<string>();
   readonly readyAttempts = new Set<string>();
   readonly routing: Array<Omit<RoutingEvent, "kind">> = [];
+  readonly requestLog: Array<{ method: string; path: string; phase: string; installation: string | null }> = [];
+  readonly labelEvents: LabelEvent[] = [];
   labels = ["agent-flow:development"];
   open = true;
   change: StoredChange | null = null;
   activationId = 1;
   maximumActiveAttempts = 0;
   origin = "";
+  phase = "initial";
+  #raceResponses: Array<{ context: AttemptContext; response: import("node:http").ServerResponse }> = [];
+  #raceParticipants: number;
   #commentId = 100;
   #reviewId = 700;
   #lastTimestamp = Date.now();
@@ -350,7 +494,9 @@ class FixtureState {
     this.repository = provider === "github" ? "owner/repo" : "group/project";
     this.number = provider === "github" ? 17 : 23;
     this.ref = { provider, repository: this.repository, number: this.number };
-    if (firstAttempt) this.nextModes.set("assessment", [firstAttempt]);
+    this.#raceParticipants = firstAttempt === "race" ? 2 : 0;
+    this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.timestamp() });
+    if (firstAttempt && firstAttempt !== "race") this.nextModes.set("assessment", [firstAttempt]);
   }
 
   get apiUrl(): string {
@@ -362,12 +508,13 @@ class FixtureState {
   activate(): void {
     if (!this.labels.includes("agent-flow:development")) this.labels.push("agent-flow:development");
     this.activationId += 1;
-    this.touch();
+    this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
   }
 
   removeActivation(): void {
     this.labels = this.labels.filter((label) => label !== "agent-flow:development");
-    this.touch();
+    this.activationId += 1;
+    this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
   }
 
   changeHead(): void {
@@ -390,16 +537,10 @@ class FixtureState {
     return comment;
   }
 
-  latestControl(): ControlState | null {
-    return this.comments
-      .map((comment) => parseControlComment(comment.body))
-      .filter((control): control is ControlState => control !== null)
-      .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
-  }
-
-  hasUnsettledSuccess(): boolean {
-    const current = this.latestControl()?.attemptSeries?.current;
-    return current?.status === "started" && !this.activeAttempts.has(current.attemptId);
+  recordAcceptedReceipt(receipt: AgentReceipt): void {
+    if (!this.acceptedReceipts.some(({ attemptId }) => attemptId === receipt.attemptId)) {
+      this.acceptedReceipts.push(receipt);
+    }
   }
 
   normalizedComment(comment: StoredComment): ProviderComment {
@@ -429,9 +570,22 @@ class FixtureState {
 
   async handle(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", this.origin);
+    this.requestLog.push({
+      method: request.method ?? "GET",
+      path: url.pathname,
+      phase: this.phase,
+      installation: this.installation(request),
+    });
     const body = await requestBody(request);
     if (url.pathname === "/__fixture/attempt" && request.method === "POST") {
       return this.attempt(body as AttemptContext, request.headers["x-fixture-target"], response);
+    }
+    if (url.pathname === "/__fixture/cancelled" && request.method === "POST") {
+      const attemptId = String((body as { attemptId: string }).attemptId);
+      this.cancelledAttempts.add(attemptId);
+      this.activeAttempts.delete(attemptId);
+      this.readyAttempts.delete(attemptId);
+      return json(response, 200, { ok: true });
     }
     if (url.pathname === "/__fixture/completed" && request.method === "POST") {
       const attemptId = String((body as { attemptId: string }).attemptId);
@@ -464,12 +618,21 @@ class FixtureState {
   }
 
   private validProviderHeaders(request: import("node:http").IncomingMessage): boolean {
-    if (request.headers.authorization !== "Bearer fixture") return false;
+    if (this.installation(request) === null) return false;
     if (this.provider === "github") {
       return request.headers.accept === "application/vnd.github+json"
         && request.headers["x-github-api-version"] === "2022-11-28";
     }
     return request.headers.accept === "application/json";
+  }
+
+  private installation(request: import("node:http").IncomingMessage): string | null {
+    switch (request.headers.authorization) {
+      case "Bearer fixture":
+      case "Bearer fixture-a": return "a";
+      case "Bearer fixture-b": return "b";
+      default: return null;
+    }
   }
 
   private attempt(
@@ -478,6 +641,7 @@ class FixtureState {
     response: import("node:http").ServerResponse,
   ): void {
     const control = context.controlState;
+    if (control.latestReceipt) this.recordAcceptedReceipt(control.latestReceipt);
     const attemptId = control.attemptSeries?.current?.attemptId;
     if (!attemptId) return json(response, 400, { message: "attempt is missing" });
     if (target !== "claude" && target !== "codex") {
@@ -486,17 +650,64 @@ class FixtureState {
     this.routing.push({ agentId: control.attemptSeries!.agentId, target });
     this.activeAttempts.add(attemptId);
     this.maximumActiveAttempts = Math.max(this.maximumActiveAttempts, this.activeAttempts.size);
+    if (control.stateId === "assessment" && this.#raceParticipants > 0) {
+      this.#raceResponses.push({ context, response });
+      this.#raceParticipants -= 1;
+      if (this.#raceParticipants === 0) {
+        for (const participant of this.#raceResponses) {
+          this.requestLog.push({
+            method: "PUBLISH",
+            path: this.commentUrl("new"),
+            phase: "publication",
+            installation: null,
+          });
+          this.publish(participant.context, participant.context.controlState.attemptSeries!.current!.attemptId);
+        }
+      }
+      return;
+    }
     const key = control.stateId === "needs-human" ? "needs-human" : control.stateId;
     const queue = this.nextModes.get(key) ?? [];
     const mode = queue.shift() ?? "success";
-    if (mode !== "success") return json(response, 200, { mode });
+    if (mode === "crash-after-publish") {
+      this.publish(context, attemptId);
+      this.nextModes.set(key, ["reuse"]);
+      return;
+    }
+    if (mode !== "success" && mode !== "reuse") return json(response, 200, { mode });
 
-    const decision = this.publish(context, attemptId);
+    const decision = this.publish(context, attemptId, mode === "reuse");
     json(response, 200, { mode, decision });
   }
 
-  private publish(context: AttemptContext, attemptId: string): AgentDecision {
-    const flowInstanceId = context.controlState.flowInstanceId;
+  currentPublications(): Publication[] {
+    return this.comments.flatMap((comment) => {
+      const parsed = parsePublication(comment.body);
+      return parsed.kind === "current" ? [{
+        key: `${this.provider}:comment:${comment.id}`,
+        createdAt: comment.createdAt,
+        metadata: parsed.metadata,
+      }] : [];
+    });
+  }
+
+  raceAttemptId(controllerId: string): string {
+    const participant = this.#raceResponses.find(({ context }) => {
+      const parsed = parsePublication(context.publicationMarker);
+      return parsed.kind === "current" && parsed.metadata.controller === controllerId;
+    });
+    const attemptId = participant?.context.controlState.attemptSeries?.current?.attemptId;
+    if (!attemptId) throw new Error(`race attempt is missing for controller ${controllerId}`);
+    return attemptId;
+  }
+
+  releaseRace(): void {
+    for (const { response } of this.#raceResponses.splice(0)) {
+      if (!response.destroyed) json(response, 200, { mode: "success", decision: { event: "agent-succeeded" } });
+    }
+  }
+
+  private publish(context: AttemptContext, attemptId: string, reuse = false): AgentDecision {
     const state = context.controlState.stateId;
     if (context.mode === "human-input") {
       const source = context.artifacts
@@ -512,8 +723,7 @@ class FixtureState {
             : lower.includes("unclear") ? "unclear" as const
               : "approved" as const;
       if ((verdict === "question" || verdict === "unclear")) {
-        const marker_ = marker(flowInstanceId, attemptId, "question");
-        this.addComment(`${marker_}\nPlease clarify the requested action.`);
+        this.addComment(`${context.publicationMarker}\nPlease clarify the requested action.`);
       }
       if (state === "needs-human") {
         return { event: verdict === "cancelled" ? "human-answer-cancelled"
@@ -526,37 +736,51 @@ class FixtureState {
     }
     if (state === "assessment" || state === "planning") {
       const artifactKind = state === "assessment" ? "assessment" as const : "plan" as const;
-      const markerText = marker(flowInstanceId, attemptId, artifactKind);
-      this.addComment(`${markerText}\nFixture ${artifactKind}.`);
+      const existing = context.artifacts.some((artifact) => "body" in artifact
+        && artifact.body.split(/\r?\n/).includes(context.publicationMarker));
+      if (!reuse || !existing) this.addComment(`${context.publicationMarker}\nFixture ${artifactKind}.`);
       return { event: "agent-succeeded" };
     }
     if (state === "development") {
-      this.change ??= { number: this.provider === "github" ? 31 : 41, headSha: HEAD, state: "open", updatedAt: this.touch() };
+      const timestamp = this.touch();
+      this.change ??= {
+        number: this.provider === "github" ? 31 : 41,
+        headSha: HEAD,
+        state: "open",
+        body: `${context.publicationMarker}\nFixture change request.`,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
       return { event: "agent-succeeded" };
     }
     if (state === "review") {
       if (!this.change) throw new Error("review change request is missing");
-      this.addReview(flowInstanceId, attemptId, "approved");
+      this.addReview(context.publicationMarker, "approved");
       return { event: "review-approved" };
     }
     if (state === "needs-human" && this.change?.state === "closed") {
-      const marker_ = marker(flowInstanceId, attemptId, "question");
-      this.addComment(`${marker_}\nReopen the existing change request or cancel the flow?`);
+      this.addComment(`${context.publicationMarker}\nReopen the existing change request or cancel the flow?`);
       return { event: "agent-needs-human" };
     }
     throw new Error(`unsupported fixture attempt state: ${state}`);
   }
 
-  private addReview(flow: string, attempt: string, verdict: StoredReview["verdict"]) {
+  private addReview(publicationMarker: string, verdict: StoredReview["verdict"]) {
     const id = String(++this.#reviewId);
     const headSha = this.change!.headSha;
-    const body = `${marker(flow, attempt, "review")}\n<!-- agent-flow-review:v1 head=${headSha} verdict=${verdict} -->\nFixture review.`;
+    const body = `${publicationMarker}\n<!-- agent-flow-review:v1 head=${headSha} verdict=${verdict} -->\nFixture review.`;
     this.reviews.set(id, { id, body, headSha, verdict, createdAt: this.touch() });
     return { kind: "review" as const, id, url: this.reviewUrl(id), headSha, verdict };
   }
 
   private github(method: string, url: URL, body: unknown, response: import("node:http").ServerResponse): void {
     const path = url.pathname.slice("/api/github/".length);
+    if (method === "POST" && path === "graphql") {
+      const ids = (body as { variables?: { ids?: string[] } })?.variables?.ids;
+      return json(response, 200, ids
+        ? { data: { nodes: ids.map((id) => ({ id, __typename: "PullRequestReview", lastEditedAt: null })) } }
+        : { data: { repository: { pullRequest: { lastEditedAt: null } } } });
+    }
     if (method === "GET" && path === "user") return json(response, 200, { id: 51, login: "controller" });
     if (method === "GET" && path === `repos/${this.repository}`) return json(response, 200, this.githubRepository());
     if (method === "GET" && path === `repos/${this.repository}/issues`) return json(response, 200, this.listIssue(url));
@@ -582,10 +806,22 @@ class FixtureState {
       const value = decodeURIComponent(label[1]!);
       const present = this.labels.includes(value);
       this.labels = this.labels.filter((candidate) => candidate !== value);
+      if (present && value === "agent-flow:development") {
+        this.activationId += 1;
+        this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
+      }
       return json(response, present ? 200 : 404, present ? this.labels.map((name) => ({ name })) : { message: "missing" });
     }
     if (method === "POST" && path === `repos/${this.repository}/issues/${this.number}/labels`) {
-      for (const value of (body as { labels: string[] }).labels) if (!this.labels.includes(value)) this.labels.push(value);
+      for (const value of (body as { labels: string[] }).labels) {
+        if (!this.labels.includes(value)) {
+          this.labels.push(value);
+          if (value === "agent-flow:development") {
+            this.activationId += 1;
+            this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
+          }
+        }
+      }
       this.touch();
       return json(response, 200, this.labels.map((name) => ({ name })));
     }
@@ -623,7 +859,7 @@ class FixtureState {
     if (method === "GET" && path === project) return json(response, 200, this.gitlabProject());
     if (method === "GET" && path === `${project}/issues`) return json(response, 200, this.listIssue(url));
     if (method === "GET" && path === `${project}/issues/${this.number}`) return json(response, 200, this.gitlabIssue());
-    if (method === "GET" && path === `${project}/issues/${this.number}/resource_label_events`) return json(response, 200, [this.gitlabActivation()]);
+    if (method === "GET" && path === `${project}/issues/${this.number}/resource_label_events`) return json(response, 200, this.gitlabActivationEvents());
     if (method === "GET" && path === `${project}/issues/${this.number}/notes`) return json(response, 200, this.comments.map((comment) => this.gitlabNote(comment)));
     if (method === "GET" && path === `${project}/issues/${this.number}/related_merge_requests`) return json(response, 200, this.change ? [this.gitlabRelated()] : []);
     const member = new RegExp(`^${project}/members/all/(\\d+)$`).exec(path);
@@ -643,10 +879,21 @@ class FixtureState {
     if (method === "PUT" && path === `${project}/issues/${this.number}`) {
       const update = body as { add_labels?: string; remove_labels?: string };
       for (const value of update.remove_labels?.split(",").filter(Boolean) ?? []) {
+        const present = this.labels.includes(value);
         this.labels = this.labels.filter((candidate) => candidate !== value);
+        if (present && value === "agent-flow:development") {
+          this.activationId += 1;
+          this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
+        }
       }
       for (const value of update.add_labels?.split(",").filter(Boolean) ?? []) {
-        if (!this.labels.includes(value)) this.labels.push(value);
+        if (!this.labels.includes(value)) {
+          this.labels.push(value);
+          if (value === "agent-flow:development") {
+            this.activationId += 1;
+            this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
+          }
+        }
       }
       this.touch();
       return json(response, 200, this.gitlabIssue());
@@ -715,7 +962,13 @@ class FixtureState {
   }
 
   private githubTimeline() {
-    const events: unknown[] = [{ id: this.activationId, event: "labeled", created_at: this.timestamp(), actor: this.githubActor(MAINTAINER), label: { name: "agent-flow:development" } }];
+    const events: unknown[] = this.labelEvents.map((event) => ({
+      id: event.id,
+      event: event.action === "add" ? "labeled" : "unlabeled",
+      created_at: event.createdAt,
+      actor: this.githubActor(MAINTAINER),
+      label: { name: "agent-flow:development" },
+    }));
     if (this.change) events.push({
       id: 900,
       event: "cross-referenced",
@@ -739,6 +992,8 @@ class FixtureState {
       html_url: this.changeUrl(),
       state: this.change.state === "open" ? "open" : "closed",
       merged_at: this.change.state === "merged" ? this.change.updatedAt : null,
+      body: this.change.body,
+      created_at: this.change.createdAt,
       updated_at: this.change.updatedAt,
       head: { sha: this.change.headSha },
       user: this.githubActor({ login: "developer", providerId: "8" }),
@@ -746,7 +1001,7 @@ class FixtureState {
   }
 
   private githubReview(review: StoredReview) {
-    return { id: Number(review.id), html_url: this.reviewUrl(review.id), body: review.body, state: review.verdict === "approved" ? "APPROVED" : review.verdict === "changes-requested" ? "CHANGES_REQUESTED" : "COMMENTED", commit_id: review.headSha, submitted_at: review.createdAt, user: this.githubActor(CONTROLLER) };
+    return { id: Number(review.id), node_id: `PRR_${review.id}`, html_url: this.reviewUrl(review.id), body: review.body, state: review.verdict === "approved" ? "APPROVED" : review.verdict === "changes-requested" ? "CHANGES_REQUESTED" : "COMMENTED", commit_id: review.headSha, submitted_at: review.createdAt, user: this.githubActor(CONTROLLER) };
   }
 
   private gitlabProject() {
@@ -757,8 +1012,14 @@ class FixtureState {
     return { id: 2300, iid: this.number, title: "Fixture ticket", description: "Exercise the configured workflow.", state: this.open ? "opened" : "closed", labels: this.labels, updated_at: this.timestamp(), web_url: `${this.origin}/api/gitlab/${this.repository}/-/issues/${this.number}` };
   }
 
-  private gitlabActivation() {
-    return { id: this.activationId, action: "add", label: { name: "agent-flow:development" }, user: { id: 7, username: "maintainer" }, created_at: this.timestamp() };
+  private gitlabActivationEvents() {
+    return this.labelEvents.map((event) => ({
+      id: event.id,
+      action: event.action,
+      label: { name: "agent-flow:development" },
+      user: { id: 7, username: "maintainer" },
+      created_at: event.createdAt,
+    }));
   }
 
   private gitlabNote(comment: StoredComment) {
@@ -769,7 +1030,7 @@ class FixtureState {
 
   private gitlabMerge() {
     if (!this.change) throw new Error("merge request is missing");
-    return { id: 4100, iid: this.change.number, project_id: 100, state: this.change.state === "open" ? "opened" : this.change.state, sha: this.change.headSha, web_url: this.changeUrl(), author: { id: 8, username: "developer" }, updated_at: this.change.updatedAt };
+    return { id: 4100, iid: this.change.number, project_id: 100, state: this.change.state === "open" ? "opened" : this.change.state, sha: this.change.headSha, web_url: this.changeUrl(), description: this.change.body, author: { id: 8, username: "developer" }, created_at: this.change.createdAt, updated_at: this.change.updatedAt };
   }
 
   private gitlabReview(review: StoredReview) {
@@ -830,10 +1091,7 @@ interface AttemptContext {
   controlState: ControlState;
   artifacts: Array<Record<string, unknown>>;
   mode: "stage" | "human-input";
-}
-
-function marker(flow: string, attempt: string, artifact: string): string {
-  return `<!-- agent-flow:v1 flow=${flow} attempt=${attempt} artifact=${artifact} -->`;
+  publicationMarker: string;
 }
 
 async function createCertificate(certificate: string, key: string): Promise<void> {
@@ -969,13 +1227,13 @@ async function runDockerFixture(root: string, port: number, healthPort: number):
 function driveHumanActions(state: FixtureState): void {
   const handled = new Set<string>();
   setInterval(() => {
-    const control = state.latestControl();
-    if (!control || handled.has(control.stateId)) return;
-    if (control.stateId === "assessment-review" || control.stateId === "plan-review") {
-      handled.add(control.stateId);
+    const stage = state.labels.find((label) => label.startsWith("agent-stage:"))?.slice("agent-stage:".length);
+    if (!stage || handled.has(stage)) return;
+    if (stage === "assessment-review" || stage === "plan-review") {
+      handled.add(stage);
       state.addComment("approved", MAINTAINER);
-    } else if (control.stateId === "awaiting-merge") {
-      handled.add(control.stateId);
+    } else if (stage === "awaiting-merge") {
+      handled.add(stage);
       state.setChangeState("merged");
     }
   }, 20);
@@ -1014,10 +1272,14 @@ async function startController(runtimePath: string): Promise<RunningController> 
   return { ready, abort, run };
 }
 
-function requireControl(state: FixtureState): ControlState {
-  const control = state.latestControl();
+function requireControl(control: ControlState | null): ControlState {
   if (!control) throw new Error("control comment is missing");
   return control;
+}
+
+function hasUnsettledSuccess(control: ControlState | null, state: FixtureState): boolean {
+  const current = control?.attemptSeries?.current;
+  return current?.status === "started" && !state.activeAttempts.has(current.attemptId);
 }
 
 async function requestBody(request: import("node:http").IncomingMessage): Promise<unknown> {

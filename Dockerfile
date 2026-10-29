@@ -68,6 +68,8 @@ COPY --from=build --chown=agent:agent /app/package.json ./package.json
 COPY --from=tools --chown=agent:agent /tools/node_modules /opt/tools/node_modules
 COPY --chown=agent:agent schemas ./schemas
 
+RUN node -e "const { DatabaseSync } = require('node:sqlite'); new DatabaseSync(':memory:').close()"
+
 ENV PATH=/opt/tools/node_modules/.bin:$PATH \
     HOME=/home/agent
 
