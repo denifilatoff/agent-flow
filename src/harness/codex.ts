@@ -3,8 +3,10 @@ import { join } from "node:path";
 
 import { assertSafeFile } from "../runtime/filesystem.ts";
 import type { HarnessAdapter, HarnessRunInput, HarnessResult } from "./types.ts";
+import { CodexUsage, collectCodexUsage } from "./usage.ts";
 import {
   HarnessPreflightError,
+  HarnessProcessError,
   buildPrompt,
   copyRegularFile,
   copyRegularTree,
@@ -91,12 +93,14 @@ export function createCodexAdapter(
         decisionPath,
       ),
       );
+      const observer = new CodexUsage();
       try {
         if (!home) throw new HarnessPreflightError("codex");
-        return await runHarnessProcess("codex", {
+        const result = await runHarnessProcess("codex", {
         file: "codex",
         args: [
           "exec",
+          "--json",
           "--model", input.execution.model,
           "--config", `model_reasoning_effort=${JSON.stringify(input.execution.reasoning)}`,
           "--approve-for-me",
@@ -112,7 +116,16 @@ export function createCodexAdapter(
         prompt,
         timeoutSeconds: input.timeoutSeconds,
         signal: input.signal,
+        observer,
         }, dependencies);
+        const usage = await collectCodexUsage(home, observer).catch(() => undefined);
+        return { ...result, ...(usage ? { usage } : {}) };
+      } catch (error) {
+        if (error instanceof HarnessProcessError && home) {
+          const usage = await collectCodexUsage(home, observer).catch(() => undefined);
+          if (usage) error.usage = usage;
+        }
+        throw error;
       } finally {
         await rm(home, { recursive: true, force: true });
       }

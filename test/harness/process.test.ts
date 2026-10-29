@@ -283,6 +283,7 @@ test("runs Codex with canonical, unambiguous private attempt paths", async (t) =
   assert.deepEqual([call.file, ...call.args], [
     "codex",
     "exec",
+    "--json",
     "--model",
     "codex-fixture-model",
     "--config",
@@ -393,7 +394,7 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
   const call = processes.calls[0]!;
   t.after(() => call.child.finish(0, null));
   assert.deepEqual([call.file, ...call.args], [
-    "claude", "--agent", "developer", "--model", "claude-fixture-model", "--effort", "high", "-p",
+    "claude", "--agent", "developer", "--model", "claude-fixture-model", "--effort", "high", "--output-format", "stream-json", "--verbose", "-p",
   ]);
   assert.deepEqual(call.args.filter((argument) => argument.includes("ticket 17")), []);
   assert.match(call.env.CLAUDE_CONFIG_DIR!, /agent-flow\/claude-/);
@@ -431,6 +432,23 @@ If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_D
   );
   call.child.finish(0, null);
   assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
+});
+
+test("retains structured Claude usage on an unsuccessful process exit", async (t) => {
+  const fixture = await runFixture("claude");
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const processes = processFixture();
+  const adapter = createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies);
+  const pending = adapter.run(fixture.input);
+  await waitForSpawn(processes.calls);
+  const call = processes.calls[0]!;
+  call.child.stdout.write(await readFile("test/fixtures/harness/claude-delegation.jsonl"));
+  call.child.stderr.write('{"type":"result","total_cost_usd":999}\n');
+  call.child.finish(1, null);
+  const result = await pending;
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.usage?.totalTokens, 1100);
+  assert.ok(result.usage!.costUsd! < 1);
 });
 
 test("passes a GitLab personal token without seeding OAuth metadata", async (t) => {
