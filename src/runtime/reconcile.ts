@@ -692,7 +692,7 @@ function recoveryIteration(
   if (!committed) {
     return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
   }
-  const active = evidence.publications
+  let active = evidence.publications
     .filter(({ metadata }) => ownerController === null || metadata.controller === ownerController)
     .filter((publication) => {
       if (publication.ownershipEligible === false
@@ -704,6 +704,33 @@ function recoveryIteration(
     })
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
+  const documentationEnabled = Object.values(bundle.flow.spec.states).some((state) => state.resultContract === "documentation");
+  if (documentationEnabled) {
+    const rework = evidence.reviews.filter((review) => review.verdict === "changes-requested"
+      && evidence.publications.some((publication) => publication.metadata.controller === ownerController
+        && publication.ownershipEligible !== false
+        && hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", review.id)))
+      .toSorted((left, right) => Date.parse(right.submittedAt) - Date.parse(left.submittedAt))[0];
+    if (rework && linked && rework.headSha !== linked.headSha) {
+      const boundary = Date.parse(rework.submittedAt);
+      active = active.filter((publication) => {
+        if (Date.parse(publication.createdAt) > boundary) return true;
+        const kind = publicationObjectKind(publication.key, evidence.snapshot.ref, bundle);
+        if (kind === "review") return false;
+        if (kind !== "comment") return true;
+        const comment = evidence.snapshot.comments.find(({ id }) =>
+          hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", id));
+        const report = comment && parseDocumentation(comment.body);
+        if (!report || report.change !== linked.number) return true;
+        // An ordered review on the report's result head proves that this report belongs to a consumed iteration.
+        return !evidence.reviews.some((review) => review.headSha === report.resultHead
+          && Date.parse(review.submittedAt) > Date.parse(publication.createdAt)
+          && Date.parse(review.submittedAt) <= boundary
+          && evidence.publications.some((candidate) => candidate.metadata.controller === ownerController
+            && hasPublicationIdentity(candidate.key, evidence.snapshot.ref, "review", review.id)));
+      });
+    }
+  }
   const kinds = active.map((publication) => {
     const kind = publicationObjectKind(publication.key, evidence.snapshot.ref, bundle);
     if (kind !== "comment") return kind;

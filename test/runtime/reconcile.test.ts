@@ -3051,3 +3051,31 @@ test("verified documentation advances review on its result head and rejects edit
     assert.equal(runtime.launcher.requests[0]?.control.changeRequest?.headSha, tampered ? OLD_HEAD : NEW_HEAD);
   });
 });
+
+test("provider-only documentation recovery excludes reports consumed by earlier rework reviews", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const report = (id: string, head: string, time: string) => comment(id,
+    `${marker}\n<!-- agent-flow-documentation:v1 ${JSON.stringify({ change: 31, inputHead: head, resultHead: head })} -->\nChecked existing documentation against the full implementation.`, MAINTAINER, time);
+  const old = report("old-doc", OLD_HEAD, "2026-08-26T10:40:00.000Z");
+  const current = report("current-doc", NEW_HEAD, "2026-08-26T11:40:00.000Z");
+  const change = changeRequest({ headSha: NEW_HEAD, body: `${marker}\nImplementation.`, createdAt: "2026-08-26T10:30:00.000Z" });
+  const review: NormalizedReview = { id: "old-review", url: "https://github.example.test/reviews/1", actor: MAINTAINER,
+    submittedAt: "2026-08-26T11:00:00.000Z", headSha: OLD_HEAD, verdict: "changes-requested",
+    body: `${marker}\n<!-- agent-flow-review:v1 head=${OLD_HEAD} verdict=changes-requested -->\nRework required.` };
+  provider.snapshot.labels.push("agent-stage:documentation", "agent-flow:managed");
+  provider.snapshot.comments.push(old, current); provider.snapshot.changeRequest = change;
+  provider.recoveryEvidence = recoveryEvidence(provider, [
+    { key: publicationKey("change-request", "31"), createdAt: change.createdAt!, metadata: { config: SHA, controller: FLOW_1 } },
+    ...[old, current].map((c) => ({ key: publicationKey("comment", c.id), createdAt: c.createdAt, metadata: { config: SHA, controller: FLOW_1 } })),
+    { key: publicationKey("review", review.id), createdAt: review.submittedAt, metadata: { config: SHA, controller: FLOW_1 } },
+  ], { changes: [change], reviews: [review] });
+  const runtime = await localRuntime(t, provider);
+  const configured = documentationBundle();
+  runtime.configured.config = { loadCurrent: async () => configured, loadPinned: async () => configured };
+  const result = await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(result.stateId, "documentation");
+  assert.equal(runtime.launcher.requests.length, 1);
+  assert.ok(runtime.launcher.requests[0]!.publicationKeys.includes(publicationKey("comment", old.id)));
+  assert.ok(!runtime.launcher.requests[0]!.publicationKeys.includes(publicationKey("comment", current.id)));
+});
