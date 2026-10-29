@@ -36,8 +36,8 @@ without weakening these invariants.
 - The entire control record is encoded inside an HTML comment. GitHub and GitLab do not show it in the rendered ticket.
 - The control comment contains the flow instance identity and pinned configuration revision. Its SHA field changes only
   during an explicit migration.
-- The current XState state is exposed as exactly one controller-owned `agent-stage:<state-id>` label for provider
-  searches and queues. There is no separate `agent-status:*` label dimension.
+- The current XState state is exposed as exactly one controller-owned `agent-stage:*` label for provider searches
+  and queues. Both merge-wait states use `agent-stage:awaiting-merge`. There is no separate `agent-status:*` label dimension.
 - One ticket has at most one active flow instance.
 
 ### Flow versioning
@@ -308,11 +308,12 @@ Provider labels expose the selected flow and the current machine state:
 - `agent-flow:development` activates the development flow;
 - `bugfix` activates the bugfix branch;
 - `agent-flow:managed` marks tickets with flow history;
-- exactly one `agent-stage:<state-id>` label maps directly to the current state ID from the pinned YAML flow.
+- exactly one `agent-stage:*` label exposes the current stage. Both `awaiting-merge` and `bug-awaiting-merge` use
+  `agent-stage:awaiting-merge`; other states use `agent-stage:<state-id>`.
 
-The controller removes the previous `agent-stage:*` label when it applies a state transition. It never derives a
-second status label from the state. Queue queries, the state graph, and the XState interpreter therefore use the same
-state ID.
+The controller removes the previous `agent-stage:*` label when it applies a state transition. It also replaces a legacy
+`agent-stage:bug-awaiting-merge` label during reconciliation. Internal merge-wait states retain their scenario-specific
+return paths when a pull or merge request changes or closes without merging.
 
 The initial development flow should use the same general vocabulary as the autonomous development experiments in
 `qubership-profiler-agent`: `assessment`, `assessment-review`, `planning`, `plan-review`, `replan`, `implement`,
@@ -365,7 +366,7 @@ the default agent behavior; external APM artifacts are optional, narrow dependen
 | Flow activation | Authorized `agent-flow:development` or `bugfix` label change |
 | Ticket has flow history | Permanent controller-owned `agent-flow:managed` label |
 | Flow instance and configuration version | One mutable control comment with instance identity and config SHA |
-| Current state | Exactly one controller-owned `agent-stage:<state-id>` label |
+| Current state | Exactly one controller-owned `agent-stage:*` label; merge waits share `agent-stage:awaiting-merge` |
 | Assessment, plan, and diagnostic | Full machine-marked ticket comments |
 | Agent question | Machine-marked ticket comment plus `agent-stage:needs-human` |
 | Human answer | First later authorized, unmarked ticket comment |
