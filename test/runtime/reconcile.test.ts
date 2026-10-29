@@ -2950,3 +2950,66 @@ test("warm review rerouting rejects a replacement linked change request before c
   assert.equal(runtime.writer.load!(TICKET)?.value.control?.changeRequest?.number, 31);
   assert.equal(runtime.writer.load!(TICKET)?.value.control?.stateId, "awaiting-merge");
 });
+
+function documentationBundle(): ConfigBundle {
+  const value = structuredClone(BUNDLE);
+  value.flow.spec.initial = "development";
+  value.flow.spec.states.development!.on!["agent-succeeded"]!.target = "documentation";
+  value.flow.spec.states.documentation = { ...structuredClone(value.flow.spec.states.development!),
+    resultContract: "documentation", on: {
+      "agent-succeeded": { target: "review", guards: ["receipt-valid"] },
+      "agent-needs-human": { target: "needs-human", actions: ["remember-resume-state"] },
+      "attempts-exhausted": { target: "blocked", actions: ["remember-resume-state"] },
+    } };
+  return value;
+}
+
+test("documentation recovery separates final reports from generic comments and preserves retry input", async (t) => {
+  for (const reportKind of ["noop", "edited", "question", "missing", "wrong-request"] as const) {
+    await t.test(reportKind, async (context) => {
+      const provider = new FakeProvider();
+      const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+      const linked = changeRequest({ body: `${marker}\nImplementation.`, createdAt: "2026-08-26T10:30:00.000Z" });
+      const report = comment("documentation", `${marker}\n` + (reportKind === "question" ? "Which API behavior is intended?" :
+        `<!-- agent-flow-documentation:v1 ${JSON.stringify({ change: reportKind === "wrong-request" ? 99 : linked.number,
+          inputHead: reportKind === "edited" ? NEW_HEAD : OLD_HEAD, resultHead: OLD_HEAD })} -->\nNo documentation updates needed; checked all changed APIs.`), MAINTAINER, "2026-08-26T11:30:00.000Z");
+      provider.snapshot.labels.push("agent-stage:documentation", "agent-flow:managed");
+      provider.snapshot.changeRequest = linked;
+      if (reportKind !== "missing") provider.snapshot.comments.push(report);
+      provider.recoveryEvidence = recoveryEvidence(provider, [
+        { key: publicationKey("change-request", String(linked.number)), createdAt: linked.createdAt!, metadata: { config: SHA, controller: FLOW_1 } },
+        ...provider.snapshot.comments.map((c) => ({ key: publicationKey("comment", c.id), createdAt: c.createdAt, metadata: { config: SHA, controller: FLOW_1 } })),
+      ], { changes: [linked] });
+      const runtime = await localRuntime(context, provider);
+      const configured = documentationBundle();
+      runtime.configured.config = { loadCurrent: async () => configured, loadPinned: async () => configured };
+      const result = await reconcileTicket(runtime.configured, TICKET);
+      if (reportKind === "noop") {
+        assert.equal(result.stateId, "documentation");
+        assert.equal(runtime.launcher.requests.length, 1);
+        assert.ok(!runtime.launcher.requests[0]!.publicationKeys.includes(publicationKey("comment", report.id)));
+      } else {
+        assert.equal(result.runnable, false);
+        assert.equal(result.recoveryDisposition, "ambiguous");
+      }
+    });
+  }
+});
+
+test("warm documentation retry keeps its accepted implementation boundary despite an already-pushed head", async (t) => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels.push("agent-stage:documentation", "agent-flow:managed");
+  provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD });
+  const runtime = await localRuntime(t, provider);
+  const configured = documentationBundle();
+  runtime.configured.config = { loadCurrent: async () => configured, loadPinned: async () => configured };
+  await runtime.writer(TICKET, null, controlState({ stateId: "documentation", changeRequest: controlChange(),
+    attemptSeries: attemptSeries({ stateId: "documentation", agentId: "developer", current: null }) }));
+  await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(runtime.launcher.requests[0]?.control.changeRequest?.headSha, OLD_HEAD);
+  const first = runtime.launcher.requests[0]?.inputRevision;
+  runtime.launcher.running.clear();
+  provider.snapshot.changeRequest.headSha = "3".repeat(40);
+  await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(runtime.launcher.requests[1]?.inputRevision, first);
+});

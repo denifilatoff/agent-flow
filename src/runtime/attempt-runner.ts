@@ -17,7 +17,7 @@ import { compileAgentContext, type CompiledAgent } from "../harness/apm.ts";
 import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../harness/types.ts";
 import { advanceControlState, type ControlStatePatch } from "../provider/control-comment.ts";
 import { parsePublication } from "../provider/publication.ts";
-import type { ProviderAdapter, ProviderArtifact } from "../provider/types.js";
+import type { ProviderAdapter, ProviderArtifact, ProviderTicketSnapshot } from "../provider/types.js";
 import type { AttemptLauncher, AttemptRequest } from "./reconcile.ts";
 import { renderRuntimePrompt } from "./agent-protocol.ts";
 import { readDecisionAndBuildReceipt } from "./receipts.ts";
@@ -273,7 +273,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           controllerId: request.controllerId,
           contextPath: session.contextPath,
           decisionPath: session.decisionPath,
-          changeRequest: request.snapshot.changeRequest,
+          changeRequest: pinnedAttemptChange(request),
           sourceComment: request.sourceComment,
           excludedReviewIds: request.publicationKeys.flatMap((key) => {
             const value = JSON.parse(key);
@@ -321,7 +321,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
             attemptId: attempt.attemptId,
             ticket: request.ref,
             sourceComment: request.sourceComment,
-            pinnedChangeRequest: request.snapshot.changeRequest,
+            pinnedChangeRequest: pinnedAttemptChange(request),
           },
           dependencies.provider,
           running.cancelled,
@@ -543,6 +543,17 @@ function assertCurrent(running: ActiveAttempt, series: AttemptSeries, attempt: A
     || series.current?.attemptId !== attempt.attemptId) {
     throw new AttemptError("ATTEMPT_CANCELLED", "attempt was cancelled", false);
   }
+}
+
+function pinnedAttemptChange(request: AttemptRequest): ProviderTicketSnapshot["changeRequest"] {
+  const observed = request.snapshot.changeRequest;
+  if (request.resultContract !== "documentation" || !observed) return observed;
+  const input = request.control.changeRequest;
+  if (!input || input.provider !== observed.provider || input.repository !== observed.repository
+    || input.number !== observed.number || input.url !== observed.url) {
+    throw new AttemptError("DOCUMENTATION_INPUT_UNAVAILABLE", "documentation implementation boundary is unavailable", false);
+  }
+  return { ...observed, headSha: input.headSha };
 }
 
 function successPatch(
