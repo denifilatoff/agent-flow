@@ -242,3 +242,13 @@ test("tells a fresh reviewer which observed review IDs cannot satisfy the attemp
   });
   assert.match(renderRuntimePrompt(input), /Do not reuse these existing review IDs for this attempt: 701, 702/);
 });
+
+test("prepared comment protocol keeps stage text local until controller publication", async () => {
+  const input = promptInput(await shippedFlow(), { preparedCommentPath: "/session/prepared-comment.txt" });
+  const prompt = renderRuntimePrompt(input);
+  assert.match(prompt, /Prepare the final stage comment text locally at \/session\/prepared-comment.txt/);
+  assert.match(prompt, /Do not publish stage comments/);
+  assert.match(prompt, /controller publishes/);
+  const development = renderRuntimePrompt({ ...input, resultContract: "development", changeRequest: null });
+  assert.match(development, /creation of one linked open change request/);
+});

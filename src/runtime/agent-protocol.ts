@@ -23,6 +23,7 @@ export interface RuntimePromptInput {
   changeRequest: NormalizedChangeRequest | null;
   sourceComment: ProviderComment | null;
   excludedReviewIds?: readonly string[];
+  preparedCommentPath?: string;
 }
 
 export const EVENT_SOURCES: Readonly<Record<FlowEventType, EventSource>> = Object.freeze({
@@ -76,6 +77,13 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
     `Read the attempt context from ${input.contextPath}.`,
     `Write exactly one allowed JSON object to ${input.decisionPath}, with no other fields.`,
   ];
+  if (input.preparedCommentPath) {
+    lines.push(`Prepare the final stage comment text locally at ${input.preparedCommentPath}. `
+      + "Do not publish stage comments. The controller publishes the prepared text, publication marker, and usage together "
+      + "after the agent and its native subagents finish. Write only substantive text, without publication or usage markers. "
+      + "Keep the decision JSON unchanged. When reusing a suitable existing result, leave this file absent. "
+      + "Change-request creation/updates and provider-native reviews still use the existing publication protocol.");
+  }
   if (input.sourceComment) {
     lines.push(`Interpret the authorized human comment ${input.sourceComment.id} from the attempt context.`);
   }
@@ -131,6 +139,11 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
 }
 
 function evidence(input: RuntimePromptInput, event: AgentEventType): string {
+  if (input.preparedCommentPath && (event === "agent-needs-human" || event === "human-question"
+    || event === "human-unclear" || event === "human-answer-unclear"
+    || (event === "agent-succeeded" && ["assessment", "plan", "diagnostic", "verification"].includes(input.resultContract)))) {
+    return `final substantive comment text prepared at ${input.preparedCommentPath}, or reuse of an existing suitable marked result`;
+  }
   if (event === "agent-needs-human"
     || event === "human-question"
     || event === "human-unclear"

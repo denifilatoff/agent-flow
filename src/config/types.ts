@@ -51,7 +51,7 @@ export interface AgentCatalog {
 export interface StackDefinition {
   apiVersion: "agent-flow/v1alpha1";
   kind: "Stack";
-  spec: { flow: string; catalog: string; contracts: string[]; schemas: string[] };
+  spec: { flow: string; catalog: string; contracts: string[]; schemas: string[]; publication?: "controller-prepared-v1" };
 }
 
 export interface RuntimeConfig {
