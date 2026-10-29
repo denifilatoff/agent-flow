@@ -461,6 +461,20 @@ test("rejects a verification receipt when the change head moves during readback"
   ), /head SHA/);
 });
 
+test("rejects successful bug verification when the change request is closed", async () => {
+  const provider = new FakeProvider();
+  installComments(provider, [comment("diagnostic", {
+    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
+  })]);
+  provider.ticket.changeRequest = change({ state: "closed" });
+
+  await trustFailure(readDecision({ event: "agent-succeeded" }, expectation({
+    stateId: "verification",
+    resultContract: "verification",
+    pinnedChangeRequest: change(),
+  }), provider));
+});
+
 test("builds review receipts from provider-native logical verdicts", async (context) => {
   for (const [event, verdict, summary] of [
     ["review-approved", "approved", "Review approved the change."],
@@ -510,6 +524,24 @@ test("builds needs-human receipts for every agent result contract", async (conte
         marker: marker("question"), artifactKind: "question" }]);
     });
   }
+});
+
+test("accepts a verification question when the change request is closed", async () => {
+  const provider = new FakeProvider();
+  installComments(provider, [comment("question")]);
+  provider.ticket.changeRequest = change({ state: "closed" });
+
+  const receipt = await readDecision({ event: "agent-needs-human" }, expectation({
+    stateId: "verification",
+    resultContract: "verification",
+    pinnedChangeRequest: change(),
+  }), provider);
+
+  assert.deepEqual({ outcome: receipt.outcome, artifacts: receipt.artifacts }, {
+    outcome: "needs-human",
+    artifacts: [{ kind: "comment", id: "102", url: QUESTION_URL,
+      marker: marker("question"), artifactKind: "question" }],
+  });
 });
 
 test("builds human-gate receipts for every human event family", async (context) => {

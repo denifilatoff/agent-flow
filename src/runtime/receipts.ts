@@ -135,7 +135,9 @@ export async function readDecisionAndBuildReceipt(
 
   const initialTicket = await decisionProviderRead(() => provider.readTicket(expected.ticket));
   assertDecisionTicket(initialTicket, expected.ticket);
-  if (expected.resultContract === "verification") assertPinnedChange(initialTicket, expected, "verification");
+  if (expected.resultContract === "verification" && decision.event === "agent-succeeded") {
+    assertPinnedChange(initialTicket, expected, "verification");
+  }
 
   const artifacts: ReceiptArtifact[] = [];
   const verifiedComments: ProviderComment[] = [];
@@ -200,7 +202,9 @@ export async function readDecisionAndBuildReceipt(
   if (decision.event === "review-approved" || decision.event === "review-changes-requested") {
     assertPinnedChange(finalTicket, expected, "review");
   }
-  if (expected.resultContract === "verification") assertPinnedChange(finalTicket, expected, "verification");
+  if (expected.resultContract === "verification" && decision.event === "agent-succeeded") {
+    assertPinnedChange(finalTicket, expected, "verification");
+  }
 
   return {
     apiVersion: "agent-flow/v1alpha1",
