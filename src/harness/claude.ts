@@ -2,6 +2,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { HarnessAdapter, HarnessRunInput, HarnessResult } from "./types.ts";
+import { ClaudeUsage } from "./usage.ts";
 import {
   HarnessPreflightError,
   buildPrompt,
@@ -98,6 +99,7 @@ export function createClaudeAdapter(
           "--agent", input.compiledAgent.agentId,
           "--model", input.execution.model,
           "--effort", input.execution.reasoning,
+          "--output-format", "stream-json", "--verbose",
           "-p",
         ],
         cwd: input.workspace.worktree,
@@ -106,6 +108,7 @@ export function createClaudeAdapter(
         prompt,
         timeoutSeconds: input.timeoutSeconds,
         signal: input.signal,
+        observer: new ClaudeUsage(),
         }, dependencies);
       } finally {
         await rm(home, { recursive: true, force: true });

@@ -35,6 +35,7 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
   const prompt = await readStdin();
   const publicationMarker = prompt.match(/<!-- agent-flow:v1 \{"config":"[a-f0-9]{40}","controller":"[a-f0-9-]{36}"\} -->/)?.[0];
   if (!publicationMarker) return 2;
+  const preparedCommentPath = prompt.match(/Prepare the final stage comment text locally at (.+?)\. Do not publish/)?.[1];
   const endpoint = new URL("/__fixture/attempt", context.ticket.repository.cloneRoot);
   let cancellationRecorded: Promise<unknown> | undefined;
   const cancellation = waitForCancellation(() => {
@@ -58,33 +59,35 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json", "x-fixture-target": target },
-      body: JSON.stringify({ ...context, publicationMarker }),
+      body: JSON.stringify({ ...context, publicationMarker, prepareComments: Boolean(preparedCommentPath) }),
       signal: cancellation.abortSignal,
     });
     if (!response.ok) {
       console.error(await response.text());
       return 2;
     }
-    const result = await response.json() as { mode: string; decision?: unknown };
+    const result = await response.json() as { mode: string; decision?: unknown; preparedComment?: string };
     const ready = await fetch(new URL("/__fixture/ready", endpoint), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ attemptId: context.controlState.attemptSeries.current.attemptId }),
     });
     if (!ready.ok) throw new Error(await ready.text());
+    if (process.env.AGENT_FLOW_FIXTURE_USAGE === "1") await emitUsage(target);
     if (result.mode === "exit-failure") return 1;
     if (result.mode === "late") {
       await cancellation.signal;
       const late = await fetch(new URL("/__fixture/late", endpoint), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...context, publicationMarker }),
+        body: JSON.stringify({ ...context, publicationMarker, prepareComments: Boolean(preparedCommentPath) }),
       });
       if (!late.ok) throw new Error(await late.text());
       const published = await late.json() as { decision: unknown };
       await writeFile(decisionPath, `${JSON.stringify(published.decision)}\n`, { mode: 0o600 });
       return 0;
     }
+    if (preparedCommentPath && result.preparedComment) await writeFile(preparedCommentPath, result.preparedComment, { mode: 0o600 });
     if (result.decision) await writeFile(decisionPath, `${JSON.stringify(result.decision)}\n`, { mode: 0o600 });
     if (result.mode === "block") await cancellation.signal;
     return 0;
@@ -93,6 +96,22 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
     await cancellationRecorded;
     await completed();
   }
+}
+
+async function emitUsage(target: "codex" | "claude"): Promise<void> {
+  if (target === "claude") {
+    process.stdout.write(await readFile(new URL("./harness/claude-delegation.jsonl", import.meta.url)));
+    return;
+  }
+  const home = process.env.CODEX_HOME!;
+  const files = JSON.parse(await readFile(new URL("./harness/codex-fork.json", import.meta.url), "utf8"));
+  const sessions = join(home, "sessions");
+  await mkdir(sessions, { recursive: true });
+  for (const [index, records] of files.entries()) {
+    await writeFile(join(sessions, `${index}.jsonl`), records.map(JSON.stringify).join("\n") + "\n");
+  }
+  process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: files[0][0].payload.id }) + "\n");
+  process.stdout.write('{"type":"turn.completed","usage":{"input_tokens":700,"output_tokens":70}}\n');
 }
 
 async function readStdin(): Promise<string> {

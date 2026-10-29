@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { inspect } from "node:util";
 
 import type { ConfigBundle } from "../../src/config/load.ts";
@@ -118,6 +121,10 @@ function fixture(options: {
   execution?: AttemptRunnerDependencies["execution"];
   preparePinnedAgent?: AttemptRunnerDependencies["preparePinnedAgent"];
   packageDirectory?: string;
+  archive?: (receipt: AgentReceipt) => Promise<void>;
+  dataDirectory?: string;
+  decisionEvent?: "agent-succeeded" | "agent-needs-human";
+  provider?: ProviderAdapter;
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
   const prompts: string[] = [];
@@ -129,6 +136,10 @@ function fixture(options: {
   const ids = [...(options.ids ?? [SERIES, ATTEMPT_1, ATTEMPT_2])];
   const harness: HarnessAdapter = { target: "codex", async preflight() {}, async run(input) {
     events.push("harness:spawn");
+    if (options.dataDirectory) {
+      await writeFile(input.session.decisionPath, JSON.stringify({ event: options.decisionEvent ?? "agent-needs-human" }));
+      await writeFile(join(input.session.root, "prepared-comment.txt"), "Please clarify the ticket.");
+    }
     prompts.push(input.stagePrompt);
     assert.deepEqual(input.providerCredential, {
       provider: "github", name: "GH_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
@@ -145,7 +156,8 @@ function fixture(options: {
     events.push("control:readback"); return structuredClone(current);
   });
   const runner = createAttemptRunner({
-    dataDirectory: "/data", provider: { kind: "github" } as ProviderAdapter,
+    archiveReceipt: async (_root, value) => options.archive?.(value),
+    dataDirectory: options.dataDirectory ?? "/data", provider: options.provider ?? { kind: "github" } as ProviderAdapter,
     providerConfig: { apiUrl: "https://api.github.com", repositories: ["owner/repo"] },
     providerCredential: options.providerCredential
       ?? {
@@ -172,6 +184,12 @@ function fixture(options: {
       ticketNumber: 7, flowInstanceId: FLOW,
     }; } }, harnesses: { codex: harness }, writeControl,
     async createSession(_data, _flow, attemptId, context) { attempts.push(attemptId); events.push("session:create");
+      if (options.dataDirectory) {
+        const root = join(options.dataDirectory, "sessions", FLOW, attemptId);
+        await mkdir(root, { recursive: true });
+        return { root, contextPath: join(root, "context.json"), decisionPath: join(root, "decision.json"),
+          logPath: join(root, "harness.log"), harnessSessionDirectory: join(root, "harness-session") };
+      }
       assert.equal(context.controlState.attemptSeries?.current?.attemptId, attemptId);
       assert.equal(inspect(context).includes("github-ticket-token"), false); return {
         root: `/data/sessions/${attemptId}`, contextPath: `/data/sessions/${attemptId}/context.json`,
@@ -241,6 +259,51 @@ test("persists and reads back started before a background launch", async () => {
     pinnedChangeRequest: subject.request.snapshot.changeRequest,
   });
   assert.deepEqual(subject.controls.at(-1)?.latestReceipt, receipt(ATTEMPT_1));
+});
+
+test("archives usage across process and decision failures without accumulating retries", async () => {
+  for (const failure of ["exit", "timeout", "signal", "process", "decision", "readback"]) {
+    const archived: AgentReceipt[] = [];
+    const processError = new HarnessProcessError("codex", true);
+    processError.usage = { totalTokens: 12 };
+    const failed = failure === "process" ? processError : { ...OK, usage: { totalTokens: 12 },
+      ...(failure === "exit" ? { exitCode: 1 } : {}), ...(failure === "timeout" ? { timedOut: true } : {}),
+      ...(failure === "signal" ? { exitCode: null, signal: "SIGTERM" as const } : {}) };
+    let verifies = 0;
+    const subject = fixture({ results: [failed, { ...OK, usage: { totalTokens: 3 } }],
+      archive: async (value) => { archived.push(value); }, verify: async (_path, expected) => {
+        if (++verifies === 1 && failure === "decision") throw new InvalidDecisionError("Invalid decision.");
+        if (verifies === 1 && failure === "readback") throw new DecisionReadbackError();
+        return receipt(expected.attemptId);
+      } });
+    await subject.runner.start(subject.request); await waitIdle(subject);
+    assert.equal(archived.length, 2, failure);
+    assert.equal(archived[0]?.outcome, "failed", failure);
+    assert.deepEqual(archived[0]?.artifacts, []);
+    assert.equal(archived[0]?.usage?.totalTokens, 12);
+    assert.equal(archived[1]?.usage?.totalTokens, 3);
+    assert.equal(subject.controls.at(-1)?.latestReceipt?.usage?.totalTokens, 3);
+  }
+});
+
+test("telemetry storage failure does not launch another harness", async () => {
+  const subject = fixture({ results: [{ ...OK, usage: { totalTokens: 5 } }],
+    archive: async () => { throw new Error("storage failed"); } });
+  await subject.runner.start(subject.request); await waitIdle(subject);
+  assert.equal(subject.attempts.length, 1);
+  assert.equal(subject.controls.at(-1)?.attemptSeries?.current?.status, "succeeded");
+});
+
+test("cancellation archives available usage without a receipt transition", async () => {
+  const archived: AgentReceipt[] = [];
+  const subject = fixture({ archive: async (value) => { archived.push(value); } });
+  await subject.runner.start(subject.request);
+  const cancelling = subject.runner.cancel(FLOW);
+  subject.process.resolve({ exitCode: null, signal: "SIGTERM", timedOut: false, usage: { inputTokens: 17 } });
+  await cancelling;
+  assert.equal(archived[0]?.usage?.inputTokens, 17);
+  assert.equal(archived[0]?.error?.code, "ATTEMPT_CANCELLED");
+  assert.equal(subject.controls.at(-1)?.latestReceipt, null);
 });
 
 test("stages a private pinned package before compiling each retry", async () => {
@@ -535,4 +598,111 @@ test("passes the surviving control's activation pin to result verification", asy
   subject.process.resolve(OK);
   await waitIdle(subject);
   assert.equal(subject.verifications[0]?.expected.activationLabel, "bugfix");
+});
+
+
+test("restart delivers a completed prepared attempt without another harness launch or retry charge", async (t) => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "runner-prepared-"));
+  t.after(() => rm(dataDirectory, { recursive: true, force: true }));
+  const configured = request();
+  configured.bundle.stack.spec.publication = "controller-prepared-v1";
+  let published: { id: string; url: string; body: string; createdAt: string } | undefined;
+  let creates = 0;
+  const provider = { kind: "github", readTicket: async () => ({ ...snapshot(), comments: published ? [published] : [] }),
+    createComment: async (_ref: unknown, body: string) => {
+      creates++;
+      published = { id: "9", url: "https://github.test/comment/9", body, createdAt: NOW };
+      throw new Error("uncertain create");
+    }, readComment: async () => published } as unknown as ProviderAdapter;
+  const first = fixture({ request: configured, dataDirectory, provider, results: [{ ...OK, usage: { totalTokens: 27 } }] });
+  await first.runner.start(first.request);
+  await new Promise<void>((resolve) => first.runner.onSettled!(resolve));
+  const retained = first.controls.at(-1)!;
+  assert.equal(retained.attemptSeries?.current?.status, "started");
+  assert.equal(first.attempts.length, 1);
+  const second = fixture({ request: request({ bundle: configured.bundle, control: retained }), dataDirectory, provider,
+    verify: async (_path, expected) => receipt(expected.attemptId, "needs-human") });
+  await second.runner.start(second.request);
+  for (let i = 0; second.runner.isRunning(FLOW) && i < 100; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(second.runner.isRunning(FLOW), false);
+  assert.equal(second.attempts.length, 0);
+  assert.equal(second.events.includes("harness:spawn"), false);
+  assert.equal(second.controls.at(-1)?.attemptSeries?.consumed, 1);
+  assert.equal(second.controls.at(-1)?.latestReceipt?.usage?.totalTokens, 27);
+  assert.equal(second.controls.at(-1)?.attemptSeries?.current?.status, "succeeded");
+  assert.equal(creates, 1);
+});
+
+
+test("prepared results classify verification failures and archive accounting on launch and restart", async (t) => {
+  for (const resumed of [false, true]) {
+    for (const decisionEvent of ["agent-needs-human", "agent-succeeded"] as const) {
+      for (const error of [new DecisionTrustError("secret"), new DecisionEvidenceUnavailableError("missing evidence"),
+        new InvalidDecisionError("invalid result")]) {
+        const dataDirectory = await mkdtemp(join(tmpdir(), "runner-verification-"));
+        t.after(() => rm(dataDirectory, { recursive: true, force: true }));
+        const configured = request({ bundle: bundle(error instanceof DecisionTrustError ? 3 : 1) });
+        configured.bundle.stack.spec.publication = "controller-prepared-v1";
+        let published: { id: string; url: string; body: string; createdAt: string } | undefined;
+        let creates = 0;
+        const provider = { kind: "github", readTicket: async () => ({ ...snapshot(), comments: published ? [published] : [] }),
+          createComment: async (_ref: unknown, body: string) => {
+            creates++;
+            published = { id: "9", url: "https://github.test/comment/9", body, createdAt: NOW };
+            if (resumed) throw new Error("uncertain create");
+            return published;
+          }, readComment: async () => published } as unknown as ProviderAdapter;
+        const archived: AgentReceipt[] = [];
+        const first = fixture({ request: configured, dataDirectory, provider, decisionEvent,
+          results: [{ ...OK, usage: { totalTokens: 27 } }],
+          archive: async (value) => { archived.push(value); }, verify: async () => { throw error; } });
+        await first.runner.start(first.request);
+        await new Promise<void>((resolve) => first.runner.onSettled!(resolve));
+        // PR/native-review results do not create controller comments and fail immediately.
+        let subject = first;
+        if (resumed && decisionEvent === "agent-needs-human") {
+          const retained = first.controls.at(-1)!;
+          assert.equal(retained.attemptSeries?.current?.status, "started");
+          subject = fixture({ request: request({ bundle: configured.bundle, control: retained }), dataDirectory, provider,
+            archive: async (value) => { archived.push(value); }, verify: async () => { throw error; } });
+          await subject.runner.start(subject.request);
+          for (let i = 0; subject.runner.isRunning(FLOW) && i < 100; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          assert.equal(subject.attempts.length, 0);
+        }
+        assert.equal(subject.controls.at(-1)?.stateId, "blocked");
+        assert.equal(subject.controls.at(-1)?.attemptSeries?.current?.status, "failed");
+        assert.equal(subject.controls.at(-1)?.attemptSeries?.current?.error?.code, error.code);
+        assert.equal(archived.length, 1);
+        assert.equal(archived[0]?.error?.code, error.code);
+        assert.equal(archived[0]?.usage?.totalTokens, 27);
+        assert.deepEqual(archived[0]?.artifacts, []);
+        assert.equal(creates, decisionEvent === "agent-needs-human" ? 1 : 0);
+      }
+    }
+  }
+});
+
+
+test("permanent prepared comment rejection blocks and archives accounting without another launch", async (t) => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "runner-rejection-"));
+  t.after(() => rm(dataDirectory, { recursive: true, force: true }));
+  const configured = request();
+  configured.bundle.stack.spec.publication = "controller-prepared-v1";
+  const archived: AgentReceipt[] = [];
+  const provider = { kind: "github", readTicket: async () => snapshot(),
+    createComment: async () => { throw new ProviderHttpError("forbidden", 403, false, {}, {}); },
+  } as unknown as ProviderAdapter;
+  const subject = fixture({ request: configured, dataDirectory, provider,
+    results: [{ ...OK, usage: { totalTokens: 27 } }], archive: async (value) => { archived.push(value); } });
+  await subject.runner.start(subject.request);
+  await new Promise<void>((resolve) => subject.runner.onSettled!(resolve));
+  assert.equal(subject.controls.at(-1)?.stateId, "blocked");
+  assert.equal(subject.controls.at(-1)?.attemptSeries?.current?.error?.code, "PROVIDER_FAILED");
+  assert.equal(subject.attempts.length, 1);
+  assert.deepEqual(subject.delays, []);
+  assert.equal(archived[0]?.usage?.totalTokens, 27);
 });

@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { validateBundleDocument, type ConfigBundle } from "../config/load.ts";
 import type {
   AgentReceipt,
+  AttemptUsage,
   Attempt,
   AttemptSeries,
   ControlChangeRequest,
@@ -15,18 +16,25 @@ import type {
 import { validateDocument } from "../config/schema-validator.ts";
 import { compileAgentContext, type CompiledAgent } from "../harness/apm.ts";
 import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../harness/types.ts";
+import { HarnessProcessError } from "../harness/process.ts";
 import { advanceControlState, type ControlStatePatch } from "../provider/control-comment.ts";
+import { ProviderHttpError } from "../provider/http.ts";
 import { parsePublication } from "../provider/publication.ts";
 import type { ProviderAdapter, ProviderArtifact } from "../provider/types.js";
 import type { AttemptLauncher, AttemptRequest } from "./reconcile.ts";
 import { renderRuntimePrompt } from "./agent-protocol.ts";
-import { readDecisionAndBuildReceipt } from "./receipts.ts";
+import { DecisionReadbackError, InvalidDecisionError, readDecisionAndBuildReceipt } from "./receipts.ts";
 import { createAttemptSession, type AttemptContext } from "./sessions.ts";
 import { WorkspaceManager } from "./workspaces.ts";
 import { AttemptError, classifyAttemptError, controlError } from "./errors.ts";
 import { writeControlCas, type ControlWriter } from "./control-state.ts";
+import { archiveReceipt } from "./usage-records.ts";
+import { freezePreparedPublication, deliverPreparedPublication, readPreparedPublication } from "./prepared-publication.ts";
+import type { DecisionExpectation } from "./receipts.ts";
 
 export interface AttemptRunnerDependencies {
+  archiveReceipt?: typeof archiveReceipt;
+  telemetryDiagnostic?: (message: string) => void;
   dataDirectory: string;
   provider: ProviderAdapter;
   providerConfig: { apiUrl: string; repositories: string[] };
@@ -144,9 +152,136 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       ? control.attemptSeries!
       : newSeries(request, binding, newId());
 
+    const preparedProtocol = request.bundle.stack.spec.publication === "controller-prepared-v1";
+    function expectedDecision(attempt: Attempt): DecisionExpectation {
+      return {
+        flow: request.bundle.flow,
+        stateId: request.stateId,
+        mode: request.mode,
+        resultContract: request.resultContract,
+        configRevision: control.configRevision,
+        activatedAt: control.activatedAt,
+        activationLabel: control.activationLabel ?? request.bundle.flow.metadata.activationLabel,
+        controllerId: request.controllerId,
+        publicationKeys: request.publicationKeys,
+        reusableCommentIds: request.snapshot.comments.filter((comment) => {
+          const marker = parsePublication(comment.body);
+          return marker.kind === "current" && marker.metadata.config === control.configRevision
+            && marker.metadata.controller === request.controllerId
+            && !request.publicationKeys.some((key) => {
+              const value = JSON.parse(key);
+              return value[3] === "comment" && value[4] === comment.id;
+            });
+        }).map(({ id }) => id),
+        flowInstanceId: control.flowInstanceId,
+        attemptId: attempt.attemptId,
+        ticket: request.ref,
+        sourceComment: request.sourceComment,
+        pinnedChangeRequest: request.snapshot.changeRequest,
+      };
+    }
+    function deliveryDiagnostic(): void {
+      try { (dependencies.telemetryDiagnostic ?? console.error)("Prepared result delivery remains pending; model execution will not be repeated."); }
+      catch { /* Diagnostics cannot restart a completed model attempt. */ }
+    }
+    async function retainCancelled(root: string, attempt: Attempt, usage: AttemptUsage | undefined): Promise<void> {
+      try {
+        await (dependencies.archiveReceipt ?? archiveReceipt)(root, { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt",
+          flowInstanceId: control.flowInstanceId, attemptId: attempt.attemptId, outcome: "failed",
+          summary: "Agent attempt was cancelled.", artifacts: [],
+          error: { code: "ATTEMPT_CANCELLED", message: "Attempt was cancelled." }, ...(usage ? { usage } : {}) });
+      } catch { /* Completed prepared accounting remains retained even if archiving fails. */ }
+    }
+    async function finish(root: string, attempt: Attempt, usage: AttemptUsage | undefined,
+      expected = expectedDecision(attempt)): Promise<void> {
+      let preparedComment = false;
+      if (preparedProtocol) {
+        const retained = await readPreparedPublication(root, expected);
+        preparedComment = retained.body !== null;
+        expected = { ...expected, publicationKeys: retained.publicationKeys,
+          reusableCommentIds: retained.reusableCommentIds };
+        try {
+          usage = await deliverPreparedPublication(root, expected, dependencies.provider,
+            () => !running.cancelled && !running.abort.signal.aborted);
+        } catch (error) {
+          if (error instanceof InvalidDecisionError
+            || (error instanceof ProviderHttpError && !error.transient)) throw error;
+          if (running.cancelled) await retainCancelled(root, attempt, usage);
+          else deliveryDiagnostic();
+          return;
+        }
+      }
+      if (running.cancelled || running.abort.signal.aborted) { await retainCancelled(root, attempt, usage); return; }
+      let verified: AgentReceipt;
+      try {
+        verified = await verifyDecision(join(root, "decision.json"), expected, dependencies.provider,
+          running.cancelled, (kind, value) => validateBundleDocument(request.bundle, kind, value));
+      } catch (error) {
+        if (preparedComment && error instanceof DecisionReadbackError) { deliveryDiagnostic(); return; }
+        throw error;
+      }
+      if (running.cancelled || running.abort.signal.aborted) { await retainCancelled(root, attempt, usage); return; }
+      const receipt = { ...verified, ...(usage ? { usage } : {}) };
+      validateBundleDocument(request.bundle, "AgentReceipt", receipt);
+      try { await (dependencies.archiveReceipt ?? archiveReceipt)(root, receipt); }
+      catch {
+        try { (dependencies.telemetryDiagnostic ?? console.error)("Attempt receipt telemetry could not be archived."); }
+        catch { /* Diagnostics cannot change the verified outcome. */ }
+      }
+      if (running.cancelled || running.abort.signal.aborted) return;
+      series = { ...series, current: { ...attempt, status: "succeeded", finishedAt: now() } };
+      try {
+        await persist(dependencies, now(), request, running, control, successPatch(request, control, series, receipt));
+      } catch (error) {
+        if (preparedProtocol) { deliveryDiagnostic(); return; }
+        throw error;
+      }
+    }
+
     if (!series.runtimeDigest || !series.executionSnapshot) {
       series = { ...series, runtimeDigest: binding.runtimeDigest, executionSnapshot: binding.executionSnapshot };
       control = await persist(dependencies, now(), request, running, control, { attemptSeries: series });
+    }
+
+    async function recordFailure(error: unknown, attempt: Attempt, failure?: AgentReceipt): Promise<boolean> {
+      const classified = classifyAttemptError(error);
+      const failedSeries: AttemptSeries = { ...series, current: {
+        ...attempt, status: "failed", finishedAt: now(), error: controlError(classified),
+      } };
+      if (!classified.retryable || failedSeries.consumed >= failedSeries.maxAttempts) {
+        await persistBlocked(dependencies, now(), request, running, control, failedSeries,
+          controlError(classified), failure);
+        return false;
+      }
+      control = await persist(dependencies, now(), request, running, control,
+        { attemptSeries: failedSeries, ...(failure ? { latestReceipt: failure } : {}) });
+      series = failedSeries;
+      return true;
+    }
+
+    if (preparedProtocol && series.current?.status === "started") {
+      const attempt = series.current;
+      const root = join(dependencies.dataDirectory, "sessions", control.flowInstanceId, attempt.attemptId);
+      let retained: Awaited<ReturnType<typeof readPreparedPublication>> | undefined;
+      try { retained = await readPreparedPublication(root, expectedDecision(attempt)); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") { deliveryDiagnostic(); return; }
+      }
+      if (retained) {
+        running.attemptId = attempt.attemptId;
+        running.resolveReady();
+        try { await finish(root, attempt, retained.usage); return; }
+        catch (error) {
+          if (running.cancelled) { await retainCancelled(root, attempt, retained.usage); return; }
+          const failure: AgentReceipt = { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt",
+            flowInstanceId: control.flowInstanceId, attemptId: attempt.attemptId, outcome: "failed",
+            summary: "Agent attempt did not complete successfully.", artifacts: [],
+            error: controlError(classifyAttemptError(error)), ...(retained.usage ? { usage: retained.usage } : {}) };
+          try { await (dependencies.archiveReceipt ?? archiveReceipt)(root, failure); }
+          catch { /* Receipt telemetry cannot change the classified failure. */ }
+          if (!await recordFailure(error, attempt, failure)) return;
+        }
+      }
     }
 
     if (series.current?.status === "started") {
@@ -223,6 +358,24 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
 
       if (running.cancelled) return;
 
+      let sessionRoot: string | undefined;
+      let usage: AttemptUsage | undefined;
+      let harnessEnded = false;
+      let archived = false;
+      async function archive(value: AgentReceipt): Promise<boolean> {
+        archived = true;
+        try { await (dependencies.archiveReceipt ?? archiveReceipt)(sessionRoot!, value); return true; }
+        catch {
+          try { (dependencies.telemetryDiagnostic ?? console.error)("Attempt receipt telemetry could not be archived."); }
+          catch { /* A diagnostic callback cannot change the attempt outcome. */ }
+          return false;
+        }
+      }
+      function failedReceipt(error: { code: string; message: string }): AgentReceipt {
+        return { apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt", flowInstanceId: control.flowInstanceId,
+          attemptId: attempt.attemptId, outcome: "failed", summary: "Agent attempt did not complete successfully.",
+          artifacts: [], error, ...(usage ? { usage } : {}) };
+      }
       try {
         const workspace = await dependencies.workspaceManager.prepareWorkspace(
           request.snapshot.repository,
@@ -238,6 +391,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           attempt.attemptId,
           context,
         );
+        sessionRoot = session.root;
         assertCurrent(running, series, attempt);
         const prepared = await dependencies.preparePinnedAgent(
           control.configRevision,
@@ -273,6 +427,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           controllerId: request.controllerId,
           contextPath: session.contextPath,
           decisionPath: session.decisionPath,
+          ...(preparedProtocol ? { preparedCommentPath: join(session.root, "prepared-comment.txt") } : {}),
           changeRequest: request.snapshot.changeRequest,
           sourceComment: request.sourceComment,
           excludedReviewIds: request.publicationKeys.flatMap((key) => {
@@ -295,87 +450,32 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           running.resolveReady();
         }
         const result = await resultPromise;
-        if (running.cancelled || running.abort.signal.aborted) return;
+        harnessEnded = true;
+        usage = result.usage;
+        if (running.cancelled || running.abort.signal.aborted) {
+          await archive(failedReceipt({ code: "ATTEMPT_CANCELLED", message: "Attempt was cancelled." }));
+          return;
+        }
         assertProcessResult(result);
-        const receipt = await verifyDecision(
-          session.decisionPath,
-          {
-            flow: request.bundle.flow,
-            stateId: request.stateId,
-            mode: request.mode,
-            resultContract: request.resultContract,
-            configRevision: control.configRevision,
-            activationLabel: control.activationLabel ?? request.bundle.flow.metadata.activationLabel,
-            controllerId: request.controllerId,
-            publicationKeys: request.publicationKeys,
-            reusableCommentIds: request.snapshot.comments.filter((comment) => {
-              const marker = parsePublication(comment.body);
-              return marker.kind === "current" && marker.metadata.config === control.configRevision
-                && marker.metadata.controller === request.controllerId
-                && !request.publicationKeys.some((key) => {
-                  const value = JSON.parse(key);
-                  return value[3] === "comment" && value[4] === comment.id;
-                });
-            }).map(({ id }) => id),
-            flowInstanceId: control.flowInstanceId,
-            attemptId: attempt.attemptId,
-            ticket: request.ref,
-            sourceComment: request.sourceComment,
-            pinnedChangeRequest: request.snapshot.changeRequest,
-          },
-          dependencies.provider,
-          running.cancelled,
-          (kind, value) => validateBundleDocument(request.bundle, kind, value),
-        );
-        if (running.cancelled || running.abort.signal.aborted) return;
-        series = {
-          ...series,
-          current: { ...attempt, status: "succeeded", finishedAt: now() },
-        };
-        await persist(
-          dependencies,
-          now(),
-          request,
-          running,
-          control,
-          successPatch(request, control, series, receipt),
-        );
+        if (preparedProtocol) {
+          await freezePreparedPublication(sessionRoot!, expectedDecision(attempt), usage);
+          await finish(sessionRoot!, attempt, usage);
+          return;
+        }
+        await finish(sessionRoot!, attempt, usage);
+        archived = true;
         return;
       } catch (error) {
-        if (running.cancelled || running.abort.signal.aborted) return;
+        if (error instanceof HarnessProcessError) { harnessEnded = true; usage = error.usage; }
         const classified = classifyAttemptError(error);
-        const failedSeries: AttemptSeries = {
-          ...series,
-          current: {
-            ...attempt,
-            status: "failed",
-            finishedAt: now(),
-            error: controlError(classified),
-          },
-        };
-        const exhausted = failedSeries.consumed >= failedSeries.maxAttempts;
-        if (!classified.retryable || exhausted) {
-          await persistBlocked(
-            dependencies,
-            now(),
-            request,
-            running,
-            control,
-            failedSeries,
-            controlError(classified),
-          );
+        const failure = failedReceipt(running.cancelled
+          ? { code: "ATTEMPT_CANCELLED", message: "Attempt was cancelled." } : controlError(classified));
+        if (sessionRoot && harnessEnded && !archived) await archive(failure);
+        if (running.cancelled || running.abort.signal.aborted) return;
+        if (!await recordFailure(error, attempt, harnessEnded ? failure : undefined)) {
           if (!running.launched) throw classified;
           return;
         }
-        control = await persist(
-          dependencies,
-          now(),
-          request,
-          running,
-          control,
-          { attemptSeries: failedSeries },
-        );
-        series = failedSeries;
         await cancellableDelay(config.executionSnapshot.delaySeconds * 1_000, running, delay);
         if (running.cancelled) return;
       }
@@ -591,6 +691,7 @@ async function persistBlocked(
   control: ControlState,
   series: AttemptSeries,
   error: { code: string; message: string },
+  receipt?: AgentReceipt,
 ): Promise<void> {
   const current = series.current;
   const failed = current?.status === "failed" ? current : current ? {
@@ -603,6 +704,7 @@ async function persistBlocked(
     stateId: "blocked",
     resumeStateId: request.stateId,
     attemptSeries: { ...series, current: failed },
+    ...(receipt ? { latestReceipt: receipt } : {}),
   });
 }
 

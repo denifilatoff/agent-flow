@@ -1,0 +1,298 @@
+[
+  [
+    {
+      "timestamp": "2026-10-29T14:32:02.563Z",
+      "ordinal": 0,
+      "type": "session_meta",
+      "payload": {
+        "session_id": "01a18813-34f0-7d03-b9b1-84d006c21239",
+        "id": "01a18813-34f0-7d03-b9b1-84d006c21239",
+        "cli_version": "0.150.0-alpha.8",
+        "source": "exec",
+        "history_mode": "paginated"
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.563Z",
+      "ordinal": 1,
+      "type": "event_msg",
+      "payload": {
+        "type": "task_started",
+        "turn_id": "01a18813-34fe-7671-9b57-f0cf5a5bee13",
+        "started_at": 1793284322,
+        "model_context_window": 258400,
+        "collaboration_mode_kind": "default"
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.581Z",
+      "ordinal": 7,
+      "type": "turn_context",
+      "payload": {
+        "turn_id": "01a18813-34fe-7671-9b57-f0cf5a5bee13",
+        "model": "gpt-5.4"
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.636Z",
+      "ordinal": 13,
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 1,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 10,
+            "reasoning_output_tokens": 1,
+            "total_tokens": 110
+          },
+          "last_token_usage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 1,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 10,
+            "reasoning_output_tokens": 1,
+            "total_tokens": 110
+          },
+          "model_context_window": 258400
+        },
+        "rate_limits": {
+          "limit_id": "codex",
+          "limit_name": null,
+          "primary": null,
+          "secondary": null,
+          "credits": null,
+          "individual_limit": null,
+          "spend_control_reached": null,
+          "plan_type": null,
+          "rate_limit_reached_type": null
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.694Z",
+      "ordinal": 19,
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 300,
+            "cached_input_tokens": 3,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 30,
+            "reasoning_output_tokens": 3,
+            "total_tokens": 330
+          },
+          "last_token_usage": {
+            "input_tokens": 200,
+            "cached_input_tokens": 2,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 20,
+            "reasoning_output_tokens": 2,
+            "total_tokens": 220
+          },
+          "model_context_window": 258400
+        },
+        "rate_limits": {
+          "limit_id": "codex",
+          "limit_name": null,
+          "primary": null,
+          "secondary": null,
+          "credits": null,
+          "individual_limit": null,
+          "spend_control_reached": null,
+          "plan_type": null,
+          "rate_limit_reached_type": null
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.707Z",
+      "ordinal": 24,
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 700,
+            "cached_input_tokens": 7,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 70,
+            "reasoning_output_tokens": 7,
+            "total_tokens": 770
+          },
+          "last_token_usage": {
+            "input_tokens": 400,
+            "cached_input_tokens": 4,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 40,
+            "reasoning_output_tokens": 4,
+            "total_tokens": 440
+          },
+          "model_context_window": 258400
+        },
+        "rate_limits": {
+          "limit_id": "codex",
+          "limit_name": null,
+          "primary": null,
+          "secondary": null,
+          "credits": null,
+          "individual_limit": null,
+          "spend_control_reached": null,
+          "plan_type": null,
+          "rate_limit_reached_type": null
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.712Z",
+      "ordinal": 25,
+      "type": "event_msg",
+      "payload": {
+        "type": "task_complete",
+        "turn_id": "01a18813-34fe-7671-9b57-f0cf5a5bee13",
+        "last_agent_message": "root done",
+        "started_at": 1793284322,
+        "completed_at": 1793284322,
+        "duration_ms": 151,
+        "time_to_first_token_ms": 44
+      }
+    }
+  ],
+  [
+    {
+      "timestamp": "2026-10-29T14:32:02.613Z",
+      "ordinal": 0,
+      "type": "session_meta",
+      "payload": {
+        "session_id": "01a18813-34f0-7d03-b9b1-84d006c21239",
+        "id": "01a18813-3534-7450-b76a-153d592079cc",
+        "forked_from_id": "01a18813-34f0-7d03-b9b1-84d006c21239",
+        "parent_thread_id": "01a18813-34f0-7d03-b9b1-84d006c21239",
+        "cli_version": "0.150.0-alpha.8",
+        "source": {
+          "subagent": {
+            "thread_spawn": {
+              "parent_thread_id": "01a18813-34f0-7d03-b9b1-84d006c21239",
+              "depth": 1,
+              "agent_path": "/root/worker",
+              "agent_nickname": "Plato",
+              "agent_role": null
+            }
+          }
+        },
+        "history_mode": "paginated",
+        "subagent_history_start_ordinal": 9
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.613Z",
+      "ordinal": 1,
+      "type": "session_meta",
+      "payload": {
+        "session_id": "01a18813-34f0-7d03-b9b1-84d006c21239",
+        "id": "01a18813-34f0-7d03-b9b1-84d006c21239",
+        "cli_version": "0.150.0-alpha.8",
+        "source": "exec",
+        "history_mode": "paginated"
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.613Z",
+      "ordinal": 2,
+      "type": "event_msg",
+      "payload": {
+        "type": "task_started",
+        "turn_id": "01a18813-34fe-7671-9b57-f0cf5a5bee13",
+        "started_at": 1793284322,
+        "model_context_window": 258400,
+        "collaboration_mode_kind": "default"
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.613Z",
+      "ordinal": 6,
+      "type": "turn_context",
+      "payload": {
+        "turn_id": "01a18813-34fe-7671-9b57-f0cf5a5bee13",
+        "model": "gpt-5.4"
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.625Z",
+      "ordinal": 10,
+      "type": "event_msg",
+      "payload": {
+        "type": "task_started",
+        "turn_id": "01a18813-353f-7c60-90b8-1963f3d720d3",
+        "started_at": 1793284322,
+        "model_context_window": 258400,
+        "collaboration_mode_kind": "default"
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.640Z",
+      "ordinal": 13,
+      "type": "turn_context",
+      "payload": {
+        "turn_id": "01a18813-353f-7c60-90b8-1963f3d720d3",
+        "model": "gpt-5.4"
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.681Z",
+      "ordinal": 18,
+      "type": "event_msg",
+      "payload": {
+        "type": "token_count",
+        "info": {
+          "total_token_usage": {
+            "input_tokens": 300,
+            "cached_input_tokens": 3,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 30,
+            "reasoning_output_tokens": 3,
+            "total_tokens": 330
+          },
+          "last_token_usage": {
+            "input_tokens": 300,
+            "cached_input_tokens": 3,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 30,
+            "reasoning_output_tokens": 3,
+            "total_tokens": 330
+          },
+          "model_context_window": 258400
+        },
+        "rate_limits": {
+          "limit_id": "codex",
+          "limit_name": null,
+          "primary": null,
+          "secondary": null,
+          "credits": null,
+          "individual_limit": null,
+          "spend_control_reached": null,
+          "plan_type": null,
+          "rate_limit_reached_type": null
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-29T14:32:02.686Z",
+      "ordinal": 19,
+      "type": "event_msg",
+      "payload": {
+        "type": "task_complete",
+        "turn_id": "01a18813-353f-7c60-90b8-1963f3d720d3",
+        "last_agent_message": "child done",
+        "started_at": 1793284322,
+        "completed_at": 1793284322,
+        "duration_ms": 61,
+        "time_to_first_token_ms": 53
+      }
+    }
+  ]
+]
