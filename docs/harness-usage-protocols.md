@@ -36,6 +36,8 @@ Cache creation/read tokens are separate from uncached input and must be included
 
 [Official cost semantics](https://code.claude.com/docs/en/agent-sdk/cost-tracking) describe these scopes and warn that
 assistant-message output counts can be placeholders. Native cost is a harness estimate, not invoice billing.
-Without a complete result, preserve only reliable categories; do not infer complete output, total tokens or total cost.
+Without a complete result, retain assistant-message input/cache counters once per session and message ID. Bound the
+observation set, ignore invalid counters, and let a later complete aggregate replace these partial observations.
+Preserve only reliable categories; do not infer complete output, total tokens or total cost.
 [The upstream changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md) records a later fix in 2.1.307
 for placeholder usage in subagent transcripts, so those transcripts are not a reliable complete fallback on the pin.

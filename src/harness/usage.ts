@@ -58,15 +58,42 @@ function sum(values: number[]): number | undefined {
 
 export class ClaudeUsage implements UsageObserver {
   private latest: AttemptUsage | undefined;
+  private readonly messages = new Map<string, AttemptUsage>();
   private readonly lines = new JsonLines((record) => this.record(record));
   write(chunk: Buffer): void { this.lines.write(chunk); }
   end(): void { this.lines.end(); }
   usage(): AttemptUsage | undefined {
-    if (!this.latest || !this.lines.invalid) return this.latest;
+    if (!this.latest) {
+      const partial: AttemptUsage = {};
+      for (const key of ["inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"] as const) {
+        const values = [...this.messages.values()].flatMap((usage) => usage[key] === undefined ? [] : [usage[key]!]);
+        if (values.length) {
+          const total = sum(values);
+          if (total !== undefined) partial[key] = total;
+        }
+      }
+      return Object.keys(partial).length ? partial : undefined;
+    }
+    if (!this.lines.invalid) return this.latest;
     const { totalTokens: _total, costUsd: _cost, costSource: _source, ...partial } = this.latest;
     return Object.keys(partial).length ? partial : undefined;
   }
   private record(record: any): void {
+    // Assistant records expose reliable input/cache counters before completion. Output may
+    // still be a placeholder, and these observations never establish whole-attempt coverage.
+    if (record?.type === "assistant" && typeof record.message?.id === "string"
+      && record.message.id.length > 0 && record.message.id.length <= 255) {
+      const session = typeof record.session_id === "string" && record.session_id.length <= 255 ? record.session_id : null;
+      const id = JSON.stringify([session, record.message.id]);
+      if (!this.messages.has(id) && this.messages.size < 4096) {
+        const partial: AttemptUsage = {};
+        for (const [key, field] of [["inputTokens", "input_tokens"], ["cacheReadInputTokens", "cache_read_input_tokens"],
+          ["cacheCreationInputTokens", "cache_creation_input_tokens"]] as const) {
+          if (count(record.message.usage?.[field])) partial[key] = record.message.usage[field];
+        }
+        if (Object.keys(partial).length) this.messages.set(id, partial);
+      }
+    }
     if (this.latest && (record?.type === "assistant" || record?.type === "stream_event")) {
       const { totalTokens: _total, costUsd: _cost, costSource: _source, ...partial } = this.latest;
       this.latest = partial;

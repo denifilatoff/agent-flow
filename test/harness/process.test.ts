@@ -451,6 +451,23 @@ test("retains structured Claude usage on an unsuccessful process exit", async (t
   assert.ok(result.usage!.costUsd! < 1);
 });
 
+test("retains Claude assistant input/cache usage when killed before a result", async (t) => {
+  const fixture = await runFixture("claude");
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const processes = processFixture();
+  const adapter = createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies);
+  const pending = adapter.run(fixture.input);
+  await waitForSpawn(processes.calls);
+  const call = processes.calls[0]!;
+  const message = JSON.stringify({ type: "assistant", session_id: "root", message: { id: "message-1",
+    usage: { input_tokens: 100, cache_read_input_tokens: 20, cache_creation_input_tokens: 30, output_tokens: 1 } } });
+  call.child.stdout.write(message + "\n" + message + "\n");
+  call.child.finish(null, "SIGTERM");
+  const result = await pending;
+  assert.equal(result.signal, "SIGTERM");
+  assert.deepEqual(result.usage, { inputTokens: 100, cacheReadInputTokens: 20, cacheCreationInputTokens: 30 });
+});
+
 test("passes a GitLab personal token without seeding OAuth metadata", async (t) => {
   const fixture = await runFixture("codex");
   t.after(() => rm(fixture.root, { recursive: true, force: true }));
