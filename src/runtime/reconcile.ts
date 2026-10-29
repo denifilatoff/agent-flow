@@ -462,6 +462,7 @@ function clearUncommittedReceipt(
       const comment = evidence.snapshot.comments.find(({ id }) => id === artifact.id);
       const report = comment && parseDocumentation(comment.body);
       return report !== null && report !== undefined && evidence.snapshot.changeRequest?.state === "open"
+        && report.inputHead === artifact.inputHead
         && report.change === evidence.snapshot.changeRequest.number
         && report.resultHead === evidence.snapshot.changeRequest.headSha;
     }
@@ -474,7 +475,12 @@ function clearUncommittedReceipt(
     attemptSeries: control.attemptSeries ? { ...control.attemptSeries, current: null } : null,
     latestReceipt: null,
     humanGate: control.humanGate?.interpretedByAttemptId === receipt.attemptId ? null : control.humanGate,
-    changeRequest: normalizedChange(evidence.snapshot.changeRequest),
+    changeRequest: (() => {
+      const observed = normalizedChange(evidence.snapshot.changeRequest);
+      const documentation = receipt.artifacts.find((artifact) => artifact.kind === "comment" && artifact.artifactKind === "documentation");
+      return observed && documentation?.kind === "comment" && documentation.inputHead
+        ? { ...observed, headSha: documentation.inputHead } : observed;
+    })(),
   }, now(dependencies));
 }
 

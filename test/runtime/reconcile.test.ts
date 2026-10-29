@@ -2616,6 +2616,13 @@ test("empty-store recovery returns an open change with a stale review to review"
     },
   ], { changes: [change], reviews: [review] });
   const runtime = await localRuntime(t, provider);
+  // This configuration was pinned before the documentation stage existed.
+  const legacy = structuredClone(BUNDLE);
+  for (const prefix of ["", "bug-"]) {
+    legacy.flow.spec.states[`${prefix}development`]!.on!["agent-succeeded"]!.target = `${prefix}review`;
+    delete legacy.flow.spec.states[`${prefix}documentation`];
+  }
+  runtime.configured.config = { loadCurrent: async () => BUNDLE, loadPinned: async () => legacy };
 
   const result = await reconcileTicket(runtime.configured, TICKET);
 
@@ -3012,4 +3019,35 @@ test("warm documentation retry keeps its accepted implementation boundary despit
   provider.snapshot.changeRequest.headSha = "3".repeat(40);
   await reconcileTicket(runtime.configured, TICKET);
   assert.equal(runtime.launcher.requests[1]?.inputRevision, first);
+});
+
+test("verified documentation advances review on its result head and rejects edited input metadata", async (t) => {
+  for (const tampered of [false, true]) await t.test(tampered ? "edited input" : "verified handoff", async (context) => {
+    const provider = new FakeProvider();
+    const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+    const report = comment("documentation", `${marker}\n<!-- agent-flow-documentation:v1 ${JSON.stringify({
+      change: 31, inputHead: tampered ? "3".repeat(40) : OLD_HEAD, resultHead: NEW_HEAD,
+    })} -->\nUpdated configuration documentation and checked its examples.`, MAINTAINER, "2026-08-26T11:30:00.000Z");
+    const change = changeRequest({ headSha: NEW_HEAD, body: `${marker}\nImplementation.` });
+    provider.snapshot.labels.push("agent-stage:documentation", "agent-flow:managed");
+    provider.snapshot.changeRequest = change; provider.snapshot.comments.push(report);
+    provider.recoveryEvidence = recoveryEvidence(provider, [
+      { key: publicationKey("comment", report.id), createdAt: report.createdAt, metadata: { config: SHA, controller: FLOW_1 } },
+      { key: publicationKey("change-request", "31"), createdAt: "2026-08-26T10:30:00.000Z", metadata: { config: SHA, controller: FLOW_1 } },
+    ], { changes: [change] });
+    const runtime = await localRuntime(context, provider);
+    const configured = documentationBundle();
+    runtime.configured.config = { loadCurrent: async () => configured, loadPinned: async () => configured };
+    await runtime.writer(TICKET, null, controlState({ stateId: "documentation", changeRequest: controlChange({ headSha: NEW_HEAD }),
+      attemptSeries: attemptSeries({ stateId: "documentation", agentId: "developer" }), latestReceipt: {
+        apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt", flowInstanceId: FLOW_1, attemptId: ATTEMPT,
+        outcome: "succeeded", summary: "Documentation completed.", artifacts: [
+          { kind: "comment", id: report.id, url: report.url, marker, artifactKind: "documentation", inputHead: OLD_HEAD },
+          { kind: "change-request", number: 31, url: change.url, headSha: NEW_HEAD, state: "open" },
+        ],
+      } }));
+    const result = await reconcileTicket(runtime.configured, TICKET);
+    assert.equal(result.stateId, tampered ? "documentation" : "review");
+    assert.equal(runtime.launcher.requests[0]?.control.changeRequest?.headSha, tampered ? OLD_HEAD : NEW_HEAD);
+  });
 });

@@ -107,6 +107,7 @@ export interface ReceiptComment {
   url: string;
   marker: string;
   artifactKind: "assessment" | "plan" | "question" | "review" | "diagnostic" | "documentation";
+  inputHead?: string;
 }
 
 export interface ReceiptChangeRequest {

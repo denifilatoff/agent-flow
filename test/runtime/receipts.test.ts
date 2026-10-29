@@ -1069,6 +1069,7 @@ test("documentation accepts edits and no-op reports with both verified artifacts
 
 test("documentation rejects absent, wrong-iteration, duplicate, and contradictory evidence", async (t) => {
   for (const [name, mutate] of [
+    ["empty report", (p: FakeProvider) => installComments(p, [{ ...documentationComment(), body: documentationComment().body.split("\n").slice(0, 2).join("\n") }])],
     ["question", (p: FakeProvider) => installComments(p, [comment("question")])],
     ["wrong input", (p: FakeProvider) => installComments(p, [documentationComment(HEAD_SHA)])],
     ["wrong result", (p: FakeProvider) => installComments(p, [documentationComment(OLD_HEAD, OLD_HEAD)])],

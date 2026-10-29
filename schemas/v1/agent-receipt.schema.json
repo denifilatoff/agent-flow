@@ -46,11 +46,17 @@
         "id": { "type": "string", "minLength": 1, "maxLength": 255 },
         "url": { "$ref": "#/$defs/url" },
         "marker": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "inputHead": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "artifactKind": {
           "type": "string",
           "enum": ["assessment", "plan", "question", "review", "diagnostic", "documentation"]
         }
-      }
+      },
+      "allOf": [{
+        "if": { "properties": { "artifactKind": { "const": "documentation" } } },
+        "then": { "required": ["inputHead"] },
+        "else": { "not": { "required": ["inputHead"] } }
+      }]
     },
     "changeRequest": {
       "type": "object",

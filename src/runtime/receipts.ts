@@ -171,13 +171,16 @@ export async function readDecisionAndBuildReceipt(
       if (!pinned) decisionTrust("documentation requires a pinned implementation input");
       const published = await discoverDecisionComment(initialTicket, "documentation", expected, provider);
       const metadata = parseDocumentation(published.body);
+      if (!published.body.split(/\r?\n/).some((line) => line.trim() && !line.trim().startsWith("<!--"))) {
+        decisionTrust("documentation report has no substantive result");
+      }
       if (!metadata || metadata.change !== pinned.number || metadata.inputHead !== pinned.headSha) {
         decisionTrust("documentation report does not match the pinned implementation iteration");
       }
       verifiedChange = await readDecisionChange(initialTicket, expected, provider);
       if (metadata.resultHead !== verifiedChange.headSha) decisionTrust("documentation report result head does not match the linked request");
       verifiedComments.push(published);
-      artifacts.push(commentArtifact(published, "documentation", expected), changeArtifact(verifiedChange));
+      artifacts.push({ ...commentArtifact(published, "documentation", expected), inputHead: metadata.inputHead }, changeArtifact(verifiedChange));
     } else if (expected.resultContract === "development") {
       verifiedChange = await readDecisionChange(initialTicket, expected, provider);
       artifacts.push(changeArtifact(verifiedChange));
