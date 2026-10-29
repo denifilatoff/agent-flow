@@ -1,4 +1,4 @@
-import { electOwner, type Publication } from "../provider/publication.ts";
+import { electOwner, unanchoredPublicationKeys, type Publication } from "../provider/publication.ts";
 import type { RecoveryEvidence } from "../provider/types.js";
 
 export interface RecoveryDecision {
@@ -29,6 +29,9 @@ export function classifyRecovery(evidence: RecoveryEvidence, controllerId: strin
   }
 
   const owner = electOwner(evidence.publications);
+  if (unanchoredPublicationKeys(evidence.publications).length > 0) {
+    return decision("ambiguous", owner, "publication provenance is unavailable without an earlier matching owner");
+  }
   if (owner && owner.metadata.controller !== controllerId) {
     return decision("foreign", owner, "active work belongs to another controller");
   }

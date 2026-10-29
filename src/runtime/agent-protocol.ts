@@ -22,6 +22,7 @@ export interface RuntimePromptInput {
   decisionPath: string;
   changeRequest: NormalizedChangeRequest | null;
   sourceComment: ProviderComment | null;
+  excludedReviewIds?: readonly string[];
 }
 
 export const EVENT_SOURCES: Readonly<Record<FlowEventType, EventSource>> = Object.freeze({
@@ -101,7 +102,19 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
         + "to reopen the same change request or cancel the flow, then write {\"event\":\"agent-needs-human\"}.",
     );
   }
+  if (input.mode === "stage") {
+    lines.push(
+      "Inspect the supplied prior publications and code before deciding that the stage is complete. "
+        + "Reuse an existing suitable final result by returning its matching decision without publishing a duplicate. "
+        + "A question, progress note, partial implementation, or obsolete review is not a completed result. "
+        + "If the existing publication asks an unresolved question, reuse it with agent-needs-human. "
+        + "If the evidence is still ambiguous, request human clarification instead of claiming success.",
+    );
+  }
   if (input.resultContract === "review" && input.mode === "stage") {
+    if (input.excludedReviewIds?.length) {
+      lines.push(`Do not reuse these existing review IDs for this attempt: ${input.excludedReviewIds.join(", ")}.`);
+    }
     lines.push(
       "If one existing provider-native review already satisfies either exact review evidence contract for this pinned "
         + "head, reuse it by writing the matching decision without publishing another review.",

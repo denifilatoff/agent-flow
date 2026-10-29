@@ -1,6 +1,6 @@
 import type { ProviderConfig } from "../config/types.js";
 import { ProviderHttpError } from "./http.ts";
-import { parsePublication, type Publication } from "./publication.ts";
+import { parsePublication, unanchoredPublicationKeys, type Publication } from "./publication.ts";
 import type {
   Actor,
   DiscoveryPage,
@@ -166,7 +166,8 @@ export function createGitHubAdapter(
     return edits;
   }
 
-  async function readSnapshotData(ref: TicketRef) {
+  async function readSnapshotData(ref: TicketRef, pinnedActivationLabel?: string) {
+    const recognizedLabels = pinnedActivationLabel ? [pinnedActivationLabel] : activationLabels;
     const path = ticketPath(ref);
     const repository = await readRepository(ref.repository);
     const issue = object((await request(path, "active")).data, "GitHub issue");
@@ -175,11 +176,11 @@ export function createGitHubAdapter(
     const timeline = await listAll(`${path}/timeline?per_page=100`, "active");
     const comments = (await listAll(`${path}/comments?per_page=100`, "active"))
       .map(normalizeComment);
-    const activeLabels = activationLabels.filter((label) => labels.includes(label));
+    const activeLabels = recognizedLabels.filter((label) => labels.includes(label));
     const activationEvents: Array<{ kind: "add" | "remove"; label: string; id: string; createdAt: string; actor: Actor }> = [];
     for (const event of timeline) {
       const item = object(event, "GitHub timeline event");
-      const label = activationLabels.find((label) =>
+      const label = recognizedLabels.find((label) =>
         isLabelEvent(item, "labeled", label) || isLabelEvent(item, "unlabeled", label));
       if (label) activationEvents.push({
         kind: item.event === "labeled" ? "add" : "remove", label,
@@ -294,7 +295,7 @@ export function createGitHubAdapter(
     async bootstrap(repository: string): Promise<TicketRef[]> {
       const route = repositoryPath(repository);
       const found = new Map<number, TicketRef>();
-      for (const label of activationLabels) {
+      for (const label of ["agent-flow:managed", ...activationLabels]) {
         const query = new URLSearchParams({ state: "all", labels: label, per_page: "100" });
         for (const ref of issueRefs(
           await listAll(`repos/${route}/issues?${query}`, "background"),
@@ -318,8 +319,8 @@ export function createGitHubAdapter(
       };
     },
 
-    async readRecoveryEvidence(ref: TicketRef): Promise<RecoveryEvidence> {
-      const data = await readSnapshotData(ref);
+    async readRecoveryEvidence(ref: TicketRef, pinnedActivationLabel?: string): Promise<RecoveryEvidence> {
+      const data = await readSnapshotData(ref, pinnedActivationLabel);
       const ambiguities: string[] = [...data.linkAmbiguities];
       const { boundary, changes } = await readActiveChanges(ref, data, ambiguities);
       const reviewRows = await Promise.all(changes.map(async (change) => ({
@@ -374,8 +375,9 @@ export function createGitHubAdapter(
         }
         if (parsed.kind !== "current") return;
         const metadata = parsed.metadata;
-        if ((kind !== "change-request" && updatedAt !== null && updatedAt !== createdAt)
-          || !provenanceAvailable) {
+        const original = (updatedAt === null || updatedAt === createdAt || kind === "change-request")
+          && provenanceAvailable;
+        if (!original && kind === "comment") {
           ambiguities.push(`publication provenance is unavailable: ${key}`);
           return;
         }
@@ -383,7 +385,7 @@ export function createGitHubAdapter(
           ambiguities.push(`publication author is not authorized: ${key}`);
           return;
         }
-        publications.push({ key, createdAt, metadata });
+        publications.push({ key, createdAt, metadata, ...original ? {} : { ownershipEligible: false } });
       };
       for (const comment of data.snapshot.comments) {
         await addPublication("comment", comment.id, comment.body, comment.createdAt, comment.updatedAt, comment.actor);
@@ -418,11 +420,11 @@ export function createGitHubAdapter(
           const actor = normalizeActor(row.user, "GitHub review actor");
           if (parsed.kind === "current") {
             try {
-              const review = normalizeReview(row);
-              reviews.push(review);
-              await addPublication("review", id, body, submittedAt, null, actor, reviewEdits.has(String(row.node_id))
+              const original = reviewEdits.has(String(row.node_id))
                 && (reviewEdits.get(String(row.node_id)) === null
-                  || Date.parse(reviewEdits.get(String(row.node_id))!) < Date.parse(submittedAt)));
+                  || Date.parse(reviewEdits.get(String(row.node_id))!) < Date.parse(submittedAt));
+              if (original) reviews.push(normalizeReview(row));
+              await addPublication("review", id, body, submittedAt, null, actor, original);
             } catch (error) {
               ambiguities.push(`invalid review evidence: ${publicationKey("github", apiScope, canonicalRepository, "review", id)}: ${error instanceof Error ? error.message : "unknown error"}`);
             }
@@ -430,6 +432,9 @@ export function createGitHubAdapter(
             await addPublication("review", id, body, submittedAt, null, actor);
           }
         }
+      }
+      for (const key of unanchoredPublicationKeys(publications)) {
+        ambiguities.push(`publication provenance is unavailable: ${key}`);
       }
       if (changes.length > 1) ambiguities.push("multiple linked pull requests");
       return {

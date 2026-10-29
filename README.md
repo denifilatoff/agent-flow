@@ -30,7 +30,8 @@ remains the only operational source of truth.
 
 At startup, the controller creates or loads `.agent-flow-data/controller-id`, opens
 `.agent-flow-data/execution.sqlite`, and reconciles tickets that carry a configured activation label, including
-`agent-flow:development` or `bugfix`. A managed label or historical publication alone does not start work. Corrupt identities and unsupported or corrupt databases
+`agent-flow:development` or `bugfix`. A managed label or historical publication alone does not start work. Corrupt
+identities and unsupported or corrupt databases
 fail startup without replacing the affected file. Active legacy state requires migration and receives no automatic
 writes.
 

@@ -331,6 +331,7 @@ function composeController(
       return reconcileTicket({
         provider,
         controllerId: local.controllerId,
+        providerApiUrl: configured.provider.apiUrl,
         launcher: requiredRunner(runners, ref.provider),
         writeControl,
         config: {

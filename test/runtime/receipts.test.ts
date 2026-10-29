@@ -1029,3 +1029,16 @@ test("accepts a verification question when the change request is closed", async 
       marker: marker("question"), artifactKind: "question" }],
   });
 });
+
+test("accepts one newly published plan when reassessment replaces its earlier incomplete candidate", async () => {
+  const provider = new FakeProvider();
+  const candidate = comment("plan", { id: "201", url: "https://github.test/owner/repo/issues/17#issuecomment-201",
+    body: `${marker("plan")}\nPartial plan; missing the validation steps.` });
+  const completed = comment("plan", { id: "202", url: "https://github.test/owner/repo/issues/17#issuecomment-202",
+    body: `${marker("plan")}\nComplete plan and validation steps.` });
+  installComments(provider, [candidate, completed]);
+  const receipt = await readDecision({ event: "agent-succeeded" }, expectation({
+    stateId: "planning", resultContract: "plan", reusableCommentIds: [candidate.id],
+  }), provider);
+  assert.equal(receipt.artifacts[0]?.kind === "comment" && receipt.artifacts[0].id, completed.id);
+});

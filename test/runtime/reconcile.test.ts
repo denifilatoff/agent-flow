@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -39,6 +39,7 @@ import {
   type AttemptRequest,
   type ReconcileDependencies,
 } from "../../src/runtime/reconcile.ts";
+import { readDecisionAndBuildReceipt } from "../../src/runtime/receipts.ts";
 import { deriveEvent } from "../../src/runtime/derive-event.ts";
 import { createControlWriter } from "../../src/runtime/control-state.ts";
 import { openLocalStore, providerScope } from "../../src/runtime/local-store.ts";
@@ -423,6 +424,7 @@ async function localRuntime(t: TestContext, provider: FakeProvider, launcher = n
 function dependencies(provider = new FakeProvider(), launcher = new FakeLauncher()): ReconcileDependencies {
   return {
     provider,
+    providerApiUrl: "https://api.github.com",
     config: {
       loadCurrent: async () => BUNDLE,
       loadPinned: async (revision: string) => {
@@ -1096,7 +1098,7 @@ test("reset reassessment isolates a current result when its provider kind is dis
   ]);
 });
 
-test("C8 reset pauses when assessment feedback makes a plan candidate indistinguishable", async (t) => {
+test("C8 reset reassesses one possible plan but pauses competing iterations", async (t) => {
   for (const includePlan of [false, true]) {
     await t.test(includePlan ? "real plan is present" : "only revised assessment is present", async (context) => {
       const provider = new FakeProvider();
@@ -1121,11 +1123,15 @@ test("C8 reset pauses when assessment feedback makes a plan candidate indistingu
 
       const result = await reconcileTicket(runtime.configured, TICKET);
 
-      assert.equal(result.runnable, false);
-      assert.equal(runtime.launcher.requests.length, 0);
-      assert.equal(runtime.writer.load!(TICKET)?.value.disposition, "ambiguous");
+      assert.equal(result.runnable, !includePlan);
+      assert.equal(runtime.launcher.requests.length, includePlan ? 0 : 1);
+      assert.equal(runtime.writer.load!(TICKET)?.value.disposition, includePlan ? "ambiguous" : "ready");
+      if (!includePlan) {
+        assert.equal(runtime.launcher.requests[0]?.resultContract, "plan");
+        assert.ok(!runtime.launcher.requests[0]?.publicationKeys.includes(publicationKey("comment", revised.id)));
+      }
       assert.deepEqual(runtime.writer.load!(TICKET)?.value.publicationKeys, publications
-        .map(({ id }) => publicationKey("comment", id)).sort());
+        .filter(({ id }) => includePlan || id !== revised.id).map(({ id }) => publicationKey("comment", id)).sort());
     });
   }
 });
@@ -1148,7 +1154,7 @@ test("reset baseline excludes publications from an earlier activation", async (t
   await reconcileTicket(runtime.configured, TICKET);
 
   assert.equal(runtime.launcher.requests.length, 1);
-  assert.deepEqual(runtime.launcher.requests[0]?.publicationKeys, []);
+  assert.deepEqual(runtime.launcher.requests[0]?.publicationKeys, [publicationKey("comment", old.id)]);
 });
 
 test("reset pauses when the current publication iteration cannot be isolated", async (t) => {
@@ -1172,7 +1178,7 @@ test("reset pauses when the current publication iteration cannot be isolated", a
   assert.equal(runtime.writer.load!(TICKET)?.value.disposition, "ambiguous");
 });
 
-test("C7 reset human cutoff processes an authorized answer after the committed result", async (t) => {
+test("C7 reset reassesses the recorded result before interpreting an existing answer", async (t) => {
   const provider = new FakeProvider();
   const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
   const assessment = comment("assessment", `${marker}\nAssessment.`, MAINTAINER, "2026-08-26T10:30:00.000Z");
@@ -1188,10 +1194,11 @@ test("C7 reset human cutoff processes an authorized answer after the committed r
 
   const result = await reconcileTicket(runtime.configured, TICKET);
 
-  assert.equal(result.stateId, "assessment-review");
+  assert.equal(result.stateId, "assessment");
   assert.equal(runtime.launcher.requests.length, 1);
-  assert.equal(runtime.launcher.requests[0]?.mode, "human-input");
-  assert.equal(runtime.launcher.requests[0]?.sourceComment?.id, answer.id);
+  assert.equal(runtime.launcher.requests[0]?.mode, "stage");
+  assert.equal(runtime.launcher.requests[0]?.sourceComment, null);
+  assert.ok(runtime.launcher.requests[0]?.snapshot.comments.some(({ id }) => id === answer.id));
 });
 
 test("C14 an inactive ticket without local work does not create or launch a flow", async () => {
@@ -2680,4 +2687,244 @@ test("unavailable winning configuration pauses only its ticket with a visible re
   assert.equal(runtime.launcher.requests.length, 0);
   assert.equal(provider.created, 0);
   assert.equal(provider.updated, 0);
+});
+
+
+test("C2/C7 reassesses a plan before its human gate and retains the existing answer after readback", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const assessment = comment("assessment", `${marker}\nAssessment.`, MAINTAINER, "2026-08-26T10:10:00.000Z");
+  const plan = comment("plan", `${marker}\nComplete plan.`, MAINTAINER, "2026-08-26T10:20:00.000Z");
+  const answer = comment("approved-plan", "Approved.", MAINTAINER, "2026-08-26T10:25:00.000Z");
+  provider.snapshot.labels.push("agent-stage:plan-review", "agent-flow:managed");
+  provider.snapshot.comments.push(assessment, plan, answer);
+  provider.recoveryEvidence = recoveryEvidence(provider, [assessment, plan].map((published) => ({
+    key: publicationKey("comment", published.id), createdAt: published.createdAt,
+    metadata: { config: SHA, controller: FLOW_1 },
+  })));
+  const runtime = await localRuntime(t, provider);
+
+  const reassessed = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(reassessed.stateId, "planning");
+  const request = runtime.launcher.requests[0]!;
+  assert.equal(request.resultContract, "plan");
+  assert.equal(request.mode, "stage");
+  assert.ok(!request.publicationKeys.includes(publicationKey("comment", plan.id)));
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-reassess-decision-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "decision.json");
+  await writeFile(path, JSON.stringify({ event: "agent-succeeded" }));
+  const receipt = await readDecisionAndBuildReceipt(path, {
+    flow: request.bundle.flow, stateId: request.stateId, mode: request.mode,
+    resultContract: request.resultContract, flowInstanceId: request.control.flowInstanceId,
+    attemptId: ATTEMPT, configRevision: SHA, controllerId: FLOW_1,
+    publicationKeys: request.publicationKeys, ticket: TICKET,
+    pinnedChangeRequest: null, sourceComment: null,
+  }, provider, false);
+  assert.equal(receipt.artifacts[0]?.kind === "comment" && receipt.artifacts[0].id, plan.id);
+  const before = runtime.writer.load!(TICKET)!.value.control!;
+  await runtime.writer(TICKET, before, { ...before, sequence: before.sequence + 1,
+    updatedAt: NOW, latestReceipt: receipt,
+    attemptSeries: attemptSeries({ stateId: "planning", agentId: "planner" }),
+  });
+  runtime.launcher.running.clear();
+  const gate = await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(gate.stateId, "plan-review");
+  assert.equal(runtime.launcher.requests.at(-1)?.mode, "human-input");
+  assert.equal(runtime.launcher.requests.at(-1)?.sourceComment?.id, answer.id);
+  assert.deepEqual(provider.snapshot.comments.map(({ id }) => id), [assessment.id, plan.id, answer.id]);
+  assert.equal(provider.created, 0);
+  assert.equal(provider.updated, 0);
+});
+
+test("a marked question at plan-review is reassessed without treating an approval as plan completion", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const assessment = comment("assessment", `${marker}\nAssessment.`, MAINTAINER, "2026-08-26T10:10:00.000Z");
+  const plan = comment("plan", `${marker}\nWhich design should the plan use?`, MAINTAINER, "2026-08-26T10:20:00.000Z");
+  const answer = comment("approved-plan", "Approved.", MAINTAINER, "2026-08-26T10:25:00.000Z");
+  provider.snapshot.labels.push("agent-stage:plan-review", "agent-flow:managed");
+  provider.snapshot.comments.push(assessment, plan, answer);
+  provider.recoveryEvidence = recoveryEvidence(provider, [assessment, plan].map((published) => ({
+    key: publicationKey("comment", published.id), createdAt: published.createdAt,
+    metadata: { config: SHA, controller: FLOW_1 },
+  })));
+  const runtime = await localRuntime(t, provider);
+
+  const reassessed = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(reassessed.stateId, "planning");
+  const request = runtime.launcher.requests[0]!;
+  assert.equal(request.resultContract, "plan");
+  assert.equal(request.mode, "stage");
+  assert.ok(!request.publicationKeys.includes(publicationKey("comment", plan.id)));
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-reassess-decision-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "decision.json");
+  await writeFile(path, JSON.stringify({ event: "agent-needs-human" }));
+  const receipt = await readDecisionAndBuildReceipt(path, {
+    flow: request.bundle.flow, stateId: request.stateId, mode: request.mode,
+    resultContract: request.resultContract, flowInstanceId: request.control.flowInstanceId,
+    attemptId: ATTEMPT, configRevision: SHA, controllerId: FLOW_1,
+    publicationKeys: request.publicationKeys, ticket: TICKET,
+    pinnedChangeRequest: null, sourceComment: null,
+  }, provider, false);
+  assert.equal(receipt.artifacts[0]?.kind === "comment" && receipt.artifacts[0].id, plan.id);
+  const before = runtime.writer.load!(TICKET)!.value.control!;
+  await runtime.writer(TICKET, before, { ...before, sequence: before.sequence + 1,
+    updatedAt: NOW, latestReceipt: receipt,
+    attemptSeries: attemptSeries({ stateId: "planning", agentId: "planner" }),
+  });
+  runtime.launcher.running.clear();
+  const gate = await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(gate.stateId, "needs-human");
+  assert.equal(runtime.writer.load!(TICKET)?.value.control?.resumeStateId, "planning");
+  assert.notEqual(gate.stateId, "development");
+  assert.equal(runtime.launcher.requests.at(-1)?.resultContract, "human-gate");
+  assert.equal(runtime.launcher.requests.at(-1)?.sourceComment?.id, answer.id);
+  assert.deepEqual(provider.snapshot.comments.map(({ id }) => id), [assessment.id, plan.id, answer.id]);
+  assert.equal(provider.created, 0);
+  assert.equal(provider.updated, 0);
+});
+
+test("local recovery preserves a pinned bugfix activation when startup routes omit its label", async (t) => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["bugfix", "agent-flow:managed", "agent-stage:bug-development"];
+  provider.snapshot.activation = { present: false, label: null, eventId: null, actor: null, occurredAt: null };
+  provider.recoveryEvidence = recoveryEvidence(provider, []);
+  const runtime = await localRuntime(t, provider);
+  await runtime.writer(TICKET, null, controlState({ stateId: "bug-development", activationLabel: "bugfix" }));
+
+  const result = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(result.stateId, "bug-development");
+  assert.equal(result.started, true);
+  assert.equal(runtime.launcher.requests[0]?.agentId, "bugfixer");
+  assert.equal(runtime.launcher.requests[0]?.snapshot.activation.present, true);
+  assert.ok(provider.snapshot.labels.includes("bugfix"));
+  assert.equal(runtime.launcher.cancelled.length, 0);
+});
+
+test("C3 planning reassesses an existing plan beside its earlier assessment without republishing", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const assessment = comment("assessment", `${marker}\nAssessment.`, MAINTAINER, "2026-08-26T10:10:00.000Z");
+  const plan = comment("plan", `${marker}\nComplete plan.`, MAINTAINER, "2026-08-26T10:20:00.000Z");
+  const answer = comment("approved-plan", "Approved.", MAINTAINER, "2026-08-26T10:25:00.000Z");
+  provider.snapshot.labels.push("agent-stage:planning", "agent-flow:managed");
+  provider.snapshot.comments.push(assessment, plan, answer);
+  provider.recoveryEvidence = recoveryEvidence(provider, [assessment, plan].map((published) => ({
+    key: publicationKey("comment", published.id), createdAt: published.createdAt,
+    metadata: { config: SHA, controller: FLOW_1 },
+  })));
+  const runtime = await localRuntime(t, provider);
+
+  const reassessed = await reconcileTicket(runtime.configured, TICKET);
+
+  assert.equal(reassessed.stateId, "planning");
+  const request = runtime.launcher.requests[0]!;
+  assert.equal(request.resultContract, "plan");
+  assert.equal(request.mode, "stage");
+  assert.ok(!request.publicationKeys.includes(publicationKey("comment", plan.id)));
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-reassess-decision-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "decision.json");
+  await writeFile(path, JSON.stringify({ event: "agent-succeeded" }));
+  const receipt = await readDecisionAndBuildReceipt(path, {
+    flow: request.bundle.flow, stateId: request.stateId, mode: request.mode,
+    resultContract: request.resultContract, flowInstanceId: request.control.flowInstanceId,
+    attemptId: ATTEMPT, configRevision: SHA, controllerId: FLOW_1,
+    publicationKeys: request.publicationKeys, ticket: TICKET,
+    pinnedChangeRequest: null, sourceComment: null,
+  }, provider, false);
+  assert.equal(receipt.artifacts[0]?.kind === "comment" && receipt.artifacts[0].id, plan.id);
+  const before = runtime.writer.load!(TICKET)!.value.control!;
+  await runtime.writer(TICKET, before, { ...before, sequence: before.sequence + 1,
+    updatedAt: NOW, latestReceipt: receipt,
+    attemptSeries: attemptSeries({ stateId: "planning", agentId: "planner" }),
+  });
+  runtime.launcher.running.clear();
+  const gate = await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(gate.stateId, "plan-review");
+  assert.equal(runtime.launcher.requests.at(-1)?.mode, "human-input");
+  assert.equal(runtime.launcher.requests.at(-1)?.sourceComment?.id, answer.id);
+  assert.deepEqual(provider.snapshot.comments.map(({ id }) => id), [assessment.id, plan.id, answer.id]);
+  assert.equal(provider.created, 0);
+  assert.equal(provider.updated, 0);
+});
+
+test("a warm restart preserves the unfinished attempt baseline so its published result can be reused", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const published = comment("published-before-crash", `${marker}\nCompleted assessment.`);
+  provider.snapshot.labels.push("agent-stage:assessment");
+  provider.snapshot.comments.push(published);
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+    key: publicationKey("comment", published.id), createdAt: published.createdAt,
+    metadata: { config: SHA, controller: FLOW_1 },
+  }]);
+  const runtime = await localRuntime(t, provider);
+  await runtime.writer(TICKET, null, controlState({ attemptSeries: attemptSeries({
+    current: { attemptId: ATTEMPT, status: "started", startedAt: NOW },
+  }) }), []);
+  await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(runtime.launcher.requests.length, 1);
+  assert.deepEqual(runtime.launcher.requests[0]?.publicationKeys, []);
+});
+
+test("an inactive losing controller stops locally without rewriting the winner's done label", async (t) => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["agent-flow:managed", "agent-stage:done"];
+  provider.snapshot.activation.present = false;
+  provider.snapshot.open = false;
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+    key: publicationKey("comment", "foreign-owner"), createdAt: NOW,
+    metadata: { config: SHA, controller: FLOW_2 },
+  }]);
+  const runtime = await localRuntime(t, provider);
+  await runtime.writer(TICKET, null, controlState());
+  const result = await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(result.started, false);
+  assert.equal(provider.events.includes("provider:set-labels"), false);
+  assert.deepEqual(provider.snapshot.labels, ["agent-flow:managed", "agent-stage:done"]);
+  assert.equal(runtime.launcher.requests.length, 0);
+  assert.deepEqual(runtime.launcher.cancelled, [FLOW_1]);
+});
+
+test("retries owned cancellation label cleanup after its local state was already committed", async (t) => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels = ["agent-flow:managed", "agent-stage:assessment"];
+  provider.snapshot.activation.present = false;
+  const runtime = await localRuntime(t, provider);
+  await runtime.writer(TICKET, null, controlState());
+  const update = provider.setControllerLabels.bind(provider);
+  provider.setControllerLabels = async () => { throw new Error("transient labels failure"); };
+  await assert.rejects(reconcileTicket(runtime.configured, TICKET), /label update failed/);
+  provider.setControllerLabels = update;
+  await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(runtime.writer.load!(TICKET)?.value.control?.stateId, "cancelled");
+  assert.deepEqual(provider.snapshot.labels, ["agent-flow:managed", "agent-stage:cancelled"]);
+  assert.equal(runtime.launcher.requests.length, 0);
+});
+
+test("an edited review approval returns warm local merge-wait work to fresh review", async (t) => {
+  const provider = new FakeProvider();
+  const change = changeRequest({ body: `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`, createdAt: "2026-08-26T10:15:00.000Z" });
+  provider.snapshot.labels.push("agent-stage:awaiting-merge");
+  provider.snapshot.changeRequest = change;
+  provider.recoveryEvidence = recoveryEvidence(provider, [{
+    key: publicationKey("change-request", String(change.number)), createdAt: change.createdAt,
+    metadata: { config: SHA, controller: FLOW_1 },
+  }, {
+    key: publicationKey("review", "edited-review"), createdAt: "2026-08-26T10:30:00.000Z",
+    metadata: { config: SHA, controller: FLOW_1 }, ownershipEligible: false,
+  }], { changes: [change], reviews: [] });
+  const runtime = await localRuntime(t, provider);
+  await runtime.writer(TICKET, null, controlState({ stateId: "awaiting-merge", changeRequest: controlChange() }));
+  const result = await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(result.stateId, "review");
+  assert.equal(runtime.launcher.requests[0]?.agentId, "reviewer");
+  assert.ok(runtime.launcher.requests[0]?.publicationKeys.includes(publicationKey("review", "edited-review")));
+  assert.equal(provider.snapshot.labels.includes("agent-flow:development"), true);
 });

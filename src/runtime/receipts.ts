@@ -36,6 +36,7 @@ export interface DecisionExpectation {
   configRevision: string;
   controllerId: string;
   publicationKeys: readonly string[];
+  reusableCommentIds?: readonly string[];
   flowInstanceId: string;
   attemptId: string;
   ticket: TicketRef;
@@ -229,7 +230,10 @@ async function discoverDecisionComment(
 ): Promise<ProviderComment> {
   const expectedMarker = decisionMarker(expected);
   const candidates = ticket.comments.filter((comment) => !isBaseline(expected, "comment", comment.id));
-  const matches = candidates.filter((comment) => hasExpectedPublication(comment.body, expected));
+  const reusable = new Set(expected.reusableCommentIds ?? []);
+  const marked = candidates.filter((comment) => hasExpectedPublication(comment.body, expected));
+  const fresh = marked.filter(({ id }) => !reusable.has(id));
+  const matches = fresh.length > 0 ? fresh : marked;
   if (matches.length === 0) {
     evidenceUnavailable(`${artifactKind} comment evidence is unavailable`);
   }

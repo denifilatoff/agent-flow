@@ -1,6 +1,6 @@
 import type { ProviderConfig } from "../config/types.js";
 import { ProviderHttpError } from "./http.ts";
-import { parsePublication, type Publication } from "./publication.ts";
+import { parsePublication, unanchoredPublicationKeys, type Publication } from "./publication.ts";
 import type {
   Actor,
   DiscoveryPage,
@@ -127,7 +127,8 @@ export function createGitLabAdapter(
     return permission(integer(member, "access_level"));
   }
 
-  async function readSnapshotData(ref: TicketRef) {
+  async function readSnapshotData(ref: TicketRef, pinnedActivationLabel?: string) {
+    const recognizedLabels = pinnedActivationLabel ? [pinnedActivationLabel] : activationLabels;
     const path = ticketPath(ref);
     const project = await readProject(ref.repository);
     const repository = normalizeProject(project, ref.repository, webBase);
@@ -135,11 +136,11 @@ export function createGitLabAdapter(
     const open = normalizeIssueState(issue);
     const labels = normalizeLabels(issue.labels);
     const events = await listAll(`${path}/resource_label_events?per_page=100`, "active");
-    const activeLabels = activationLabels.filter((label) => labels.includes(label));
+    const activeLabels = recognizedLabels.filter((label) => labels.includes(label));
     const activationEvents: Array<{ kind: "add" | "remove"; label: string; id: string; createdAt: string; actor: Actor }> = [];
     for (const event of events) {
       const item = object(event, "GitLab label event");
-      const label = activationLabels.find((label) =>
+      const label = recognizedLabels.find((label) =>
         isLabelEvent(item, "add", label) || isLabelEvent(item, "remove", label));
       if (label) activationEvents.push({
         kind: item.action === "add" ? "add" : "remove", label,
@@ -262,7 +263,7 @@ export function createGitLabAdapter(
     async bootstrap(repository: string): Promise<TicketRef[]> {
       const route = `${repositoryPath(repository)}/issues`;
       const found = new Map<number, TicketRef>();
-      for (const label of activationLabels) {
+      for (const label of ["agent-flow:managed", ...activationLabels]) {
         const query = new URLSearchParams({
           scope: "all",
           state: "all",
@@ -288,8 +289,8 @@ export function createGitLabAdapter(
       };
     },
 
-    async readRecoveryEvidence(ref: TicketRef): Promise<RecoveryEvidence> {
-      const data = await readSnapshotData(ref);
+    async readRecoveryEvidence(ref: TicketRef, pinnedActivationLabel?: string): Promise<RecoveryEvidence> {
+      const data = await readSnapshotData(ref, pinnedActivationLabel);
       const ambiguities: string[] = [];
       const { boundary, changes } = await readActiveChanges(ref, data, ambiguities);
       const reviewRows = await Promise.all(changes.map(async (change) => ({
@@ -333,8 +334,9 @@ export function createGitLabAdapter(
         }
         if (parsed.kind !== "current") return;
         const metadata = parsed.metadata;
-        if ((kind !== "change-request" && updatedAt !== null && updatedAt !== createdAt)
-          || !provenanceAvailable) {
+        const original = (updatedAt === null || updatedAt === createdAt || kind === "change-request")
+          && provenanceAvailable;
+        if (!original && kind === "comment") {
           ambiguities.push(`publication provenance is unavailable: ${key}`);
           return;
         }
@@ -342,7 +344,7 @@ export function createGitLabAdapter(
           ambiguities.push(`publication author is not authorized: ${key}`);
           return;
         }
-        publications.push({ key, createdAt, metadata });
+        publications.push({ key, createdAt, metadata, ...original ? {} : { ownershipEligible: false } });
       };
       for (const comment of data.snapshot.comments) {
         await addPublication("comment", comment.id, comment.body, comment.createdAt, comment.updatedAt, comment.actor);
@@ -378,7 +380,7 @@ export function createGitLabAdapter(
           if (parsed.kind === "current") {
             try {
               const review = normalizeReviewNote(row, change, false);
-              reviews.push(review);
+              if (updatedAt === submittedAt) reviews.push(review);
               await addPublication("review", id, body, submittedAt, updatedAt, actor);
             } catch (error) {
               ambiguities.push(`invalid review evidence: ${publicationKey("gitlab", apiScope, ref.repository, "review", id)}: ${error instanceof Error ? error.message : "unknown error"}`);
@@ -387,6 +389,9 @@ export function createGitLabAdapter(
             await addPublication("review", id, body, submittedAt, updatedAt, actor);
           }
         }
+      }
+      for (const key of unanchoredPublicationKeys(publications)) {
+        ambiguities.push(`publication provenance is unavailable: ${key}`);
       }
       if (changes.length > 1) ambiguities.push("multiple linked merge requests");
       return {

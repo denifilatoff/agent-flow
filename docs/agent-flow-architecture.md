@@ -470,8 +470,11 @@ GitHub uses the Issues API `since` filter; GitLab uses `updated_after`. The cont
 requests, and other details only for tickets returned as changed. It uses a small overlap between incremental windows
 to avoid missing updates at a timestamp boundary and relies on idempotent reconciliation to discard duplicates.
 
-After restart, bootstrap queries every configured activation label to find runnable tickets. A managed label alone
-never starts recovery. Ordinary reconciliation filters incremental discoveries by activation before executing work.
+After restart, bootstrap queries the managed label and every configured activation label. Managed discovery retains
+still-active local instances whose pinned activation route no longer appears in startup configuration. A managed
+label alone never authorizes work. Existing local instances use their pinned activation label and its history; a newer
+activation event on another route cannot switch the running instance. Ordinary reconciliation filters incremental
+discoveries by activation before executing work.
 Use cached observations and incremental discovery; do not add a second ownership poll before publication.
 
 Repository scans are serialized and continue into the next interval when the configured budget is not enough to

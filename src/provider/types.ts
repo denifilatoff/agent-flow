@@ -102,7 +102,7 @@ export interface ProviderAdapter {
   bootstrap(repository: string): Promise<TicketRef[]>;
   readRepository(repository: string): Promise<ProviderRepository>;
   readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot>;
-  readRecoveryEvidence(ref: TicketRef): Promise<RecoveryEvidence>;
+  readRecoveryEvidence(ref: TicketRef, pinnedActivationLabel?: string): Promise<RecoveryEvidence>;
   permission(repository: string, actor: Actor): Promise<Permission>;
   readComment(ref: TicketRef, id: string): Promise<ProviderComment>;
   createComment(ref: TicketRef, body: string): Promise<ProviderComment>;

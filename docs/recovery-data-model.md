@@ -141,6 +141,11 @@ string comparison, not locale collation. This deterministic tie-break is not a c
 PR/MR creation times are valid ownership times only when the block was included at original creation. Do not
 retroactively mark an old object to win an election. If provenance cannot be established for legacy objects, stop for
 migration.
+A changed PR/MR description can remain result evidence when an earlier intact publication independently establishes
+the same owner and configuration. It cannot win ownership at its original creation time. An edited or unverified
+native review cannot supply approval; retain its identity in the attempt baseline and run a fresh review. An edited
+assessment or plan remains ambiguous and does not inherit an earlier human approval.
+
 The earliest owner also determines the configuration of active work; ignore losing pins rather than treating those
 pins as a configuration migration. Conflicting pins from the winning controller require explicit resolution.
 

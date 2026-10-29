@@ -36,12 +36,15 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
   const publicationMarker = prompt.match(/<!-- agent-flow:v1 \{"config":"[a-f0-9]{40}","controller":"[a-f0-9-]{36}"\} -->/)?.[0];
   if (!publicationMarker) return 2;
   const endpoint = new URL("/__fixture/attempt", context.ticket.repository.cloneRoot);
+  let cancellationRecorded: Promise<unknown> | undefined;
   const cancellation = waitForCancellation(() => {
-    void fetch(new URL("/__fixture/cancelled", endpoint), {
+    cancellationRecorded = fetch(new URL("/__fixture/cancelled", endpoint), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ attemptId: context.controlState.attemptSeries.current.attemptId }),
-    }).catch(() => undefined);
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(await response.text());
+    });
   });
   let completion: Promise<unknown> | undefined;
   const completed = () => completion ??= fetch(new URL("/__fixture/completed", endpoint), {
@@ -87,6 +90,7 @@ async function runAgent(target: "codex" | "claude"): Promise<number> {
     return 0;
   } finally {
     cancellation.close();
+    await cancellationRecorded;
     await completed();
   }
 }

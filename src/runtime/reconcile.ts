@@ -19,7 +19,7 @@ import {
   renderControlComment,
   type ParsedControlComment,
 } from "../provider/control-comment.ts";
-import { parsePublication } from "../provider/publication.ts";
+import { electOwner, parsePublication } from "../provider/publication.ts";
 import type {
   Permission,
   ProviderAdapter,
@@ -109,10 +109,18 @@ export async function reconcileTicket(
 
   let snapshot: ProviderTicketSnapshot;
   if (dependencies.controllerId) {
+    const cached = dependencies.writeControl.load?.(ref)?.value.control;
+    const pinned = cached && cached.stateId !== "done" && cached.stateId !== "cancelled" ? cached : null;
     const observedEvidence = await providerCall(
       "provider recovery evidence read failed",
-      () => provider.readRecoveryEvidence(ref),
+      () => provider.readRecoveryEvidence(ref, pinned?.activationLabel),
     );
+    if (pinned?.activationLabel && observedEvidence.snapshot.activation.label !== pinned.activationLabel) {
+      observedEvidence.snapshot.activation = {
+        present: observedEvidence.snapshot.labels.includes(pinned.activationLabel), label: pinned.activationLabel,
+        eventId: pinned.activationEventId, actor: pinned.activatedBy, occurredAt: pinned.activatedAt,
+      };
+    }
     const evidence = currentActivationEvidence(observedEvidence);
     snapshot = evidence.snapshot;
     assertSnapshot(snapshot, ref);
@@ -236,8 +244,24 @@ async function reconcileLocal(
   const localResume = control !== null && isMissingLocalResume(decision, snapshot, control);
 
   if (decision.kind === "inactive" && !mergedWins) {
+    const owner = control ? electOwner(evidence.publications.filter((publication) =>
+      Date.parse(publication.createdAt) >= Date.parse(control!.activatedAt))) : null;
+    const foreign = (owner && owner.metadata.controller !== controllerId)
+      || stored?.value.disposition === "foreign"
+      || (stored?.value.owner && stored.value.owner.controllerId !== controllerId);
+    if (control && foreign) {
+      await dependencies.launcher.cancel(control.flowInstanceId);
+      stored = await writer.recordRecovery!(ref, evidence, {
+        kind: "foreign", owner, reason: "Inactive work belongs to another controller; local work stopped without provider changes.",
+      }, control);
+      return outcome(stored.value.control, null, snapshot, false, false, false);
+    }
     if (control && control.stateId !== "done" && control.stateId !== "cancelled") {
       control = await cancelLocal(dependencies, snapshot, control);
+    } else if (control) {
+      const pinned = await dependencies.config.loadPinned(control.configRevision);
+      assertBundle(pinned, control.configRevision);
+      await ownLabels(dependencies.provider, ref, snapshot.labels, pinned, control.stateId, true, control.activationLabel);
     }
     stored = await writer.recordRecovery!(ref, evidence, decision, control);
     return outcome(stored.value.control, null, snapshot, control !== null, false, false);
@@ -300,16 +324,7 @@ async function reconcileLocal(
     const freshStart = evidence.activeBoundary === "fresh" && evidence.publications.length === 0;
     const entry = entryStage(bundle.flow, snapshot.activation.label);
     let stage = freshStart ? entry : providerStage(snapshot, bundle.flow);
-    if (bundle.flow.spec.states[stage]?.kind === "provider-wait" && snapshot.changeRequest?.state === "open") {
-      const approved = evidence.reviews.some((review) => review.verdict === "approved"
-        && review.headSha === snapshot.changeRequest!.headSha
-        && evidence.publications.some((publication) => hasPublicationIdentity(publication.key, ref, "review", review.id)
-          && publication.metadata.controller === controllerId));
-      if (!approved) {
-        const target = bundle.flow.spec.states[stage]?.on?.["change-request-updated"]?.target;
-        if (target && bundle.flow.spec.states[target]?.resultContract === "review") stage = target;
-      }
-    }
+    stage = freshReviewTarget(bundle.flow, stage, evidence, controllerId) ?? stage;
     if (decision.kind === "resume" && evidence.activeBoundary !== "fresh" && stage !== entryStage(bundle.flow, snapshot.activation.label)) {
       await writer.recordRecovery!(ref, evidence, decision, null);
       return outcome(null, null, snapshot, false, false);
@@ -333,7 +348,7 @@ async function reconcileLocal(
       }, null);
       return outcome(null, null, snapshot, false, false, false);
     }
-    const iteration = recoveryIteration(bundle, evidence, stage, decision.owner?.metadata.controller ?? null);
+    const iteration = recoveryIteration(bundle, evidence, stage, decision.owner?.metadata.controller ?? null, dependencies.providerApiUrl);
     if (iteration.kind === "ambiguous") {
       stored = await writer.recordRecovery!(ref, evidence, {
         kind: "ambiguous", owner: decision.owner, reason: iteration.reason,
@@ -348,7 +363,7 @@ async function reconcileLocal(
       flowId: bundle.flow.metadata.id,
       configRevision: bundle.revision,
       sequence: 0,
-      stateId: stage,
+      stateId: iteration.reassessState ?? stage,
       resumeStateId: null,
       activatedBy: actor,
       activatedAt: occurredAt,
@@ -363,11 +378,20 @@ async function reconcileLocal(
     stored = await writer.recordRecovery!(ref, evidence, decision, recovered, iteration.baselineKeys);
     control = stored.value.control!;
   } else if (!dependencies.launcher.isRunning(control.flowInstanceId)) {
-    stored = await writer.recordRecovery!(ref, evidence, decision, control);
+    stored = await writer.recordRecovery!(ref, evidence, decision, control, stored?.value.publicationKeys);
     control = stored.value.control!;
   }
 
-  const observedKeys = markedObjectKeys(bundle, evidence);
+  const observedKeys = markedObjectKeys(bundle, evidence, dependencies.providerApiUrl);
+  let reviewRerouted = false;
+  const reviewTarget = freshReviewTarget(bundle.flow, control.stateId, evidence, controllerId);
+  if (reviewTarget) {
+    const next = advanceControlState(control, { stateId: reviewTarget, attemptSeries: null, latestReceipt: null }, now(dependencies));
+    await writeExistingControl(dependencies, ref, control, next, observedKeys);
+    control = next;
+    stored = writer.load!(ref);
+    reviewRerouted = true;
+  }
   const validated = clearUncommittedReceipt(evidence, control, controllerId, dependencies);
   const receiptChanged = validated !== control;
   if (receiptChanged) {
@@ -387,7 +411,19 @@ async function reconcileLocal(
     undefined,
     observedKeys,
   );
-  return receiptChanged ? { ...result, changed: true } : result;
+  return receiptChanged || reviewRerouted ? { ...result, changed: true } : result;
+}
+
+function freshReviewTarget(flow: FlowDefinition, stage: string, evidence: RecoveryEvidence, controllerId: string): string | null {
+  const state = flow.spec.states[stage];
+  if (state?.kind !== "provider-wait" || evidence.snapshot.changeRequest?.state !== "open") return null;
+  const approved = evidence.reviews.some((review) => review.verdict === "approved"
+    && review.headSha === evidence.snapshot.changeRequest!.headSha
+    && evidence.publications.some((publication) => publication.ownershipEligible !== false
+      && publication.metadata.controller === controllerId
+      && hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", review.id)));
+  const target = state.on?.["change-request-updated"]?.target;
+  return !approved && target && flow.spec.states[target]?.resultContract === "review" ? target : null;
 }
 
 function clearUncommittedReceipt(
@@ -406,6 +442,7 @@ function clearUncommittedReceipt(
     const publication = evidence.publications.find((candidate) =>
       hasPublicationIdentity(candidate.key, evidence.snapshot.ref, artifact.kind, id));
     if (!publication
+      || (artifact.kind === "review" && publication.ownershipEligible === false)
       || publication.metadata.config !== control.configRevision
       || publication.metadata.controller !== controllerId) return false;
     if (artifact.kind === "change-request") {
@@ -612,7 +649,7 @@ function hasValidLocalResume(flow: FlowDefinition, control: ControlState): boole
 type PublicationObjectKind = "comment" | "change-request" | "review";
 
 type RecoveryIteration =
-  | { kind: "ready"; baselineKeys: string[]; humanCutoff: string | null }
+  | { kind: "ready"; baselineKeys: string[]; humanCutoff: string | null; reassessState?: string }
   | { kind: "ambiguous"; baselineKeys: string[]; reason: string };
 
 function recoveryIteration(
@@ -620,8 +657,9 @@ function recoveryIteration(
   evidence: RecoveryEvidence,
   stage: string,
   ownerController: string | null,
+  apiUrl?: string,
 ): RecoveryIteration {
-  const baselineKeys = markedObjectKeys(bundle, evidence);
+  const baselineKeys = markedObjectKeys(bundle, evidence, apiUrl);
   const linked = evidence.snapshot.changeRequest;
   if (bundle.flow.spec.states[stage]?.kind === "provider-wait" && linked?.state === "merged") {
     const linkedPublication = evidence.publications.some((publication) =>
@@ -639,6 +677,8 @@ function recoveryIteration(
   const active = evidence.publications
     .filter(({ metadata }) => ownerController === null || metadata.controller === ownerController)
     .filter((publication) => {
+      if (publication.ownershipEligible === false
+        && publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) === "review") return false;
       if (bundle.flow.spec.states[stage]?.resultContract !== "review"
         || publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) !== "review") return true;
       return evidence.reviews.some((review) => hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", review.id)
@@ -649,6 +689,26 @@ function recoveryIteration(
   const kinds = active.map((publication) => publicationObjectKind(publication.key, evidence.snapshot.ref, bundle));
   if (kinds.some((kind) => kind === null) || !active.every(({ key }) => baselineKeys.includes(key))) {
     return { kind: "ambiguous", baselineKeys, reason: "publication identity cannot be verified for the active work" };
+  }
+  const recorded = bundle.flow.spec.states[stage];
+  const predecessors = Object.entries(bundle.flow.spec.states).filter(([, state]) =>
+    state.kind === "agent" && state.on?.["agent-succeeded"]?.target === stage
+    && resultPublicationKind(state.resultContract) === "comment");
+  if ((recorded?.kind === "human-gate" || recorded?.kind === "provider-wait") && predecessors.length === 1) {
+    const predecessor = predecessors[0]![0];
+    const prefix = committed.slice(0, -1);
+    if (prefix.every((kind, index) => kinds[index] === kind)
+      && (active.length === committed.length || active.length === prefix.length)) {
+      const candidate = active.length === committed.length ? active.at(-1) : null;
+      if (candidate && kinds.at(-1) !== "comment") {
+        return { kind: "ambiguous", baselineKeys, reason: "published result cannot be reassessed for the recorded stage" };
+      }
+      return {
+        kind: "ready", reassessState: predecessor,
+        baselineKeys: baselineKeys.filter((key) => key !== candidate?.key),
+        humanCutoff: prefix.length === 0 ? null : active[prefix.length - 1]!.createdAt,
+      };
+    }
   }
   if (committed.some((kind, index) => kinds[index] !== kind)) {
     return { kind: "ambiguous", baselineKeys, reason: "published results do not justify the provider stage" };
@@ -666,9 +726,6 @@ function recoveryIteration(
   const candidateKind = state?.kind === "agent" ? resultPublicationKind(state.resultContract) : null;
   let candidateKey: string | null = null;
   if (active.length === committed.length + 1 && candidateKind && kinds.at(-1) === candidateKind) {
-    if (committed.at(-1) === candidateKind) {
-      return { kind: "ambiguous", baselineKeys, reason: "current publication role cannot be proved" };
-    }
     candidateKey = active.at(-1)!.key;
   } else if (active.length !== committed.length) {
     return { kind: "ambiguous", baselineKeys, reason: "current publication iteration cannot be isolated" };
@@ -721,9 +778,11 @@ function resultPublicationKind(result: ResultContract | undefined): PublicationO
   return null;
 }
 
-function markedObjectKeys(_bundle: ConfigBundle, evidence: RecoveryEvidence): string[] {
+function markedObjectKeys(_bundle: ConfigBundle, evidence: RecoveryEvidence, apiUrl?: string): string[] {
   const keys = new Set(evidence.publications.map(({ key }) => key));
-  const scope = evidence.publications.map(({ key }) => {
+  const configuredScope = apiUrl ? new URL(apiUrl) : null;
+  if (configuredScope) configuredScope.pathname = `${configuredScope.pathname.replace(/\/+$/, "")}/`;
+  const scope = configuredScope?.href ?? evidence.publications.map(({ key }) => {
     try { return JSON.parse(key)[1]; } catch { return null; }
   }).find((scope) => typeof scope === "string");
   if (scope) for (const [kind, objects] of [

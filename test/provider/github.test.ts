@@ -8,6 +8,7 @@ import test from "node:test";
 import { loadConfigBundle } from "../../src/config/load.ts";
 import { createGitHubAdapter } from "../../src/provider/github.ts";
 import { ProviderHttpError } from "../../src/provider/http.ts";
+import { classifyRecovery } from "../../src/runtime/recovery.ts";
 import { electOwner } from "../../src/provider/publication.ts";
 import type {
   ProviderRequest,
@@ -217,7 +218,7 @@ test("rejects a GitHub pull request whose publication marker was added after cre
     number: 17,
   });
 
-  assert.equal(evidence.publications.some(({ key }) => key.includes("change-request")), false);
+  assert.equal(evidence.publications.some(({ key, ownershipEligible }) => ownershipEligible !== false && key.includes("change-request")), false);
   assert.ok(evidence.ambiguities.some((value) => value.includes("publication provenance")));
   assert.equal(client.calls.filter(({ path }) => path === "graphql").length, 1);
 });
@@ -564,10 +565,11 @@ test("binds discovery cursors to the exact API resource and window", async () =>
   );
 });
 
-test("bootstraps only active tickets across pages", async () => {
+test("bootstraps active and managed tickets across pages", async () => {
   const activationPath =
     "repos/owner/repo/issues?state=all&labels=agent-flow%3Adevelopment&per_page=100";
   const client = new FixtureClient()
+    .add("GET", "repos/owner/repo/issues?state=all&labels=agent-flow%3Amanaged&per_page=100", { data: [] })
     .add("GET", activationPath, {
       data: [{ number: 17 }, { number: 18, pull_request: {} }],
       next: "repos/owner/repo/issues?labels=agent-flow%3Adevelopment&page=2",
@@ -1009,10 +1011,62 @@ test("native review ownership requires original-publication edit provenance", as
         .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "maintain" } })
         .add("GET", "repos/owner/repo/collaborators/reviewer/permission", { data: { permission: "maintain" } });
       const evidence = await adapter(client).readRecoveryEvidence({ provider: "github", repository: REPOSITORY, number: 17 });
-      const review = evidence.publications.find(({ key }) => JSON.parse(key)[3] === "review");
+      const review = evidence.publications.find(({ key, ownershipEligible }) => ownershipEligible !== false && JSON.parse(key)[3] === "review");
       assert.equal(Boolean(review), eligible);
       if (eligible) assert.equal(review!.createdAt, "2026-08-25T10:00:20Z");
-      else assert.ok(evidence.ambiguities.some((reason) => reason.includes("provenance")));
+      else {
+        assert.equal(evidence.reviews.length, 0);
+        assert.equal(classifyRecovery(evidence, "11111111-1111-4111-8111-111111111111").kind, "reassess");
+      }
     });
   }
+});
+
+test("pinned recovery keeps its activation history when another startup route is added later", async () => {
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo", { data: fixture.repository })
+    .add("GET", "repos/owner/repo/issues/17", { data: { ...fixture.issue as object,
+      labels: [{ name: "bugfix" }, { name: "agent-flow:development" }, { name: "agent-flow:managed" }, { name: "agent-stage:bug-development" }],
+    } })
+    .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", { data: [
+      { id: 1, event: "labeled", label: { name: "bugfix" }, created_at: "2026-08-25T09:00:00Z", actor: { id: 7, login: "maintainer" } },
+      { id: 2, event: "labeled", label: { name: "agent-flow:development" }, created_at: "2026-08-25T10:00:00Z", actor: { id: 7, login: "maintainer" } },
+    ] })
+    .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", { data: [{
+      ...fixture.recoveryComment as object, created_at: "2026-08-25T09:30:00Z", updated_at: "2026-08-25T09:30:00Z",
+    }] })
+    .add("GET", "repos/owner/repo/collaborators/maintainer/permission", { data: { permission: "maintain" } })
+    .add("GET", "repos/owner/repo/collaborators/developer/permission", { data: { permission: "maintain" } });
+  const evidence = await adapter(client).readRecoveryEvidence({ provider: "github", repository: REPOSITORY, number: 17 }, "bugfix");
+  assert.equal(evidence.snapshot.activation.label, "bugfix");
+  assert.equal(evidence.snapshot.activation.eventId, "1");
+  assert.equal(evidence.publications.length, 1);
+  assert.deepEqual(evidence.ambiguities, []);
+});
+
+test("managed discovery retains a ticket whose pinned activation is absent from startup routes", async () => {
+  const client = new FixtureClient()
+    .add("GET", "repos/owner/repo/issues?state=all&labels=agent-flow%3Amanaged&per_page=100", { data: [{ number: 17 }] })
+    .add("GET", "repos/owner/repo/issues?state=all&labels=agent-flow%3Adevelopment&per_page=100", { data: [] });
+  assert.deepEqual(await adapter(client).bootstrap(REPOSITORY), [{ provider: "github", repository: REPOSITORY, number: 17 }]);
+});
+
+const RECOVERY_CONTROLLER = "11111111-1111-4111-8111-111111111111";
+for (const edited of [false, true]) test(`GitHub existing owner anchor, PR description edited=${edited}`, async () => {
+  const anchor = {...fixture.recoveryComment, created_at:"2026-08-25T10:00:02Z", updated_at:"2026-08-25T10:00:02Z"};
+  const client = new FixtureClient()
+  .add("GET", "repos/owner/repo", {data: fixture.repository})
+  .add("GET", "repos/owner/repo/issues/17", {data: fixture.issue})
+  .add("GET", "repos/owner/repo/issues/17/timeline?per_page=100", {data: fixture.timelineSecond})
+  .add("GET", "repos/owner/repo/issues/17/comments?per_page=100", {data:[anchor]})
+  .add("GET", "repos/owner/repo/pulls/31", {data:{...fixture.pull, state:"open", merged_at:null, updated_at:edited?"2026-08-25T10:01:00Z":"2026-08-25T10:00:05Z"}})
+  .add("GET", "repos/owner/repo/pulls/31/reviews?per_page=100", {data:[]})
+  .add("POST", "graphql", {data:{data:{repository:{pullRequest:{lastEditedAt:"2026-08-25T10:01:00Z"}}}}})
+  .add("GET", "repos/owner/repo/collaborators/maintainer/permission", {data:{permission:"maintain"}})
+  .add("GET", "repos/owner/repo/collaborators/developer/permission", {data:{permission:"push"}});
+  const evidence=await adapter(client).readRecoveryEvidence({provider:"github", repository:REPOSITORY, number:17});
+  const owner=electOwner(evidence.publications);  const decision=classifyRecovery(evidence,RECOVERY_CONTROLLER);
+  assert.equal(owner?.metadata.controller,RECOVERY_CONTROLLER);
+  assert.equal(JSON.parse(owner!.key)[3],"comment");
+  assert.equal(decision.kind, "reassess");
 });

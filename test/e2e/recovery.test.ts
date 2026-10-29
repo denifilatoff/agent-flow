@@ -200,3 +200,31 @@ function canonicalCertificates(): string[] {
     .map((certificate) => certificate.replace(/-----[^-]+-----|\s/g, ""))
     .sort();
 }
+
+
+test("C2 reset reassesses a published result and returns to its gate without duplicating it", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  const publications = await run.agentCommentIds();
+  assert.equal(publications.length, 1);
+  await run.resetDatabaseAndRestart();
+  await run.untilState("assessment-review");
+  assert.deepEqual(await run.agentCommentIds(), publications);
+  assert.equal(await run.controllerCommentWrites(), 0);
+  assert.equal((await run.control()).latestReceipt?.artifacts[0]?.kind, "comment");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+});
+
+test("warm SQLite restart reuses the result published before its receipt was committed", async (t) => {
+  const run = await startFixture("github", { firstAttempt: "crash-after-publish" });
+  t.after(() => run.close());
+  await run.untilAgentComments(1);
+  const publications = await run.agentCommentIds();
+  await run.restart();
+  await run.untilState("assessment-review");
+  assert.deepEqual(await run.agentCommentIds(), publications);
+  assert.equal((await run.control()).attemptSeries?.consumed, 2);
+  assert.equal(await run.controllerCommentWrites(), 0);
+});

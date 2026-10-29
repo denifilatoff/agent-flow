@@ -18,6 +18,7 @@ export type ParsedPublication =
   | { kind: "unmarked" | "legacy" | "invalid" };
 
 export interface Publication {
+  ownershipEligible?: boolean;
   key: string;
   createdAt: string;
   metadata: PublicationMetadata;
@@ -98,9 +99,17 @@ export function electOwner(publications: readonly Publication[]): Publication | 
       throw new Error("createdAt must be a valid timestamp");
     }
   }
-  const ordered = [...publications].sort((a, b) => {
+  const ordered = publications.filter((publication) => publication.ownershipEligible !== false).sort((a, b) => {
     const delta = Date.parse(a.createdAt) - Date.parse(b.createdAt);
     return delta || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
   });
   return ordered[0] ?? null;
+}
+
+export function unanchoredPublicationKeys(publications: readonly Publication[]): string[] {
+  const owner = electOwner(publications);
+  return publications.filter((publication) => publication.ownershipEligible === false
+    && (!owner || owner.metadata.controller !== publication.metadata.controller
+      || owner.metadata.config !== publication.metadata.config
+      || Date.parse(owner.createdAt) >= Date.parse(publication.createdAt))).map(({ key }) => key);
 }

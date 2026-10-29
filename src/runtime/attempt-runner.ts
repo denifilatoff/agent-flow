@@ -16,6 +16,7 @@ import { validateDocument } from "../config/schema-validator.ts";
 import { compileAgentContext, type CompiledAgent } from "../harness/apm.ts";
 import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../harness/types.ts";
 import { advanceControlState, type ControlStatePatch } from "../provider/control-comment.ts";
+import { parsePublication } from "../provider/publication.ts";
 import type { ProviderAdapter, ProviderArtifact } from "../provider/types.js";
 import type { AttemptLauncher, AttemptRequest } from "./reconcile.ts";
 import { renderRuntimePrompt } from "./agent-protocol.ts";
@@ -274,6 +275,10 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           decisionPath: session.decisionPath,
           changeRequest: request.snapshot.changeRequest,
           sourceComment: request.sourceComment,
+          excludedReviewIds: request.publicationKeys.flatMap((key) => {
+            const value = JSON.parse(key);
+            return value[3] === "review" ? [value[4]] : [];
+          }),
         });
         const resultPromise = harness.run({
           workspace,
@@ -302,6 +307,15 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
             configRevision: control.configRevision,
             controllerId: request.controllerId,
             publicationKeys: request.publicationKeys,
+            reusableCommentIds: request.snapshot.comments.filter((comment) => {
+              const marker = parsePublication(comment.body);
+              return marker.kind === "current" && marker.metadata.config === control.configRevision
+                && marker.metadata.controller === request.controllerId
+                && !request.publicationKeys.some((key) => {
+                  const value = JSON.parse(key);
+                  return value[3] === "comment" && value[4] === comment.id;
+                });
+            }).map(({ id }) => id),
             flowInstanceId: control.flowInstanceId,
             attemptId: attempt.attemptId,
             ticket: request.ref,

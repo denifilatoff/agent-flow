@@ -8,6 +8,7 @@ import test from "node:test";
 import { loadConfigBundle } from "../../src/config/load.ts";
 import { createGitLabAdapter } from "../../src/provider/gitlab.ts";
 import { ProviderHttpError } from "../../src/provider/http.ts";
+import { classifyRecovery } from "../../src/runtime/recovery.ts";
 import { electOwner } from "../../src/provider/publication.ts";
 import type {
   ProviderRequest,
@@ -243,7 +244,7 @@ test("rejects a GitLab merge request whose publication marker was added after cr
 
   const evidence = await adapter(client).readRecoveryEvidence(ref);
 
-  assert.equal(evidence.publications.some(({ key }) => key.includes("change-request")), false);
+  assert.equal(evidence.publications.some(({ key, ownershipEligible }) => ownershipEligible !== false && key.includes("change-request")), false);
   assert.ok(evidence.ambiguities.some((value) => value.includes("publication provenance")));
 });
 
@@ -449,7 +450,7 @@ test("C17 rejects incomplete GitLab recovery evidence pages", async () => {
   await assert.rejects(adapter(client).readRecoveryEvidence(ref), /page failed/);
 });
 
-test("marks a changed GitLab review note as ambiguous instead of electing it at creation time", async () => {
+test("excludes an edited GitLab review approval while retaining its earlier owner anchor", async () => {
   const changedReview = {
     ...(fixture.recoveryReviewNote as Record<string, unknown>),
     updated_at: "2026-08-25T10:06:00.000Z",
@@ -472,9 +473,9 @@ test("marks a changed GitLab review note as ambiguous instead of electing it at 
 
   const evidence = await adapter(client).readRecoveryEvidence(ref);
 
-  assert.equal(evidence.reviews.length, 1);
-  assert.equal(evidence.publications.some(({ key }) => key.includes("review")), false);
-  assert.ok(evidence.ambiguities.some((value) => value.includes("publication provenance")));
+  assert.equal(evidence.reviews.length, 0);
+  assert.equal(evidence.publications.some(({ key, ownershipEligible }) => ownershipEligible !== false && key.includes("review")), false);
+  assert.deepEqual(evidence.ambiguities, []);
 });
 
 test("reports a removed GitLab publisher as unauthorized recovery evidence", async () => {
@@ -576,14 +577,16 @@ test("rejects provider pagination that changes routes or omits an advancing page
   );
 
   const activation = `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100`;
-  const crossProjectClient = new FixtureClient().add("GET", activation, {
+  const crossProjectClient = new FixtureClient()
+    .add("GET", `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100`, { data: [] }).add("GET", activation, {
     data: [{ iid: 23 }],
     next:
       "/api/v4/projects/other%2Fproject/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100&page=2",
   });
   await assert.rejects(adapter(crossProjectClient).bootstrap(REPOSITORY), /pagination.*route/);
 
-  const changedFilterClient = new FixtureClient().add("GET", activation, {
+  const changedFilterClient = new FixtureClient()
+    .add("GET", `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100`, { data: [] }).add("GET", activation, {
     data: [{ iid: 23 }],
     next:
       `/api/v4/${PROJECT}/issues?scope=all&state=opened&labels=agent-flow%3Adevelopment&per_page=100&page=2`,
@@ -591,10 +594,11 @@ test("rejects provider pagination that changes routes or omits an advancing page
   await assert.rejects(adapter(changedFilterClient).bootstrap(REPOSITORY), /pagination.*filters/);
 });
 
-test("bootstraps only active tickets across pages", async () => {
+test("bootstraps active and managed tickets across pages", async () => {
   const activation =
     `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100`;
   const client = new FixtureClient()
+    .add("GET", `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100`, { data: [] })
     .add("GET", activation, {
       data: [{ iid: 23 }],
       next:
@@ -875,4 +879,53 @@ test("rejects unknown issue, merge request, and review-note states", async () =>
     .add("GET", `${PROJECT}/merge_requests/41`, { data: fixture.mergeRequest })
     .add("GET", `${PROJECT}/merge_requests/41/notes/702`, { data: staleReview });
   await assert.rejects(adapter(staleReviewClient).readReview(ref, 41, "702"), /head SHA/);
+});
+
+test("pinned recovery keeps its activation history when another startup route is added later", async () => {
+  const client = new FixtureClient()
+    .add("GET", PROJECT, { data: fixture.project })
+    .add("GET", `${PROJECT}/issues/23`, { data: { ...fixture.issue as object,
+      labels: ["bugfix", "agent-flow:development", "agent-flow:managed", "agent-stage:bug-development"],
+    } })
+    .add("GET", `${PROJECT}/issues/23/resource_label_events?per_page=100`, { data: [
+      { id: 1, action: "add", label: { name: "bugfix" }, created_at: "2026-08-25T09:00:00Z", user: { id: 7, username: "maintainer" } },
+      { id: 2, action: "add", label: { name: "agent-flow:development" }, created_at: "2026-08-25T10:00:00Z", user: { id: 7, username: "maintainer" } },
+    ] })
+    .add("GET", `${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`, { data: [{
+      ...fixture.recoveryComment as object, created_at: "2026-08-25T09:30:00Z", updated_at: "2026-08-25T09:30:00Z",
+    }] })
+    .add("GET", `${PROJECT}/issues/23/related_merge_requests?per_page=100`, { data: [] })
+    .add("GET", `${PROJECT}/members/all/7`, { data: { id: 7, access_level: 40 } })
+    .add("GET", `${PROJECT}/members/all/6`, { data: { id: 6, access_level: 40 } });
+  const evidence = await adapter(client).readRecoveryEvidence({ provider: "gitlab", repository: REPOSITORY, number: 23 }, "bugfix");
+  assert.equal(evidence.snapshot.activation.label, "bugfix");
+  assert.equal(evidence.snapshot.activation.eventId, "1");
+  assert.equal(evidence.publications.length, 1);
+  assert.deepEqual(evidence.ambiguities, []);
+});
+
+test("managed discovery retains a ticket whose pinned activation is absent from startup routes", async () => {
+  const client = new FixtureClient()
+    .add("GET", `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Amanaged&per_page=100`, { data: [{ iid: 23 }] })
+    .add("GET", `${PROJECT}/issues?scope=all&state=all&labels=agent-flow%3Adevelopment&per_page=100`, { data: [] });
+  assert.deepEqual(await adapter(client).bootstrap(REPOSITORY), [{ provider: "gitlab", repository: REPOSITORY, number: 23 }]);
+});
+
+const RECOVERY_CONTROLLER = "11111111-1111-4111-8111-111111111111";
+for (const edited of [false,true]) test(`GitLab existing owner anchor, MR description edited=${edited}`, async () => {
+  const anchor={...fixture.recoveryComment, created_at:"2026-08-25T10:00:02.000Z", updated_at:"2026-08-25T10:00:02.000Z"};
+  const client=new FixtureClient()
+ .add("GET",PROJECT,{data:fixture.project})
+ .add("GET",`${PROJECT}/issues/23`,{data:fixture.issue})
+ .add("GET",`${PROJECT}/issues/23/resource_label_events?per_page=100`,{data:fixture.labelEventsSecond})
+ .add("GET",`${PROJECT}/issues/23/notes?activity_filter=only_comments&order_by=created_at&sort=asc&per_page=100`,{data:[anchor]})
+ .add("GET",`${PROJECT}/issues/23/related_merge_requests?per_page=100`,{data:fixture.relatedMergeRequests})
+ .add("GET",`${PROJECT}/merge_requests/41`,{data:{...fixture.mergeRequest,updated_at:edited?"2026-08-25T10:01:00.000Z":"2026-08-25T10:00:05.000Z"}})
+ .add("GET",`${PROJECT}/merge_requests/41/notes?per_page=100`,{data:edited?[{id:999,body:"changed the description",system:true,author:{id:6,username:"developer"},created_at:"2026-08-25T10:01:00.000Z",updated_at:"2026-08-25T10:01:00.000Z"}]:[]})
+ .add("GET",`${PROJECT}/members/all/7`,{data:{id:7,access_level:40}})
+ .add("GET",`${PROJECT}/members/all/6`,{data:{id:6,access_level:30}});
+  const evidence=await adapter(client).readRecoveryEvidence(ref);  const owner=electOwner(evidence.publications);  const decision=classifyRecovery(evidence,RECOVERY_CONTROLLER);
+  assert.equal(owner?.metadata.controller,RECOVERY_CONTROLLER);
+  assert.equal(JSON.parse(owner!.key)[3],"comment");
+  assert.equal(decision.kind,"reassess");
 });

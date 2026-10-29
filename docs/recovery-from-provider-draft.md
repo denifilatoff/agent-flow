@@ -110,9 +110,17 @@ There is no transaction spanning a result publication and a label update. After 
 the existence of a marked comment or a PR with successful completion of a stage.
 
 The pinned flow's result contract must distinguish a completed result from a question, progress note, or partial
-implementation. Recovery can rerun an agent to interpret published content and inspect code. An interpretation that
+implementation. After local data loss, a human gate returns through its unique preceding result-producing agent for
+reassessment. An open bugfix merge wait similarly reassesses the preceding verification result. Native reviews are
+checked against their logical verdict and current head; stale or missing approval returns through review. The
+reassessment uses existing agent decisions and provider readback, preserves the original publication identity, and
+keeps an authorized answer after that publication eligible. It adds no common metadata fields. Recovery can rerun an
+agent to interpret published content and inspect code. An interpretation that
 existed only in SQLite can be recomputed. Natural-language interpretation is not guaranteed to be identical on replay.
-If the available evidence does not justify a transition, continue unfinished work or ask for clarification.
+If a single prior candidate is incomplete, the agent may publish one new result or question. Readback distinguishes
+that new object from the pre-attempt candidate by object identity, then validates the selected result. Multiple new
+matching objects remain ambiguous. If the available evidence does not justify a transition, continue unfinished work
+or ask for clarification.
 
 An external operation with an uncertain API response must be read back before retrying publication. Reuse an existing
 matching PR/MR or result. If several objects match and identity is unclear, pause instead of choosing arbitrarily.
@@ -136,8 +144,10 @@ attempt counts or unpublished files.
 
 ### C2: Result and stage agree
 
-A complete plan is published with the block; the stage is `plan-review`. Load the pinned configuration and look for
-an authorized answer to that plan. Wait if no answer exists; otherwise follow C7. Do not create the plan again.
+A complete plan is published with the block; the stage is `plan-review`. Load the pinned configuration and have the
+planning agent reassess the published plan through the ordinary
+result/readback path. Reuse a suitable plan without publishing it again, then return to `plan-review` and look for
+an authorized answer. Wait if no answer exists; otherwise follow C7. Do not create the plan again.
 
 ### C3: Publication succeeded before the stage update
 
@@ -165,7 +175,9 @@ resume from the question, prior results, and flow. If several resume stages are 
 ### C7: Human answer exists, but processing was interrupted
 
 Read the authorized answer in the context of its question and interpret it again under the pinned flow. A local-only
-interpretation was not committed. If the stage already advanced and its required evidence exists, do not apply the
+interpretation was not committed. A warm restart preserves the unfinished attempt's publication baseline, so a result
+published before its receipt was saved remains eligible for reuse. If the stage already advanced and its required
+evidence exists, do not apply the
 same answer again. An unclear answer requires clarification. The marker does not prove human authorization.
 
 ### C8: Several rounds of feedback
@@ -177,7 +189,8 @@ make it a new result automatically. If the relationship cannot be established, r
 ### C9: Code changed after review
 
 For an open PR/MR, compare the reviewed SHA from native review metadata or the published review with the current
-head. Review the new head if they differ. If the reviewed SHA is unavailable, do not reuse the approval; review again. The common
+head. Review the new head if they differ. If the reviewed SHA is unavailable, do not reuse the approval; review again.
+The common
 configuration SHA is not the reviewed code SHA.
 
 ### C10: PR/MR merged or closed while the controller was absent

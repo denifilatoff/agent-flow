@@ -232,3 +232,13 @@ test("human input publishes only clarification questions", async () => {
   assert.match(prompt, /\{"event":"human-answer-cancelled"\} requires no new provider publication/);
   assert.match(prompt, /\{"event":"human-answer-unclear"\} requires a marked question comment/);
 });
+
+
+test("tells a fresh reviewer which observed review IDs cannot satisfy the attempt", async () => {
+  const flow = await shippedFlow();
+  const input = promptInput(flow, { stateId: "review", resultContract: "review", excludedReviewIds: ["701", "702"],
+    changeRequest: { provider: "github", repository: "owner/repo", number: 8,
+      url: "https://github.test/owner/repo/pull/8", headSha: HEAD_SHA, state: "open" } as never,
+  });
+  assert.match(renderRuntimePrompt(input), /Do not reuse these existing review IDs for this attempt: 701, 702/);
+});

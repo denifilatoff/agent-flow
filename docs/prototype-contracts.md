@@ -38,7 +38,8 @@ compose.yaml                   macOS-oriented local deployment
 
 ## Versioned inputs
 
-Stack, runtime configuration, flow, catalog, control-state, and receipt documents have `apiVersion: agent-flow/v1alpha1` and a fixed
+Stack, runtime configuration, flow, catalog, control-state, and receipt documents have `apiVersion: agent-flow/v1alpha1`
+and a fixed
 `kind`. `AgentDecision` is a local one-field document, and `LocalExecution` is the local SQLite wrapper. The controller
 rejects unknown fields and unsupported versions before reconciliation starts.
 
@@ -185,11 +186,13 @@ JSON Schema validates file shape. Before polling, the controller also verifies t
 ## Local execution record
 
 The controller stores flow identity, retry accounting, receipts, and cached provider interpretation in
-`/var/lib/agent-flow/execution.sqlite`. It validates each JSON payload with `local-execution.schema.json` and uses a local revision
+`/var/lib/agent-flow/execution.sqlite`. It validates each JSON payload with `local-execution.schema.json` and uses a
+local revision
 for compare-and-swap updates. Attempt starts are committed before harness launch. Surviving local state preserves retry
 consumption on an ordinary restart; an empty database reconstructs active work from provider evidence.
 
-`/var/lib/agent-flow/controller-id` contains the installation UUID outside SQLite. Startup rejects a corrupt identity, corrupt
+`/var/lib/agent-flow/controller-id` contains the installation UUID outside SQLite. Startup rejects a corrupt identity,
+corrupt
 database, or unsupported `user_version` without replacing it. The SQLite connection opens before readiness and closes
 after controller work drains.
 
@@ -225,7 +228,9 @@ common marker, excludes reviews present before the attempt, and reads the result
 API. The fallback is not an issue comment. For native `APPROVED` and `CHANGES_REQUESTED` states, the marker verdict must
 agree with the provider state. Recovery reads native review edit provenance through batched GraphQL node queries.
 An edit after submission or unavailable edit provenance cannot establish original publication; equal timestamps do
-not prove that a draft edit preceded submission. The ownership timestamp remains the native submission time.
+not prove that a draft edit preceded submission. The ownership timestamp remains the native submission time. An earlier
+intact publication can preserve the owner and configuration while a PR/MR description changes. Such edited objects
+cannot elect ownership, and edited reviews cannot supply approval. The reviewer receives their excluded IDs.
 
 Only an open linked change request follows the pinned-head review path and produces a verified review result. A closed,
 unmerged linked change request may run the reviewer in stage mode only once after the flow enters `needs-human` with
@@ -282,7 +287,8 @@ matching configuration Git host and keeps verified revision materializations for
 The controller creates or validates `controller-id`, opens `execution.sqlite`, binds each provider API scope, and then
 performs startup preflight for every harness and provider enabled by the pinned catalog. Corrupt identities,
 unsupported database versions, missing binaries, failed authentication, or unwritable mounts fail startup before
-readiness. Bootstrap schedules only tickets with the activation label; ordinary polling continues to observe
+readiness. Bootstrap discovers activation and managed labels but schedules work only with its valid activation; ordinary
+polling continues to observe
 cancellation for active workers. Shutdown drains controller work before closing SQLite.
 
 The prototype exposes health endpoints on the runtime-configured address and port. `/health/live` reports process

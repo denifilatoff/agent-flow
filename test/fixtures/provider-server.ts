@@ -122,6 +122,7 @@ export interface FixtureRun {
   sessions(): Promise<string[]>;
   untilAttempt(status: "started" | "succeeded"): Promise<void>;
   untilAgentComments(count: number): Promise<void>;
+  agentCommentIds(): Promise<string[]>;
   untilState(state: string): Promise<void>;
   unauthenticatedProviderStatus(): Promise<number>;
 }
@@ -225,6 +226,8 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     join(home, ".codex/auth.json"),
     join(home, ".claude/.credentials.json"),
     operatorAuthFile,
+    60,
+    options.firstAttempt === "race" ? 30 : 5,
   );
 
   environmentChanged = true;
@@ -301,9 +304,11 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     compilations: async () => events("compile"),
     async collide() {
       if (options.firstAttempt !== "race") throw new Error("collision fixture requires race mode");
-      const competitorData = join(root, "competitor-data");
-      const competitorHome = join(root, "competitor-home");
-      const competitorRepository = join(root, "competitor-config-repository");
+      const competitorRoot = join(root, "competitor");
+      const competitorData = join(competitorRoot, "data");
+      const competitorHome = join(competitorRoot, "home");
+      const competitorRepository = join(competitorRoot, "config-repository");
+      await mkdir(competitorRoot, { mode: 0o700 });
       await Promise.all([mkdir(competitorData, { mode: 0o700 }), mkdir(competitorHome)]);
       const competitorToken = join(root, "competitor-token");
       await writeFile(competitorToken, "fixture-b", { mode: 0o600 });
@@ -315,7 +320,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
         address.port + 2,
         competitorRepository, competitorData, competitorToken,
         join(competitorHome, ".codex/auth.json"),
-        join(competitorHome, ".claude/.credentials.json"), operatorAuthFile,
+        join(competitorHome, ".claude/.credentials.json"), operatorAuthFile, 60, 30,
       );
       await createAuth(competitorHome);
       competitor = await startController(competitorControllerPath);
@@ -398,6 +403,9 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
       return state.comments
         .filter((comment) => comment.actor.providerId === MAINTAINER.providerId)
         .map((comment) => state.normalizedComment(comment));
+    },
+    async agentCommentIds() {
+      return state.comments.filter(({ body }) => parsePublication(body).kind === "current").map(({ id }) => id);
     },
     async latestAgentComment() {
       const comment = state.comments.toReversed().find((candidate) => candidate.body.startsWith("<!-- agent-flow:v1"));
@@ -589,7 +597,9 @@ class FixtureState {
     }
     if (url.pathname === "/__fixture/completed" && request.method === "POST") {
       const attemptId = String((body as { attemptId: string }).attemptId);
-      if (!this.activeAttempts.has(attemptId)) return json(response, 409, { message: "attempt is not active" });
+      if (!this.activeAttempts.has(attemptId) && !this.cancelledAttempts.has(attemptId)) {
+        return json(response, 409, { message: "attempt is not active" });
+      }
       this.activeAttempts.delete(attemptId);
       this.readyAttempts.delete(attemptId);
       return json(response, 200, { ok: true });
@@ -737,8 +747,9 @@ class FixtureState {
     if (state === "assessment" || state === "planning") {
       const artifactKind = state === "assessment" ? "assessment" as const : "plan" as const;
       const existing = context.artifacts.some((artifact) => "body" in artifact
-        && artifact.body.split(/\r?\n/).includes(context.publicationMarker));
-      if (!reuse || !existing) this.addComment(`${context.publicationMarker}\nFixture ${artifactKind}.`);
+        && artifact.body.split(/\r?\n/).includes(context.publicationMarker)
+        && artifact.body.includes(`Fixture ${artifactKind}.`));
+      if (!existing) this.addComment(`${context.publicationMarker}\nFixture ${artifactKind}.`);
       return { event: "agent-succeeded" };
     }
     if (state === "development") {
@@ -1116,6 +1127,7 @@ async function createConfiguration(
   claudeAuthFile = join(dirname(repository), "auth/.claude/.credentials.json"),
   operatorAuthFile = join(dirname(repository), "operator-password"),
   pollingIntervalSeconds = 60,
+  timeoutSeconds = 5,
 ): Promise<string> {
   await mkdir(join(repository, "config/flows"), { recursive: true });
   await Promise.all([
@@ -1136,7 +1148,7 @@ async function createConfiguration(
   const revision = (await execFile("git", ["-C", repository, "rev-parse", "HEAD"])).stdout.trim();
   const execution = (harness: "claude" | "codex") => ({
     harness, model: "fixture-model", reasoning: "high",
-    maxAttempts: 3, delaySeconds: 0, timeoutSeconds: 5,
+    maxAttempts: 3, delaySeconds: 0, timeoutSeconds,
   });
   const runtimePath = join(dirname(repository), "runtime.yaml");
   await writeFile(runtimePath, stringify({
