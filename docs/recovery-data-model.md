@@ -22,7 +22,11 @@ Append one standalone block outside code fences to substantive publications. Sup
 
 Do not persist stage, attempt, retry count, run ID, sequence, or timestamp in this common block. Native metadata
 supplies object identity and time. A review still needs its reviewed head and logical verdict, including the existing
-`agent-flow-review:v1` fallback where native self-approval cannot express the verdict.
+`agent-flow-review:v1` fallback where native self-approval cannot express the verdict. Documentation uses a separate
+`agent-flow-documentation:v1` JSON metadata line with exactly `change`, `inputHead`, and `resultHead` (see
+[the report contract](prototype-contracts.md#documentation-report)). A no-op has equal heads. The common ownership block
+remains unchanged. The local documentation comment artifact retains verified `inputHead`, and the accompanying
+change-request artifact carries the result head for reviewer handoff. Neither artifact makes SQLite canonical.
 
 The selected configuration repository and flow path are installation settings. Preserve them during transfer.
 The comment SHA does not identify the repository or select between different flow files with the same activation label.

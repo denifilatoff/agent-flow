@@ -31,3 +31,21 @@ controller unready; it does not migrate the affected instance.
 If new-format instances have already started, do not roll the old controller back over them. Stop new activations and
 complete those instances with the new controller before a format downgrade. If that cannot be done, keep the service
 stopped and plan an explicit migration; do not rewrite provider state or run two controllers against the same tickets.
+
+## Adding the documentarian stage
+
+For a new configuration pin, both shipped flows route feature `development → documentation → review` and bugfix
+`bug-development → bug-documentation → bug-review`, including every implementation rework. Bug review approval still
+requires independent verification and merge remains manual. Existing instances keep their pinned flow; this upgrade
+does not migrate active instances or insert a stage into legacy direct-to-review routes.
+
+Add a complete `execution.agents.documentarian` binding to the mounted RuntimeConfig before selecting the new catalog.
+Use the fields shown in `config/runtime.example.yaml`: harness, model, reasoning, maxAttempts, delaySeconds, and
+timeoutSeconds. The package supports both Claude and Codex; choose an operator-supported model and supply the selected
+harness credentials. Retain execution settings needed by unfinished older pinned catalogs.
+
+Commit `agent-packages/documentarian/apm.lock.yaml` with the pinned documentation skill and deployment records for both
+targets. Generate/compile harness output only in disposable copies, and validate frozen installation and audit with APM
+available. Documentation can finish with a substantive no-change report and unchanged request head; no empty commit or
+second request is needed. See the [documentation report contract](prototype-contracts.md#documentation-report) for
+readback, retry, and provider-only recovery limits.

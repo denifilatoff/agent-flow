@@ -2,7 +2,7 @@
 
 Agent Flow is a prototype controller for partially automated development workflows. It reconciles canonical ticket
 state from GitHub or GitLab and runs locally installed headless agents for architecture assessment, planning,
-development, and review.
+development, documentation synchronization, and review.
 
 See the [architecture](docs/agent-flow-architecture.md) and [prototype contracts](docs/prototype-contracts.md) for the
 runtime contracts. [ADR 0001](docs/adr/0001-provider-commit-points-and-local-execution.md) records provider recovery
