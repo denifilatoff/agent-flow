@@ -3022,15 +3022,15 @@ test("warm documentation retry keeps its accepted implementation boundary despit
 });
 
 test("verified documentation advances review on its result head and rejects edited input metadata", async (t) => {
-  for (const tampered of [false, true]) await t.test(tampered ? "edited input" : "verified handoff", async (context) => {
+  for (const tampered of [false, true, "replacement"] as const) await t.test(tampered === "replacement" ? "replacement request" : tampered ? "edited input" : "verified handoff", async (context) => {
     const provider = new FakeProvider();
     const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
     const report = comment("documentation", `${marker}\n<!-- agent-flow-documentation:v1 ${JSON.stringify({
-      change: 31, inputHead: tampered ? "3".repeat(40) : OLD_HEAD, resultHead: NEW_HEAD,
+      change: 31, inputHead: tampered === true ? "3".repeat(40) : OLD_HEAD, resultHead: NEW_HEAD,
     })} -->\nUpdated configuration documentation and checked its examples.`, MAINTAINER, "2026-08-26T11:30:00.000Z");
     const change = changeRequest({ headSha: NEW_HEAD, body: `${marker}\nImplementation.` });
     provider.snapshot.labels.push("agent-stage:documentation", "agent-flow:managed");
-    provider.snapshot.changeRequest = change; provider.snapshot.comments.push(report);
+    provider.snapshot.changeRequest = tampered === "replacement" ? { ...change, number: 32, url: change.url.replace("31", "32") } : change; provider.snapshot.comments.push(report);
     provider.recoveryEvidence = recoveryEvidence(provider, [
       { key: publicationKey("comment", report.id), createdAt: report.createdAt, metadata: { config: SHA, controller: FLOW_1 } },
       { key: publicationKey("change-request", "31"), createdAt: "2026-08-26T10:30:00.000Z", metadata: { config: SHA, controller: FLOW_1 } },
@@ -3049,6 +3049,7 @@ test("verified documentation advances review on its result head and rejects edit
     const result = await reconcileTicket(runtime.configured, TICKET);
     assert.equal(result.stateId, tampered ? "documentation" : "review");
     assert.equal(runtime.launcher.requests[0]?.control.changeRequest?.headSha, tampered ? OLD_HEAD : NEW_HEAD);
+    assert.equal(runtime.launcher.requests[0]?.control.changeRequest?.number, 31);
   });
 });
 

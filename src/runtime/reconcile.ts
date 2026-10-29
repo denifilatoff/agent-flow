@@ -471,16 +471,16 @@ function clearUncommittedReceipt(
     comment.id === receipt.humanGate!.sourceCommentId && !isMarked(comment.body)));
   if (committed && (receipt.artifacts.length > 0 || receipt.humanGate)) return control;
 
+  const documentation = receipt.artifacts.find((artifact) =>
+    artifact.kind === "comment" && artifact.artifactKind === "documentation");
+  const changeRequest = control.changeRequest && documentation?.kind === "comment" && documentation.inputHead
+    ? { ...control.changeRequest, headSha: documentation.inputHead }
+    : normalizedChange(evidence.snapshot.changeRequest);
   return advanceControlState(control, {
     attemptSeries: control.attemptSeries ? { ...control.attemptSeries, current: null } : null,
     latestReceipt: null,
     humanGate: control.humanGate?.interpretedByAttemptId === receipt.attemptId ? null : control.humanGate,
-    changeRequest: (() => {
-      const observed = normalizedChange(evidence.snapshot.changeRequest);
-      const documentation = receipt.artifacts.find((artifact) => artifact.kind === "comment" && artifact.artifactKind === "documentation");
-      return observed && documentation?.kind === "comment" && documentation.inputHead
-        ? { ...observed, headSha: documentation.inputHead } : observed;
-    })(),
+    changeRequest,
   }, now(dependencies));
 }
 
