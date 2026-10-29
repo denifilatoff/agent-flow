@@ -79,7 +79,7 @@ test("bugfix branch reproduces, fixes, reviews, and verifies", async () => {
   }).stateId, "bug-development");
   assert.equal(machine.transition({
     stateId: "bug-development", resumeStateId: null, event: succeeded,
-  }).stateId, "bug-review");
+  }).stateId, "bug-documentation");
   assert.equal(machine.transition({
     stateId: "bug-review", resumeStateId: null, event: event("review-approved", {
       receiptValid: true, headMatches: true, activationPresent: true, ticketOpen: true,
@@ -287,6 +287,32 @@ test("final states refuse every machine event", async () => {
         resumeStateId: null,
         actions: [],
       });
+    }
+  }
+});
+
+test("both policies route every implementation iteration through documentation and resume it", async () => {
+  for (const flow of [await loadDevelopmentFlow(), await loadAutonomousDevelopmentFlow()]) {
+    const machine = compileFlow(flow);
+    const success = event("agent-succeeded", { receiptValid: true, activationPresent: true, ticketOpen: true });
+    for (const prefix of ["", "bug-"]) {
+      const implementation = `${prefix}development`, documentation = `${prefix}documentation`, review = `${prefix}review`;
+      assert.equal(flow.spec.states[documentation]?.agent, "documentarian");
+      assert.equal(flow.spec.states[documentation]?.resultContract, "documentation");
+      for (let iteration = 0; iteration < 2; iteration++) {
+        assert.equal(machine.transition({ stateId: implementation, resumeStateId: null, event: success }).stateId, documentation);
+        assert.equal(machine.transition({ stateId: documentation, resumeStateId: null, event: success }).stateId, review);
+        assert.equal(machine.transition({ stateId: review, resumeStateId: null,
+          event: event("review-changes-requested", { receiptValid: true, headMatches: true, activationPresent: true, ticketOpen: true }) }).stateId, implementation);
+      }
+      for (const type of ["agent-needs-human", "attempts-exhausted"] as const) {
+        const paused = machine.transition({ stateId: documentation, resumeStateId: null, event: event(type, { receiptValid: true }) });
+        assert.equal(paused.resumeStateId, documentation);
+        const resumed = machine.transition({ stateId: paused.stateId, resumeStateId: paused.resumeStateId,
+          event: event(type === "attempts-exhausted" ? "authorized-comment" : "human-answer-accepted",
+            { authorizedActor: true, receiptValid: true, activationPresent: true, ticketOpen: true }) });
+        assert.equal(resumed.stateId, documentation);
+      }
     }
   }
 });

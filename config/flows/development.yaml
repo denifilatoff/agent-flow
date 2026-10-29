@@ -59,6 +59,23 @@ spec:
       context: [ticket, control-state, diagnostic, change-request, review, human-comment]
       "on":
         agent-succeeded:
+          target: bug-documentation
+          guards: [receipt-valid, activation-present, ticket-open]
+          actions: [record-receipt]
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt, remember-resume-state]
+        attempts-exhausted:
+          target: blocked
+          actions: [remember-resume-state]
+    bug-documentation:
+      kind: agent
+      agent: documentarian
+      resultContract: documentation
+      context: [ticket, control-state, diagnostic, change-request, review, human-comment]
+      "on":
+        agent-succeeded:
           target: bug-review
           guards: [receipt-valid, activation-present, ticket-open]
           actions: [record-receipt]
@@ -213,6 +230,23 @@ spec:
       kind: agent
       agent: developer
       resultContract: development
+      context: [ticket, control-state, assessment, plan, change-request, review, human-comment]
+      "on":
+        agent-succeeded:
+          target: documentation
+          guards: [receipt-valid, activation-present, ticket-open]
+          actions: [record-receipt]
+        agent-needs-human:
+          target: needs-human
+          guards: [receipt-valid]
+          actions: [record-receipt, remember-resume-state]
+        attempts-exhausted:
+          target: blocked
+          actions: [remember-resume-state]
+    documentation:
+      kind: agent
+      agent: documentarian
+      resultContract: documentation
       context: [ticket, control-state, assessment, plan, change-request, review, human-comment]
       "on":
         agent-succeeded:

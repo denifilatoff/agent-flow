@@ -3079,4 +3079,11 @@ test("provider-only documentation recovery excludes reports consumed by earlier 
   assert.equal(runtime.launcher.requests.length, 1);
   assert.ok(runtime.launcher.requests[0]!.publicationKeys.includes(publicationKey("comment", old.id)));
   assert.ok(!runtime.launcher.requests[0]!.publicationKeys.includes(publicationKey("comment", current.id)));
+  provider.snapshot.labels = provider.snapshot.labels.map((label) => label === "agent-stage:documentation" ? "agent-stage:review" : label);
+  const afterTransition = await localRuntime(t, provider);
+  afterTransition.configured.config = runtime.configured.config;
+  const reviewed = await reconcileTicket(afterTransition.configured, TICKET);
+  assert.equal(reviewed.stateId, "review");
+  assert.equal(afterTransition.launcher.requests[0]?.snapshot.changeRequest?.headSha, NEW_HEAD);
+  assert.ok(afterTransition.launcher.requests[0]!.publicationKeys.includes(publicationKey("comment", current.id)));
 });
