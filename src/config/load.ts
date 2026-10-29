@@ -26,7 +26,17 @@ const requiredSchemas = [
 ] as const;
 
 export function validateBundleDocument<T>(bundle: ConfigBundle, kind: SchemaKind, value: unknown): T {
-  return (bundleValidators.get(bundle) ?? validateDocument)<T>(kind, value);
+  const pinned = bundleValidators.get(bundle) ?? validateDocument;
+  if (kind === "AgentReceipt" || kind === "ControlState") {
+    // Usage is controller-owned telemetry, outside the original pinned operational contract.
+    validateDocument(kind, value);
+    const projection = structuredClone(value) as Record<string, unknown>;
+    const receipt = kind === "AgentReceipt" ? projection : projection.latestReceipt;
+    if (receipt && typeof receipt === "object") delete (receipt as Record<string, unknown>).usage;
+    pinned(kind, projection);
+    return value as T;
+  }
+  return pinned<T>(kind, value);
 }
 
 function isInside(root: string, path: string): boolean {

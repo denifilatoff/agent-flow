@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadConfigBundle, validateBundleDocument } from "../../src/config/load.ts";
 import { validateDocument } from "../../src/config/schema-validator.ts";
 
 const receipt = {
@@ -23,4 +27,19 @@ test("rejects invalid usage, unsafe counts and unpaired cost", () => {
     { costUsd: 0 }, { costSource: "estimated" }, { extra: 1 }]) {
     assert.throws(() => validateDocument("AgentReceipt", { ...receipt, usage }));
   }
+});
+
+test("validates the usage extension independently of an older pinned receipt schema", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "usage-old-pin-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const directory of ["config", "schemas"]) await cp(directory, join(root, directory), { recursive: true });
+  const path = join(root, "schemas/v1/agent-receipt.schema.json");
+  const schema = JSON.parse(await readFile(path, "utf8"));
+  delete schema.properties.usage;
+  await writeFile(path, JSON.stringify(schema));
+  const bundle = await loadConfigBundle(root, "config/stack.yaml", "0".repeat(40));
+  const value = { ...receipt, usage: { totalTokens: 4 } };
+  assert.deepEqual(validateBundleDocument(bundle, "AgentReceipt", value), value);
+  assert.throws(() => validateBundleDocument(bundle, "AgentReceipt", { ...value, extra: 1 }));
+  assert.throws(() => validateBundleDocument(bundle, "AgentReceipt", { ...value, usage: { totalTokens: -1 } }));
 });
