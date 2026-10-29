@@ -106,6 +106,7 @@ export interface FixtureRun {
   changeRequest(): Promise<NormalizedChangeRequest | null>;
   close(): Promise<void>;
   closeChangeRequest(): Promise<void>;
+  reopenChangeRequest(): Promise<void>;
   control(): Promise<ControlState>;
   controllerLabels(): Promise<string[]>;
   compilations(): Promise<Array<Omit<RoutingEvent, "kind">>>;
@@ -306,6 +307,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
       await cleanup();
     },
     async closeChangeRequest() { state.setChangeState("closed"); },
+    async reopenChangeRequest() { state.setChangeState("open"); },
     control: async () => requireControl(currentControl()),
     controllerId: async () => (await readFile(join(dataDirectory, "controller-id"), "utf8")).trim(),
     controllerLabels: async () => state.labels.filter((label) => label.startsWith("agent-")).sort(),

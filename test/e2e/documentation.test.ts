@@ -83,3 +83,20 @@ for (const provider of ["github", "gitlab"] as const) {
     assert.equal((await run.agentCommentIds()).length, 3);
   });
 }
+
+test("documentation asks about a closed request and resumes the same stage after reopening", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.blockNextAttempt("documentation");
+  await run.untilState("assessment-review"); await run.answer("approved");
+  await run.untilState("plan-review"); await run.answer("approved");
+  await run.untilState("documentation"); await run.untilAttempt("started");
+  await run.closeChangeRequest(); await run.restart();
+  await run.untilState("needs-human");
+  assert.equal((await run.control()).resumeStateId, "documentation");
+  assert.match((await run.latestAgentComment())!.body, /Reopen the existing change request/);
+  await run.reopenChangeRequest(); await run.answer("Reopen the same request and continue.");
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.changeRequest())!.number, 31);
+  assert.equal((await run.receipts()).filter((r) => r.artifacts.some((a) => a.kind === "comment" && a.artifactKind === "documentation")).length, 1);
+});
