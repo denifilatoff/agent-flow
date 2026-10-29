@@ -546,9 +546,9 @@ async function reconcileControl(
     let ci: RequiredChecks | null = null;
     try {
       if (change?.state === "open") {
-        ci = await provider.readRequiredChecks(ref, change);
+        const candidate = await provider.readRequiredChecks(ref, change);
         const current = await provider.readChangeRequest(ref, change.number);
-        if (current.headSha !== change.headSha || current.state !== "open") ci = null;
+        if (current.headSha === change.headSha && current.state === "open") ci = candidate;
       }
     } catch { /* Unreadable CI is never passing evidence. Retry on the next poll. */ }
     const checks = ci?.headSha === change?.headSha ? ci?.checks : undefined;

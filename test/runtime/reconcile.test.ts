@@ -2957,7 +2957,7 @@ test("warm review rerouting rejects a replacement linked change request before c
 test("required current-head CI independently gates accepted development and review results", async () => {
   for (const policy of ["development", "development-autonomous"]) {
     for (const stateId of ["development", "review", "bug-development", "bug-review", "bug-verification"]) {
-      for (const status of ["pending", "missing", "unreadable", "stale", "success"]) {
+      for (const status of ["pending", "missing", "unreadable", "head-unreadable", "stale", "success"]) {
         const provider = new FakeProvider();
         const launcher = new FakeLauncher();
         const bundle = structuredClone(BUNDLE);
@@ -2971,8 +2971,12 @@ test("required current-head CI independently gates accepted development and revi
         provider.readRequiredChecks = async () => {
           if (status === "unreadable") throw new Error("CI unavailable");
           return { headSha: status === "stale" ? NEW_HEAD : OLD_HEAD,
-            checks: status === "missing" ? [] : [{ name: "verify", status: status === "success" ? "success" : "pending" }, { name: "optional-skipped", status: "failure" }] };
+            checks: status === "missing" ? [] : [{ name: "verify", status: ["success", "head-unreadable"].includes(status) ? "success" : "pending" }, { name: "optional-skipped", status: "failure" }] };
         };
+        const readChangeRequest = provider.readChangeRequest.bind(provider);
+        if (status === "head-unreadable") {
+          provider.readChangeRequest = async () => { throw new Error("Current head unavailable"); };
+        }
         const deps = dependencies(provider, launcher);
         deps.config = { loadCurrent: async () => bundle, loadPinned: async () => bundle };
         const result = await reconcileTicket(deps, TICKET);
@@ -2981,6 +2985,13 @@ test("required current-head CI independently gates accepted development and revi
           assert.equal(result.stateId, stateId);
           assert.equal(result.started, false);
           assert.equal(launcher.requests.length, 0);
+        }
+        if (status === "head-unreadable") {
+          assert.match(result.recoveryReason!, /Waiting for required current-head CI/);
+          assert.deepEqual(parseControlComment(provider.snapshot.comments[0]!.body)!.latestReceipt, receipt);
+          provider.readChangeRequest = readChangeRequest;
+          const recovered = await reconcileTicket(deps, TICKET);
+          assert.equal(recovered.changed, true, `${policy} ${stateId} head read recovered`);
         }
       }
     }
