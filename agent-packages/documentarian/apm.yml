@@ -1,0 +1,8 @@
+name: documentarian
+version: 1.0.0
+description: Synchronize affected documentation with the implementation in the existing change request.
+author: agent-flow
+targets: [claude, codex]
+dependencies:
+  apm:
+    - addyosmani/agent-skills/skills/documentation-and-adrs#f63ec56a3cc936408d792956ae583c3c96a825bd
