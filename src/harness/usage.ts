@@ -4,6 +4,7 @@ import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { AttemptUsage } from "../config/types.ts";
 import { assertSafeDirectory, assertSafeFile } from "../runtime/filesystem.ts";
+import { resolveUsageCost } from "./usage-cost.ts";
 
 export interface UsageObserver {
   write(chunk: Buffer): void;
@@ -88,6 +89,26 @@ export class ClaudeUsage implements UsageObserver {
       }
     }
     if (cost(record.total_cost_usd)) { usage.costUsd = record.total_cost_usd; usage.costSource = "harness"; }
+    // Only a single-model aggregate equal to root usage establishes all pricing dimensions here.
+    // Mixed-model native totals remain usable; missing child tier/cache detail prevents estimation.
+    const root = record.usage;
+    const modelsList = models && typeof models === "object" ? Object.entries(models) as Array<[string, any]> : [];
+    if (usage.totalTokens !== undefined && modelsList.length === 1 && root?.service_tier === "standard"
+      && root.inference_geo === "" && root.server_tool_use?.web_search_requests === 0
+      && root.server_tool_use?.web_fetch_requests === 0
+      && root.input_tokens === usage.inputTokens && root.output_tokens === usage.outputTokens
+      && root.cache_read_input_tokens === usage.cacheReadInputTokens
+      && root.cache_creation_input_tokens === usage.cacheCreationInputTokens) {
+      const [model, detail] = modelsList[0]!;
+      const cache = root.cache_creation;
+      if (cache && count(cache.ephemeral_5m_input_tokens) && count(cache.ephemeral_1h_input_tokens)
+        && cache.ephemeral_5m_input_tokens + cache.ephemeral_1h_input_tokens === usage.cacheCreationInputTokens) {
+        Object.assign(usage, resolveUsageCost(usage, [{ model, inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens, cacheReadInputTokens: usage.cacheReadInputTokens,
+          cacheCreation5mTokens: cache.ephemeral_5m_input_tokens, cacheCreation1hTokens: cache.ephemeral_1h_input_tokens,
+          tier: "standard", geography: "global", contextWindow: detail.contextWindow }]));
+      }
+    }
     // Never use the root-only result.usage as a whole-tree aggregate.
     if (Object.keys(usage).length) this.latest = usage;
   }
