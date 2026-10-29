@@ -16,6 +16,13 @@ Update `config/runtime.example.yaml` with the repositories to process, authorize
 docker compose up --build
 ```
 
+The default Compose configuration mounts the runtime YAML as a single file. Atomic replacement on the host does not
+guarantee hot reload through this mount. After replacing the file, recreate the controller:
+
+```bash
+docker compose up -d --force-recreate controller
+```
+
 The controller stores disposable workspaces and session logs under `.agent-flow-data` by default. GitHub or GitLab
 remains the only operational source of truth.
 

@@ -295,8 +295,9 @@ Docker remains a complete deployment target. A deployment needs only the image, 
 mounts, persistent storage at `/var/lib/agent-flow/`, and the HTTP port when the dashboard is required.
 
 Changing Git behavior means changing the pinned revision in the external runtime YAML and restarting the container.
-Changing a reloadable runtime field means replacing the mounted YAML atomically; the controller adopts it at the
-documented boundary.
+Native paths and directory mounts support atomic replacement of the YAML for reloadable runtime fields; the controller
+adopts changes at the documented boundary. The Compose single-file mount requires recreating the controller after
+atomic replacement; see [Run with Docker Compose](../../README.md#run-with-docker-compose).
 
 ## Future Argo CD deployment
 
