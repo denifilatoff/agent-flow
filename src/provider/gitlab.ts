@@ -460,6 +460,28 @@ export function createGitLabAdapter(
       return normalizeLabels(issue.labels);
     },
 
+    async readRequiredChecks(ref, change) {
+      assertTicket(ref, allowlist);
+      if (change.provider !== "gitlab" || change.repository !== ref.repository || !/^[0-9a-f]{40}$/.test(change.headSha)) {
+        throw new Error("CI change request identity mismatch");
+      }
+      // MR pipelines include detached/merged-result pipelines; only exact source-head evidence is eligible.
+      const pipelines = await listAll(`${repositoryPath(ref.repository)}/merge_requests/${change.number}/pipelines?per_page=100`, "active");
+      const matching = pipelines.map((item) => object(item, "GitLab pipeline"))
+        .filter((pipeline) => pipeline.sha === change.headSha)
+        .sort((a, b) => Number(b.id) - Number(a.id));
+      const pipeline = matching[0];
+      if (!pipeline) return { headSha: change.headSha, checks: [] };
+      const id = pipeline.id;
+      if (!Number.isSafeInteger(id) || Number(id) <= 0) throw new Error("invalid CI pipeline id");
+      const jobs = await listAll(`${repositoryPath(ref.repository)}/pipelines/${id}/jobs?include_retried=false&per_page=100`, "active");
+      return { headSha: change.headSha, checks: jobs.map((item) => {
+        const job = object(item, "GitLab CI job");
+        const status = string(job, "status");
+        return { name: string(job, "name"), status: status === "success" ? "success" as const
+          : ["failed", "canceled", "skipped"].includes(status) ? "failure" as const : "pending" as const };
+      }) };
+    },
     readChangeRequest,
 
     async findReview(

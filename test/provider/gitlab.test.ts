@@ -963,3 +963,18 @@ test("receipt readback retains the pinned route's linked merge request after sta
   }, gitlab, false);
   assert.equal(receipt.artifacts[0]?.kind === "change-request" && receipt.artifacts[0].number, 41);
 });
+
+test("reads only latest exact-head MR pipeline and non-retried jobs", async () => {
+  for (const status of ["success", "failed", "canceled", "skipped", "running"]) {
+    const client = new FixtureClient()
+      .add("GET", `${PROJECT}/merge_requests/31/pipelines?per_page=100`, { data: [{ id: 99, sha: "f".repeat(40) }, { id: 10, sha: HEAD_SHA }, { id: 11, sha: HEAD_SHA }] })
+      .add("GET", `${PROJECT}/pipelines/11/jobs?include_retried=false&per_page=100`, { data: [{ name: "verify", status }] });
+    const result = await adapter(client).readRequiredChecks({ provider: "gitlab", repository: REPOSITORY, number: 23 }, { provider: "gitlab", repository: REPOSITORY, number: 31, headSha: HEAD_SHA } as any);
+    assert.deepEqual(result, { headSha: HEAD_SHA, checks: [{ name: "verify", status: status === "success" ? "success" : status === "running" ? "pending" : "failure" }] });
+  }
+});
+
+test("missing current-head pipeline yields no passing evidence", async () => {
+  const client = new FixtureClient().add("GET", `${PROJECT}/merge_requests/31/pipelines?per_page=100`, { data: [{ id: 99, sha: "f".repeat(40) }] });
+  assert.deepEqual(await adapter(client).readRequiredChecks({ provider: "gitlab", repository: REPOSITORY, number: 23 }, { provider: "gitlab", repository: REPOSITORY, number: 31, headSha: HEAD_SHA } as any), { headSha: HEAD_SHA, checks: [] });
+});

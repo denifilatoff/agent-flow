@@ -34,6 +34,8 @@ type AttemptMode = "success" | "exit-failure" | "block" | "late" | "crash-after-
 interface FixtureOptions {
   firstAttempt?: AttemptMode;
   forceStartupFailure?: boolean;
+  repairCiAfterFailure?: boolean;
+  ciAfterReview?: "success" | "pending" | "failure";
 }
 
 interface StoredComment {
@@ -96,6 +98,7 @@ export interface FixtureRun {
   answer(body: string): Promise<void>;
   blockNextAttempt(state: string): Promise<void>;
   changeHead(): Promise<void>;
+  setCi(status: "success" | "pending" | "failure" | "missing"): Promise<void>;
   changeRequest(): Promise<NormalizedChangeRequest | null>;
   close(): Promise<void>;
   closeChangeRequest(): Promise<void>;
@@ -189,6 +192,8 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   certificatesChanged = true;
   setDefaultCACertificates([...originalCertificates, await readFile(certificate, "utf8")]);
   const state = new FixtureState(provider, options.firstAttempt);
+  state.ciAfterReview = options.ciAfterReview;
+  state.repairCiAfterFailure = options.repairCiAfterFailure;
   server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
     void state.handle(request, response).catch((error: unknown) => {
       response.writeHead(500, { "content-type": "application/json" });
@@ -293,6 +298,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     async answer(body) { state.addComment(body, MAINTAINER); },
     async blockNextAttempt(stateId) { state.nextModes.set(stateId, ["block"]); },
     async changeHead() { state.changeHead(); },
+    async setCi(status) { state.ciStatus = status; },
     async changeRequest() { return state.normalizedChange(); },
     async close() {
       await cleanup();
@@ -485,6 +491,9 @@ class FixtureState {
   readonly requestLog: Array<{ method: string; path: string; phase: string; installation: string | null }> = [];
   readonly labelEvents: LabelEvent[] = [];
   labels = ["agent-flow:development"];
+  repairCiAfterFailure?: boolean;
+  ciAfterReview?: "success" | "pending" | "failure";
+  ciStatus: "success" | "pending" | "failure" | "missing" = "success";
   open = true;
   change: StoredChange | null = null;
   activationId = 1;
@@ -753,6 +762,10 @@ class FixtureState {
       return { event: "agent-succeeded" };
     }
     if (state === "development") {
+      if (this.repairCiAfterFailure && this.change && this.ciStatus === "failure") {
+        this.changeHead();
+        this.ciStatus = "success";
+      }
       const timestamp = this.touch();
       this.change ??= {
         number: this.provider === "github" ? 31 : 41,
@@ -767,6 +780,10 @@ class FixtureState {
     if (state === "review") {
       if (!this.change) throw new Error("review change request is missing");
       this.addReview(context.publicationMarker, "approved");
+      if (this.ciAfterReview) {
+        this.ciStatus = this.ciAfterReview;
+        this.ciAfterReview = undefined;
+      }
       return { event: "review-approved" };
     }
     if (state === "needs-human" && this.change?.state === "closed") {
@@ -786,6 +803,10 @@ class FixtureState {
 
   private github(method: string, url: URL, body: unknown, response: import("node:http").ServerResponse): void {
     const path = url.pathname.slice("/api/github/".length);
+    if (method === "GET" && path.endsWith("/check-runs")) return json(response, 200, { check_runs: this.ciStatus === "missing" ? [] : [{
+      name: "verify", head_sha: this.change?.headSha, status: this.ciStatus === "pending" ? "in_progress" : "completed", conclusion: this.ciStatus,
+    }] });
+    if (method === "GET" && path.endsWith("/statuses")) return json(response, 200, []);
     if (method === "POST" && path === "graphql") {
       const ids = (body as { variables?: { ids?: string[] } })?.variables?.ids;
       return json(response, 200, ids
@@ -872,6 +893,8 @@ class FixtureState {
     if (method === "GET" && path === `${project}/issues/${this.number}`) return json(response, 200, this.gitlabIssue());
     if (method === "GET" && path === `${project}/issues/${this.number}/resource_label_events`) return json(response, 200, this.gitlabActivationEvents());
     if (method === "GET" && path === `${project}/issues/${this.number}/notes`) return json(response, 200, this.comments.map((comment) => this.gitlabNote(comment)));
+    if (method === "GET" && path.endsWith("/pipelines")) return json(response, 200, this.ciStatus === "missing" ? [] : [{ id: 10, sha: this.change?.headSha }]);
+    if (method === "GET" && path.endsWith("/pipelines/10/jobs")) return json(response, 200, [{ name: "verify", status: this.ciStatus === "pending" ? "running" : this.ciStatus === "failure" ? "failed" : "success" }]);
     if (method === "GET" && path === `${project}/issues/${this.number}/related_merge_requests`) return json(response, 200, this.change ? [this.gitlabRelated()] : []);
     const member = new RegExp(`^${project}/members/all/(\\d+)$`).exec(path);
     if (method === "GET" && member) return json(response, 200, { id: Number(member[1]), username: "maintainer", access_level: 40 });

@@ -5,6 +5,7 @@ metadata:
   activationLabel: agent-flow:development
   managedLabel: agent-flow:managed
 spec:
+  requiredChecks: [verify]
   initial: assessment
   activationRoutes:
     bugfix: bug-reproduction
@@ -32,6 +33,9 @@ spec:
       resultContract: development
       context: [ticket, control-state, diagnostic, change-request, review, human-comment]
       "on":
+        ci-failed:
+          target: bug-development
+          guards: [activation-present, ticket-open]
         agent-succeeded:
           target: bug-review
           guards: [receipt-valid, activation-present, ticket-open]
@@ -49,6 +53,9 @@ spec:
       resultContract: review
       context: [ticket, control-state, diagnostic, change-request, review, human-comment]
       "on":
+        ci-failed:
+          target: bug-development
+          guards: [activation-present, ticket-open]
         review-approved:
           target: bug-verification
           guards: [receipt-valid, head-matches, activation-present, ticket-open]
@@ -70,6 +77,9 @@ spec:
       resultContract: verification
       context: [ticket, control-state, diagnostic, change-request, review, human-comment]
       "on":
+        ci-failed:
+          target: bug-development
+          guards: [activation-present, ticket-open]
         change-request-updated:
           target: bug-review
           guards: [activation-present, ticket-open]
@@ -137,6 +147,9 @@ spec:
       resultContract: development
       context: [ticket, control-state, assessment, plan, change-request, review, human-comment]
       "on":
+        ci-failed:
+          target: development
+          guards: [activation-present, ticket-open]
         agent-succeeded:
           target: review
           guards: [receipt-valid, activation-present, ticket-open]
@@ -154,6 +167,9 @@ spec:
       resultContract: review
       context: [ticket, control-state, assessment, plan, change-request, review, human-comment]
       "on":
+        ci-failed:
+          target: development
+          guards: [activation-present, ticket-open]
         review-approved:
           target: awaiting-merge
           guards: [receipt-valid, head-matches, activation-present, ticket-open]

@@ -3,6 +3,7 @@ import type { FlowTransition } from "../config/types.js";
 export type FlowEventType =
   | "agent-succeeded"
   | "agent-needs-human"
+  | "ci-failed"
   | "attempts-exhausted"
   | "review-approved"
   | "review-changes-requested"
