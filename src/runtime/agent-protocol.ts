@@ -5,6 +5,7 @@ import type {
 } from "../config/types.js";
 import type { FlowEventType } from "../flow/types.js";
 import type { NormalizedChangeRequest, ProviderComment } from "../provider/types.js";
+import { renderPublication } from "../provider/publication.ts";
 
 type EventSource = "agent" | "provider" | "controller";
 
@@ -15,12 +16,13 @@ export interface RuntimePromptInput {
   stateId: string;
   mode: AttemptMode;
   resultContract: ResultContract;
-  flowInstanceId: string;
-  attemptId: string;
+  configRevision: string;
+  controllerId: string;
   contextPath: string;
   decisionPath: string;
   changeRequest: NormalizedChangeRequest | null;
   sourceComment: ProviderComment | null;
+  excludedReviewIds?: readonly string[];
 }
 
 export const EVENT_SOURCES: Readonly<Record<FlowEventType, EventSource>> = Object.freeze({
@@ -65,6 +67,7 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
   if (events.length === 0) {
     throw new Error(`flow state ${input.stateId} has no permitted model event for ${input.mode} mode`);
   }
+
   if (input.resultContract === "verification" && !input.changeRequest) {
     throw new Error("verification requires a pinned change request");
   }
@@ -99,9 +102,29 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
         + "to reopen the same change request or cancel the flow, then write {\"event\":\"agent-needs-human\"}.",
     );
   }
+  if (input.mode === "stage") {
+    lines.push(
+      "Inspect the supplied prior publications and code before deciding that the stage is complete. "
+        + "Reuse an existing suitable final result by returning its matching decision without publishing a duplicate. "
+        + "A question, progress note, partial implementation, or obsolete review is not a completed result. "
+        + "If the existing publication asks an unresolved question, reuse it with agent-needs-human. "
+        + "If the evidence is still ambiguous, request human clarification instead of claiming success.",
+    );
+  }
+  if (input.resultContract === "review" && input.mode === "stage") {
+    if (input.excludedReviewIds?.length) {
+      lines.push(`Do not reuse these existing review IDs for this attempt: ${input.excludedReviewIds.join(", ")}.`);
+    }
+    lines.push(
+      "If one existing provider-native review already satisfies either exact review evidence contract for this pinned "
+        + "head, reuse it by writing the matching decision without publishing another review.",
+    );
+  }
   lines.push(
     "Allowed decisions and required provider evidence:",
     ...events.map((event) => `${JSON.stringify({ event })} requires ${evidence(input, event)}.`),
+    "Add the publication marker only to the final result, question, review body, or change-request description. "
+      + "Do not mark progress notes.",
     "Do not edit labels beginning with `agent-flow:` or `agent-stage:`.",
   );
   return lines.join("\n");
@@ -112,40 +135,41 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
     || event === "human-question"
     || event === "human-unclear"
     || event === "human-answer-unclear") {
-    return `a marked question comment beginning exactly with ${marker(input, "question")}`;
+    return `a marked question comment containing exactly ${marker(input)}`;
   }
   if (event.startsWith("human-")) return "no new provider publication";
   if (event === "review-approved" || event === "review-changes-requested") {
     if (!input.changeRequest) throw new Error("review event requires a pinned change request");
     const head = input.changeRequest.headSha;
     const verdict = event === "review-approved" ? "approved" : "changes-requested";
-    return `a provider-native review on ${head} beginning exactly with ${marker(input, "review")} `
+    return `a provider-native review on ${head} beginning exactly with ${marker(input)} `
       + `and <!-- agent-flow-review:v1 head=${head} verdict=${verdict} -->`;
   }
   if (event === "agent-succeeded") {
     if (input.resultContract === "assessment") {
-      return `a marked assessment comment beginning exactly with ${marker(input, "assessment")}`;
+      return `a marked assessment comment containing exactly ${marker(input)}`;
     }
     if (input.resultContract === "plan") {
-      return `a marked plan comment beginning exactly with ${marker(input, "plan")}`;
+      return `a marked plan comment containing exactly ${marker(input)}`;
     }
-    if (input.resultContract === "diagnostic") {
-      return `a marked diagnostic comment beginning exactly with ${marker(input, "diagnostic")}`;
-    }
+    if (input.resultContract === "diagnostic") return `a marked diagnostic comment containing exactly ${marker(input)}`;
     if (input.resultContract === "verification") {
-      return `a marked diagnostic comment beginning exactly with ${marker(input, "diagnostic")} followed by `
+      return `a marked diagnostic comment containing exactly ${marker(input)} followed by `
         + `BUG RECEIPT · VERIFIED for pinned head ${input.changeRequest!.headSha}`;
     }
     if (input.resultContract === "development") {
-      if (!input.changeRequest) return "creation of one linked open change request during this attempt";
+      if (!input.changeRequest) {
+        return `creation of one linked open change request whose description contains exactly ${marker(input)}`;
+      }
       const change = input.changeRequest;
       return `the exact pinned change request ${change.provider} ${change.repository}#${change.number} to remain open `
-        + "and be updated during this attempt. Do not create another change request";
+        + `and be updated during this attempt. Its description must contain exactly ${marker(input)}. `
+        + "Do not create another change request";
     }
   }
   throw new Error(`result contract ${input.resultContract} does not support ${event}`);
 }
 
-function marker(input: RuntimePromptInput, artifact: "assessment" | "plan" | "diagnostic" | "question" | "review"): string {
-  return `<!-- agent-flow:v1 flow=${input.flowInstanceId} attempt=${input.attemptId} artifact=${artifact} -->`;
+function marker(input: RuntimePromptInput): string {
+  return renderPublication({ config: input.configRevision, controller: input.controllerId });
 }

@@ -181,7 +181,8 @@
 
   function renderStatus(snapshot) {
     const controller = snapshot.controller;
-    const waiting = controller.tickets.filter((ticket) => ["human-gate", "provider-wait", "paused"].includes(ticket.stateKind));
+    const waiting = controller.tickets.filter((ticket) => ["human-gate", "provider-wait", "paused"].includes(ticket.stateKind)
+      || ["ambiguous", "foreign"].includes(ticket.recoveryDisposition));
     replace("status-metrics",
       metric("Controller", controller.lifecycle, snapshot.status.restartRequired ? "restart required" : "runtime active", controller.lifecycle === "failed" || snapshot.status.restartRequired),
       metric("Repositories", controller.repositories.length, "configured repositories"),
@@ -252,7 +253,9 @@
     for (const ticket of waiting) {
       const revision = ticket.configRevision || "configRevision unavailable";
       const action = ticket.actionUrl ? externalLink(ticketIdentity(ticket), ticket.actionUrl) : ticketIdentity(ticket);
-      list.append(dataRow(action, `${ticket.stateId || "state unavailable"} · ${ticket.stateKind || "kind unavailable"} · ${revision}`));
+      list.append(dataRow(action, ticket.recoveryReason
+        ? `${ticket.recoveryDisposition}: ${ticket.recoveryReason}`
+        : `${ticket.stateId || "state unavailable"} · ${ticket.stateKind || "kind unavailable"} · ${revision}`));
     }
     replace("waiting-panel", list);
   }

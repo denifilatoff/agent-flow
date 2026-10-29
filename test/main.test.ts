@@ -62,7 +62,7 @@ test("a signal during bootstrap drains launched work without becoming ready", as
     },
     async runPreflight() {
       await controller.bootstrap();
-      return { controller } as never;
+      return { controller, store: { close() {} } } as never;
     },
     signals,
     reportError() {},

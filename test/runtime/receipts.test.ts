@@ -25,7 +25,8 @@ import * as receiptModule from "../../src/runtime/receipts.ts";
 
 const FLOW_ID = "123e4567-e89b-42d3-a456-426614174000";
 const ATTEMPT_ID = "123e4567-e89b-42d3-a456-426614174001";
-const STARTED_AT = "2026-08-27T10:00:00.000Z";
+const CONFIG_REVISION = "a".repeat(40);
+const CONTROLLER_ID = "123e4567-e89b-42d3-a456-426614174002";
 const PUBLISHED_AT = "2026-08-27T10:01:00.000Z";
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
 const OLD_HEAD = "1111111111111111111111111111111111111111";
@@ -46,10 +47,12 @@ interface DecisionExpectationSpec {
   stateId: string;
   mode: AttemptMode;
   resultContract: ResultContract;
+  configRevision: string;
+  controllerId: string;
+  publicationKeys: readonly string[];
   flowInstanceId: string;
   attemptId: string;
   ticket: TicketRef;
-  startedAt: string;
   sourceComment: ProviderComment | null;
   pinnedChangeRequest: NormalizedChangeRequest | null;
 }
@@ -68,8 +71,8 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-function marker(artifact: "assessment" | "plan" | "diagnostic" | "question" | "review"): string {
-  return `<!-- agent-flow:v1 flow=${FLOW_ID} attempt=${ATTEMPT_ID} artifact=${artifact} -->`;
+function marker(_artifact: "assessment" | "plan" | "diagnostic" | "question" | "review"): string {
+  return `<!-- agent-flow:v1 {"config":"${CONFIG_REVISION}","controller":"${CONTROLLER_ID}"} -->`;
 }
 
 function flow(): FlowDefinition {
@@ -91,12 +94,8 @@ function flow(): FlowDefinition {
         planning: { kind: "agent", resultContract: "plan", on: {
           "agent-succeeded": transition, "agent-needs-human": transition,
         } },
-        diagnostic: { kind: "agent", resultContract: "diagnostic", on: {
-          "agent-succeeded": transition, "agent-needs-human": transition,
-        } },
-        verification: { kind: "agent", resultContract: "verification", on: {
-          "agent-succeeded": transition, "agent-needs-human": transition,
-        } },
+        diagnostic: { kind: "agent", resultContract: "diagnostic", on: { "agent-succeeded": transition, "agent-needs-human": transition } },
+        verification: { kind: "agent", resultContract: "verification", on: { "agent-succeeded": transition, "agent-needs-human": transition } },
         development: { kind: "agent", resultContract: "development", on: {
           "agent-succeeded": transition, "agent-needs-human": transition,
         } },
@@ -159,6 +158,8 @@ function change(overrides: Partial<NormalizedChangeRequest> = {}): NormalizedCha
     headSha: HEAD_SHA,
     state: "open",
     actor: ACTOR,
+    body: `${marker("assessment")}\nImplementation.`,
+    createdAt: PUBLISHED_AT,
     updatedAt: PUBLISHED_AT,
     ...overrides,
   };
@@ -197,13 +198,7 @@ function snapshot(overrides: Partial<ProviderTicketSnapshot> = {}): ProviderTick
     open: true,
     labels: ["agent-flow:development"],
     updatedAt: PUBLISHED_AT,
-    activation: {
-      present: true,
-      label: "agent-flow:development",
-      eventId: "1",
-      actor: ACTOR,
-      occurredAt: "2026-08-27T09:00:00.000Z",
-    },
+    activation: { present: true, eventId: "1", actor: ACTOR, occurredAt: "2026-08-27T09:00:00.000Z" },
     comments: [],
     changeRequest: change(),
     ...overrides,
@@ -225,6 +220,7 @@ class FakeProvider implements ProviderAdapter {
   actorPermission: Permission = "write";
   failure: Error | null = null;
   duplicateReview = false;
+  reviewExclusions: readonly string[] = [];
 
   constructor(kind: "github" | "gitlab" = "github", expectedTicket: TicketRef = TICKET) {
     this.kind = kind;
@@ -269,10 +265,16 @@ class FakeProvider implements ProviderAdapter {
     if (this.changeReadError) throw this.changeReadError;
     return this.record(`readChangeRequest:${number}`, this.changeRequest);
   }
-  async findReview(ref: TicketRef, number: number, reviewMarker: string): Promise<NormalizedReview | null> {
+  async findReview(
+    ref: TicketRef,
+    number: number,
+    reviewMarker: string,
+    excludedIds: readonly string[] = [],
+  ): Promise<NormalizedReview | null> {
     assert.deepEqual(ref, this.expectedTicket);
     assert.equal(number, this.changeRequest.number);
     assert.equal(reviewMarker, marker("review"));
+    this.reviewExclusions = excludedIds;
     this.calls.push(`findReview:${number}`);
     if (this.failure) throw this.failure;
     if (this.duplicateReview) throw new Error("duplicate review token=top-secret");
@@ -292,15 +294,66 @@ function expectation(overrides: Partial<DecisionExpectationSpec> = {}): Decision
     stateId: "assessment",
     mode: "stage",
     resultContract: "assessment",
+    configRevision: CONFIG_REVISION,
+    controllerId: CONTROLLER_ID,
+    publicationKeys: [],
     flowInstanceId: FLOW_ID,
     attemptId: ATTEMPT_ID,
     ticket: TICKET,
-    startedAt: STARTED_AT,
     sourceComment: null,
     pinnedChangeRequest: null,
     ...overrides,
   };
 }
+
+test("does not accept a marked comment that was present in the publication baseline", async () => {
+  const provider = new FakeProvider();
+  const progress = comment("assessment");
+  installComments(provider, [progress]);
+
+  await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
+    publicationKeys: [JSON.stringify(["github", "https://api.github.com/", "owner/repo", "comment", progress.id])],
+  }), provider), /comment/);
+});
+
+test("accepts a new plan after feedback when prior comments are in the local baseline", async () => {
+  const provider = new FakeProvider();
+  const assessment = comment("assessment", {
+    id: "99",
+    url: "https://github.example.test/owner/repo/issues/17#issuecomment-99",
+    createdAt: "2026-08-27T09:00:00.000Z",
+    updatedAt: "2026-08-27T09:00:00.000Z",
+  });
+  const revised = comment("assessment", {
+    id: "100",
+    url: "https://github.example.test/owner/repo/issues/17#issuecomment-100",
+    createdAt: "2026-08-27T09:30:00.000Z",
+    updatedAt: "2026-08-27T09:30:00.000Z",
+  });
+  const plan = comment("plan");
+  installComments(provider, [assessment, revised, plan]);
+
+  const receipt = await readDecision({ event: "agent-succeeded" }, expectation({
+    stateId: "planning",
+    resultContract: "plan",
+    publicationKeys: [assessment, revised].map(({ id }) => JSON.stringify([
+      "github", "https://api.github.com/", "owner/repo", "comment", id,
+    ])),
+  }), provider);
+
+  assert.equal(receipt.artifacts[0]?.kind, "comment");
+  assert.equal(receipt.artifacts[0]?.id, plan.id);
+  assert.equal(receipt.artifacts[0]?.artifactKind, "plan");
+});
+
+test("rejects a malformed publication baseline instead of reusing old evidence", async () => {
+  const provider = new FakeProvider();
+  installComments(provider, [comment("assessment")]);
+
+  await trustFailure(readDecision({ event: "agent-succeeded" }, expectation({
+    publicationKeys: ["not-a-publication-key"],
+  }), provider), /baseline/);
+});
 
 function installComments(provider: FakeProvider, comments: ProviderComment[]): void {
   provider.ticket = snapshot({ comments });
@@ -359,7 +412,6 @@ test("builds comment receipts from one-field agent decisions", async (context) =
   for (const [stateId, resultContract, artifactKind] of [
     ["assessment", "assessment", "assessment"],
     ["planning", "plan", "plan"],
-    ["diagnostic", "diagnostic", "diagnostic"],
   ] as const) {
     await context.test(resultContract, async () => {
       const provider = new FakeProvider();
@@ -378,7 +430,9 @@ test("builds comment receipts from one-field agent decisions", async (context) =
         artifacts: [{ kind: "comment", id: published.id, url: published.url,
           marker: marker(artifactKind), artifactKind }],
       });
-      assert.deepEqual(provider.calls, ["readTicket", `readComment:${published.id}`, "readTicket"]);
+      assert.deepEqual(provider.calls, [
+        "readTicket", `readComment:${published.id}`, `permission:${ACTOR.login}`, "readTicket",
+      ]);
     });
   }
 });
@@ -400,79 +454,9 @@ test("builds a development receipt from the linked open change request", async (
     artifacts: [{ kind: "change-request", number: 31, url: CHANGE_URL,
       headSha: HEAD_SHA, state: "open" }],
   });
-  assert.deepEqual(provider.calls, ["readTicket", "readChangeRequest:31", "readTicket"]);
-});
-
-test("accepts only a VERIFIED bug receipt at the pinned change head", async () => {
-  const provider = new FakeProvider();
-  const verified = comment("diagnostic", {
-    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
-  });
-  installComments(provider, [verified]);
-
-  const receipt = await readDecision(
-    { event: "agent-succeeded" },
-    expectation({
-      stateId: "verification",
-      resultContract: "verification",
-      pinnedChangeRequest: change(),
-    }),
-    provider,
-  );
-
-  assert.equal(receipt.artifacts[0]?.kind, "comment");
-  assert.equal(receipt.artifacts[0]?.artifactKind, "diagnostic");
-
-  const partialProvider = new FakeProvider();
-  const partial = comment("diagnostic", {
-    body: `${marker("diagnostic")}\nBUG RECEIPT · PARTIAL\n\nProblem    Missing proof.`,
-  });
-  installComments(partialProvider, [partial]);
-  await trustFailure(readDecision(
-    { event: "agent-succeeded" },
-    expectation({
-      stateId: "verification",
-      resultContract: "verification",
-      pinnedChangeRequest: change(),
-    }),
-    partialProvider,
-  ), /VERIFIED/);
-});
-
-test("rejects a verification receipt when the change head moves during readback", async () => {
-  const provider = new FakeProvider();
-  const verified = comment("diagnostic", {
-    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
-  });
-  installComments(provider, [verified]);
-  provider.ticketReads = [provider.ticket, snapshot({
-    comments: [verified],
-    changeRequest: change({ headSha: OLD_HEAD }),
-  })];
-
-  await trustFailure(readDecision(
-    { event: "agent-succeeded" },
-    expectation({
-      stateId: "verification",
-      resultContract: "verification",
-      pinnedChangeRequest: change(),
-    }),
-    provider,
-  ), /head SHA/);
-});
-
-test("rejects successful bug verification when the change request is closed", async () => {
-  const provider = new FakeProvider();
-  installComments(provider, [comment("diagnostic", {
-    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
-  })]);
-  provider.ticket.changeRequest = change({ state: "closed" });
-
-  await trustFailure(readDecision({ event: "agent-succeeded" }, expectation({
-    stateId: "verification",
-    resultContract: "verification",
-    pinnedChangeRequest: change(),
-  }), provider));
+  assert.deepEqual(provider.calls, [
+    "readTicket", "readChangeRequest:31", `permission:${ACTOR.login}`, "readTicket",
+  ]);
 });
 
 test("builds review receipts from provider-native logical verdicts", async (context) => {
@@ -498,7 +482,9 @@ test("builds review receipts from provider-native logical verdicts", async (cont
         summary,
         artifacts: [{ kind: "review", id: "701", url: REVIEW_URL, headSha: HEAD_SHA, verdict }],
       });
-      assert.deepEqual(provider.calls, ["readTicket", "findReview:31", "readReview:31:701", "readTicket"]);
+      assert.deepEqual(provider.calls, [
+        "readTicket", "findReview:31", "readReview:31:701", `permission:${ACTOR.login}`, "readTicket",
+      ]);
     });
   }
 });
@@ -506,17 +492,13 @@ test("builds review receipts from provider-native logical verdicts", async (cont
 test("builds needs-human receipts for every agent result contract", async (context) => {
   for (const [stateId, resultContract] of [
     ["assessment", "assessment"], ["planning", "plan"],
-    ["diagnostic", "diagnostic"],
-    ["verification", "verification"],
     ["development", "development"], ["review", "review"],
   ] as const) {
     await context.test(resultContract, async () => {
       const provider = new FakeProvider();
       installComments(provider, [comment("question")]);
       const receipt = await readDecision({ event: "agent-needs-human" }, expectation({
-        stateId,
-        resultContract,
-        pinnedChangeRequest: resultContract === "review" || resultContract === "verification" ? change() : null,
+        stateId, resultContract, pinnedChangeRequest: resultContract === "review" ? change() : null,
       }), provider);
       assert.equal(receipt.outcome, "needs-human");
       assert.equal(receipt.summary, "Agent requested human input.");
@@ -524,24 +506,6 @@ test("builds needs-human receipts for every agent result contract", async (conte
         marker: marker("question"), artifactKind: "question" }]);
     });
   }
-});
-
-test("accepts a verification question when the change request is closed", async () => {
-  const provider = new FakeProvider();
-  installComments(provider, [comment("question")]);
-  provider.ticket.changeRequest = change({ state: "closed" });
-
-  const receipt = await readDecision({ event: "agent-needs-human" }, expectation({
-    stateId: "verification",
-    resultContract: "verification",
-    pinnedChangeRequest: change(),
-  }), provider);
-
-  assert.deepEqual({ outcome: receipt.outcome, artifacts: receipt.artifacts }, {
-    outcome: "needs-human",
-    artifacts: [{ kind: "comment", id: "102", url: QUESTION_URL,
-      marker: marker("question"), artifactKind: "question" }],
-  });
 });
 
 test("builds human-gate receipts for every human event family", async (context) => {
@@ -586,28 +550,9 @@ test("treats malformed and unconfigured decisions as retryable", async (context)
   });
 });
 
-test("treats missing fresh evidence as retryable", async (context) => {
+test("treats missing current-iteration evidence as retryable", async (context) => {
   await context.test("comment", async () => {
     const provider = new FakeProvider();
-    installComments(provider, [comment("assessment", {
-      createdAt: "2026-08-27T09:59:59.999Z", updatedAt: "2026-08-27T09:59:59.999Z",
-    })]);
-    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation(), provider), /comment/);
-  });
-  await context.test("same-second comment before a millisecond start", async () => {
-    const provider = new FakeProvider();
-    installComments(provider, [comment("assessment", {
-      createdAt: "2026-08-27T10:00:00Z", updatedAt: "2026-08-27T10:00:00Z",
-    })]);
-    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
-      startedAt: "2026-08-27T10:00:00.500Z",
-    }), provider), /comment/);
-  });
-  await context.test("invalid comment timestamp", async () => {
-    const provider = new FakeProvider();
-    installComments(provider, [comment("assessment", {
-      createdAt: "not-a-timestamp", updatedAt: "not-a-timestamp",
-    })]);
     await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation(), provider), /comment/);
   });
   await context.test("change request", async () => {
@@ -617,46 +562,30 @@ test("treats missing fresh evidence as retryable", async (context) => {
       stateId: "development", resultContract: "development",
     }), provider), /change request/);
   });
-  await context.test("stale development change request", async () => {
+  await context.test("unmarked development change request", async () => {
     const provider = new FakeProvider();
-    const stale = change({ updatedAt: "2026-08-27T09:59:59.999Z" });
-    provider.ticket = snapshot({ changeRequest: stale });
-    provider.changeRequest = stale;
+    const unmarked = change({ body: "Implementation." });
+    provider.ticket = snapshot({ changeRequest: unmarked });
+    provider.changeRequest = unmarked;
     await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
       stateId: "development", resultContract: "development",
     }), provider), /change request/);
     assert.deepEqual(provider.calls, ["readTicket"]);
   });
-  await context.test("same-second development change request before a millisecond start", async () => {
+  await context.test("unchanged baseline development change request", async () => {
     const provider = new FakeProvider();
-    const stale = change({ updatedAt: "2026-08-27T10:00:00Z" });
-    provider.ticket = snapshot({ changeRequest: stale });
-    provider.changeRequest = stale;
+    const existing = change();
+    provider.ticket = snapshot({ changeRequest: existing });
+    provider.changeRequest = existing;
     await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
       stateId: "development",
       resultContract: "development",
-      startedAt: "2026-08-27T10:00:00.500Z",
+      pinnedChangeRequest: existing,
+      publicationKeys: [JSON.stringify([
+        "github", "https://api.github.com/", "owner/repo", "change-request", String(existing.number),
+      ])],
     }), provider), /change request/);
     assert.deepEqual(provider.calls, ["readTicket"]);
-  });
-  await context.test("development timestamp regresses during exact readback", async () => {
-    const provider = new FakeProvider();
-    provider.ticket = snapshot({ changeRequest: change({ updatedAt: "2026-08-27T10:00:00.500Z" }) });
-    provider.changeRequest = change({ updatedAt: "2026-08-27T10:00:00Z" });
-    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
-      stateId: "development",
-      resultContract: "development",
-      startedAt: "2026-08-27T10:00:00.500Z",
-    }), provider), /change request/);
-  });
-  await context.test("invalid development timestamp", async () => {
-    const provider = new FakeProvider();
-    const invalid = change({ updatedAt: "not-a-timestamp" });
-    provider.ticket = snapshot({ changeRequest: invalid });
-    provider.changeRequest = invalid;
-    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation({
-      stateId: "development", resultContract: "development",
-    }), provider), /change request/);
   });
   await context.test("review", async () => {
     const provider = new FakeProvider();
@@ -665,48 +594,17 @@ test("treats missing fresh evidence as retryable", async (context) => {
       stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
     }), provider), /review/);
   });
-  await context.test("stale provider review", async () => {
+  await context.test("baseline provider review", async () => {
     const provider = new FakeProvider();
-    const stale = review({ submittedAt: "2026-08-27T09:59:59.999Z" });
-    provider.foundReview = stale;
-    provider.reviewReadback = stale;
+    provider.foundReview = null;
     await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
       stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
+      publicationKeys: [JSON.stringify([
+        "github", "https://api.github.com/", "owner/repo", "review", "701",
+      ])],
     }), provider), /review/);
     assert.deepEqual(provider.calls, ["readTicket", "findReview:31"]);
-  });
-  await context.test("same-second review before a millisecond start", async () => {
-    const provider = new FakeProvider();
-    const stale = review({ submittedAt: "2026-08-27T10:00:00Z" });
-    provider.foundReview = stale;
-    provider.reviewReadback = stale;
-    await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
-      stateId: "review",
-      resultContract: "review",
-      pinnedChangeRequest: change(),
-      startedAt: "2026-08-27T10:00:00.500Z",
-    }), provider), /review/);
-    assert.deepEqual(provider.calls, ["readTicket", "findReview:31"]);
-  });
-  await context.test("review timestamp regresses during exact readback", async () => {
-    const provider = new FakeProvider();
-    provider.foundReview = review({ submittedAt: "2026-08-27T10:00:00.500Z" });
-    provider.reviewReadback = review({ submittedAt: "2026-08-27T10:00:00Z" });
-    await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
-      stateId: "review",
-      resultContract: "review",
-      pinnedChangeRequest: change(),
-      startedAt: "2026-08-27T10:00:00.500Z",
-    }), provider), /review/);
-  });
-  await context.test("invalid review timestamp", async () => {
-    const provider = new FakeProvider();
-    const invalid = review({ submittedAt: "not-a-timestamp" });
-    provider.foundReview = invalid;
-    provider.reviewReadback = invalid;
-    await unavailableEvidence(readDecision({ event: "review-approved" }, expectation({
-      stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
-    }), provider), /review/);
+    assert.deepEqual(provider.reviewExclusions, ["701"]);
   });
 });
 
@@ -769,10 +667,12 @@ test("rejects cancellation and changed provider identity", async (context) => {
 });
 
 test("rejects marker, duplicate, identity, URL, and membership contradictions", async (context) => {
-  await context.test("wrong artifact marker", async () => {
+  await context.test("wrong publication identity", async () => {
     const provider = new FakeProvider();
-    installComments(provider, [comment("plan")]);
-    await trustFailure(readDecision({ event: "agent-succeeded" }, expectation(), provider), /artifact kind/);
+    installComments(provider, [comment("assessment", {
+      body: `${marker("assessment").replace(CONFIG_REVISION, "b".repeat(40))}\nAssessment.`,
+    })]);
+    await unavailableEvidence(readDecision({ event: "agent-succeeded" }, expectation(), provider), /comment/);
   });
   await context.test("duplicate evidence", async () => {
     const provider = new FakeProvider();
@@ -895,6 +795,17 @@ test("rejects duplicate, stale, mismatched, or malformed review evidence", async
       }), provider), pattern);
     });
   }
+  await context.test("duplicate publication block", async () => {
+    const provider = new FakeProvider();
+    const body = `${marker("review")}\n`
+      + `<!-- agent-flow-review:v1 head=${HEAD_SHA} verdict=approved -->\n`
+      + marker("review");
+    provider.foundReview = review({ body });
+    provider.reviewReadback = review({ body });
+    await trustFailure(readDecision({ event: "review-approved" }, expectation({
+      stateId: "review", resultContract: "review", pinnedChangeRequest: change(),
+    }), provider), /marker/);
+  });
 });
 
 test("rejects mismatched or unauthorized human source comments", async (context) => {
@@ -913,7 +824,7 @@ test("rejects mismatched or unauthorized human source comments", async (context)
   await context.test("marked source", async () => {
     const provider = new FakeProvider();
     const human = source();
-    installComments(provider, [{ ...human, body: `${marker("question")}\nNot human input.` }]);
+    installComments(provider, [{ ...human, body: `Narrative text.\n${marker("question")}` }]);
     await trustFailure(run(provider, human), /unmarked/);
   });
   for (const permission of ["none", "read", "triage"] as const) {
@@ -1026,4 +937,108 @@ test("classifies decision input and evidence errors at the retry boundary", () =
     assert.equal(stored.code, code);
     assert.ok(stored.message.length <= 240);
   }
+});
+
+test("accepts only a VERIFIED bug receipt at the pinned change head", async () => {
+  const provider = new FakeProvider();
+  const verified = comment("diagnostic", {
+    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
+  });
+  installComments(provider, [verified]);
+
+  const receipt = await readDecision(
+    { event: "agent-succeeded" },
+    expectation({
+      stateId: "verification",
+      resultContract: "verification",
+      pinnedChangeRequest: change(),
+    }),
+    provider,
+  );
+
+  assert.equal(receipt.artifacts[0]?.kind, "comment");
+  assert.equal(receipt.artifacts[0]?.artifactKind, "diagnostic");
+
+  const partialProvider = new FakeProvider();
+  const partial = comment("diagnostic", {
+    body: `${marker("diagnostic")}\nBUG RECEIPT · PARTIAL\n\nProblem    Missing proof.`,
+  });
+  installComments(partialProvider, [partial]);
+  await trustFailure(readDecision(
+    { event: "agent-succeeded" },
+    expectation({
+      stateId: "verification",
+      resultContract: "verification",
+      pinnedChangeRequest: change(),
+    }),
+    partialProvider,
+  ), /VERIFIED/);
+});
+
+test("rejects a verification receipt when the change head moves during readback", async () => {
+  const provider = new FakeProvider();
+  const verified = comment("diagnostic", {
+    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
+  });
+  installComments(provider, [verified]);
+  provider.ticketReads = [provider.ticket, snapshot({
+    comments: [verified],
+    changeRequest: change({ headSha: OLD_HEAD }),
+  })];
+
+  await trustFailure(readDecision(
+    { event: "agent-succeeded" },
+    expectation({
+      stateId: "verification",
+      resultContract: "verification",
+      pinnedChangeRequest: change(),
+    }),
+    provider,
+  ), /head SHA/);
+});
+
+test("rejects successful bug verification when the change request is closed", async () => {
+  const provider = new FakeProvider();
+  installComments(provider, [comment("diagnostic", {
+    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
+  })]);
+  provider.ticket.changeRequest = change({ state: "closed" });
+
+  await trustFailure(readDecision({ event: "agent-succeeded" }, expectation({
+    stateId: "verification",
+    resultContract: "verification",
+    pinnedChangeRequest: change(),
+  }), provider));
+});
+
+
+test("accepts a verification question when the change request is closed", async () => {
+  const provider = new FakeProvider();
+  installComments(provider, [comment("question")]);
+  provider.ticket.changeRequest = change({ state: "closed" });
+
+  const receipt = await readDecision({ event: "agent-needs-human" }, expectation({
+    stateId: "verification",
+    resultContract: "verification",
+    pinnedChangeRequest: change(),
+  }), provider);
+
+  assert.deepEqual({ outcome: receipt.outcome, artifacts: receipt.artifacts }, {
+    outcome: "needs-human",
+    artifacts: [{ kind: "comment", id: "102", url: QUESTION_URL,
+      marker: marker("question"), artifactKind: "question" }],
+  });
+});
+
+test("accepts one newly published plan when reassessment replaces its earlier incomplete candidate", async () => {
+  const provider = new FakeProvider();
+  const candidate = comment("plan", { id: "201", url: "https://github.test/owner/repo/issues/17#issuecomment-201",
+    body: `${marker("plan")}\nPartial plan; missing the validation steps.` });
+  const completed = comment("plan", { id: "202", url: "https://github.test/owner/repo/issues/17#issuecomment-202",
+    body: `${marker("plan")}\nComplete plan and validation steps.` });
+  installComments(provider, [candidate, completed]);
+  const receipt = await readDecision({ event: "agent-succeeded" }, expectation({
+    stateId: "planning", resultContract: "plan", reusableCommentIds: [candidate.id],
+  }), provider);
+  assert.equal(receipt.artifacts[0]?.kind === "comment" && receipt.artifacts[0].id, completed.id);
 });

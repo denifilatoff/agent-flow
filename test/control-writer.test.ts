@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import type { ControlState } from "../src/config/types.ts";
-import { advanceControlState, renderControlComment } from "../src/provider/control-comment.ts";
-import type {
-  ProviderAdapter,
-  ProviderComment,
-  ProviderTicketSnapshot,
-  TicketRef,
-} from "../src/provider/types.ts";
+import { advanceControlState } from "../src/provider/control-comment.ts";
+import type { TicketRef } from "../src/provider/types.ts";
 import { createControlWriter } from "../src/runtime/control-state.ts";
+import { openLocalStore, providerScope } from "../src/runtime/local-store.ts";
 
 const NOW = "2026-08-26T12:00:00.000Z";
+const CONTROLLER = "22222222-2222-4222-8222-222222222222";
 const REF: TicketRef = { provider: "gitlab", repository: "group/project", number: 23 };
 
 function state(): ControlState {
@@ -35,48 +35,24 @@ function state(): ControlState {
   };
 }
 
-function comment(body: string): ProviderComment {
-  return {
-    id: "603",
-    url: "https://gitlab.example.test/group/project/-/issues/23#note_603",
-    body,
-    actor: { login: "owner", providerId: "42" },
-    createdAt: NOW,
-    updatedAt: NOW,
-  };
-}
-
-function provider(initial: ControlState, updateBody = (body: string) => body.slice(0, -1)): ProviderAdapter {
-  let stored = comment(renderControlComment(initial));
-  return {
-    kind: "gitlab",
-    async readTicket(): Promise<ProviderTicketSnapshot> {
-      return { comments: [structuredClone(stored)] } as ProviderTicketSnapshot;
-    },
-    async updateComment(_ref, _id, body): Promise<ProviderComment> {
-      stored = comment(updateBody(body));
-      return structuredClone(stored);
-    },
-    async readComment(): Promise<ProviderComment> { return structuredClone(stored); },
-  } as ProviderAdapter;
-}
-
-test("accepts a GitLab control update readback without the final newline", async () => {
+test("stores control updates locally and rejects a stale revision without provider calls", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-flow-control-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = openLocalStore(join(directory, "execution.sqlite"));
+  t.after(() => store.close());
+  const providerWrites: string[] = [];
+  const scope = providerScope("gitlab", "https://gitlab.example.test/api/v4");
+  const writer = createControlWriter(store, scope, CONTROLLER, () => NOW);
   const current = state();
+
+  await writer(REF, null, current);
   const next = advanceControlState(current, { stateId: "planning" }, NOW);
+  assert.deepEqual(await writer(REF, current, next), next);
 
-  const readback = await createControlWriter(provider(current))(REF, current, next);
-
-  assert.deepEqual(readback, next);
-});
-
-test("rejects a control update response with the wrong state", async () => {
-  const current = state();
-  const next = advanceControlState(current, { stateId: "planning" }, NOW);
-  const wrong = advanceControlState(current, { stateId: "development" }, NOW);
-
+  assert.equal(providerWrites.length, 0);
+  assert.deepEqual(store.load(scope, REF)?.value.control, next);
   await assert.rejects(
-    createControlWriter(provider(current, () => renderControlComment(wrong)))(REF, current, next),
-    /control state update mismatch/,
+    writer(REF, current, advanceControlState(current, { stateId: "development" }, NOW)),
+    /stale local execution write/,
   );
 });

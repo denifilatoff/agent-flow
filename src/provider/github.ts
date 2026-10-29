@@ -1,5 +1,6 @@
 import type { ProviderConfig } from "../config/types.js";
 import { ProviderHttpError } from "./http.ts";
+import { parsePublication, unanchoredPublicationKeys, type Publication } from "./publication.ts";
 import type {
   Actor,
   DiscoveryPage,
@@ -9,6 +10,7 @@ import type {
   Permission,
   ProviderAdapter,
   ProviderComment,
+  RecoveryEvidence,
   ProviderRepository,
   ProviderResponse,
   ProviderTicketSnapshot,
@@ -35,6 +37,7 @@ export function createGitHubAdapter(
   const allowlist = new Set(config.repositories);
   const apiBase = new URL(config.apiUrl);
   if (!apiBase.pathname.endsWith("/")) apiBase.pathname += "/";
+  const apiScope = canonicalApiScope(apiBase);
 
   function repositoryPath(repository: string): string {
     if (!allowlist.has(repository)) throw new Error(`GitHub repository is not allowlisted: ${repository}`);
@@ -112,6 +115,128 @@ export function createGitHubAdapter(
     return normalizePull(response.data, ref.repository);
   }
 
+  async function githubDescriptionWasEdited(ref: TicketRef, number: number): Promise<boolean> {
+    const [owner, name] = ref.repository.split("/") as [string, string];
+    const response = object((await request(
+      apiBase.pathname.endsWith("/api/v3/") ? "../graphql" : "graphql",
+      "active",
+      {
+        method: "POST",
+        body: {
+          query: "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){lastEditedAt}}}",
+          variables: { owner, name, number },
+        },
+      },
+    )).data, "GitHub GraphQL response");
+    if (response.errors !== undefined) throw new Error("GitHub pull request edit history is unavailable");
+    const data = object(response.data, "GitHub GraphQL data");
+    const repository = object(data.repository, "GitHub GraphQL repository");
+    const pull = object(repository.pullRequest, "GitHub GraphQL pull request");
+    return optionalString(pull.lastEditedAt, "GitHub pull request lastEditedAt") !== "";
+  }
+
+  async function reviewEditProvenance(values: unknown[]): Promise<Map<string, string | null>> {
+    const ids = [...new Set(values.flatMap((value) => {
+      const row = object(value, "GitHub review");
+      return parsePublication(optionalString(row.body, "GitHub review body")).kind === "current"
+        && typeof row.node_id === "string" && row.node_id ? [row.node_id] : [];
+    }))];
+    const edits = new Map<string, string | null>();
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      try {
+        const response = object((await request(
+          apiBase.pathname.endsWith("/api/v3/") ? "../graphql" : "graphql", "active",
+          { method: "POST", body: {
+            query: "query($ids:[ID!]!){nodes(ids:$ids){id __typename ... on PullRequestReview {lastEditedAt}}}",
+            variables: { ids: ids.slice(offset, offset + 100) },
+          } },
+        )).data, "GitHub GraphQL response");
+        if (response.errors !== undefined) continue;
+        const nodes = array(object(response.data, "GitHub GraphQL data").nodes, "GitHub review nodes");
+        for (const value of nodes) {
+          if (value === null) continue;
+          const node = object(value, "GitHub review node");
+          if (node.__typename === "PullRequestReview" && typeof node.id === "string"
+            && (node.lastEditedAt === null || typeof node.lastEditedAt === "string")) {
+            edits.set(node.id, node.lastEditedAt);
+          }
+        }
+      } catch { /* Unavailable edit provenance cannot elect an owner. */ }
+    }
+    return edits;
+  }
+
+  async function readSnapshotData(ref: TicketRef, pinnedActivationLabel?: string) {
+    const recognizedLabels = pinnedActivationLabel ? [pinnedActivationLabel] : activationLabels;
+    const path = ticketPath(ref);
+    const repository = await readRepository(ref.repository);
+    const issue = object((await request(path, "active")).data, "GitHub issue");
+    const open = normalizeIssueState(issue);
+    const labels = normalizeLabels(issue.labels);
+    const timeline = await listAll(`${path}/timeline?per_page=100`, "active");
+    const comments = (await listAll(`${path}/comments?per_page=100`, "active"))
+      .map(normalizeComment);
+    const activeLabels = recognizedLabels.filter((label) => labels.includes(label));
+    const activationEvents: Array<{ kind: "add" | "remove"; label: string; id: string; createdAt: string; actor: Actor }> = [];
+    for (const event of timeline) {
+      const item = object(event, "GitHub timeline event");
+      const label = recognizedLabels.find((label) =>
+        isLabelEvent(item, "labeled", label) || isLabelEvent(item, "unlabeled", label));
+      if (label) activationEvents.push({
+        kind: item.event === "labeled" ? "add" : "remove", label,
+        id: identifier(item.id, "GitHub activation event id"),
+        createdAt: string(item, "created_at"), actor: normalizeActor(item.actor, "GitHub activation actor"),
+      });
+    }
+    const activationEvent = activationEvents.toReversed()
+      .find(({ kind, label }) => kind === "add" && activeLabels.includes(label));
+    const linkAmbiguities: string[] = [];
+    const boundary = activeBoundary({ activation: { present: activeLabels.length > 0, occurredAt: activationEvent?.createdAt ?? null, actor: activationEvent?.actor ?? null }, labels } as ProviderTicketSnapshot,
+      activationEvents.filter(({ label }) => label === activationEvent?.label), linkAmbiguities);
+    const links = findChangeRequestNumbers(
+      timeline.filter((value) => {
+        const event = object(value, "GitHub timeline event");
+        const time = typeof event.created_at === "string" ? Date.parse(event.created_at) : NaN;
+        return boundary !== "fresh" || !Number.isFinite(time) || time >= Date.parse(activationEvent!.createdAt);
+      }),
+      new URL(`repos/${repositoryPath(ref.repository)}`, apiBase),
+    );
+    return {
+      snapshot: {
+        ref,
+        repository,
+        title: string(issue, "title"),
+        description: optionalString(issue.body, "GitHub issue body"),
+        open,
+        labels,
+        updatedAt: string(issue, "updated_at"),
+        activation: {
+          present: activeLabels.length > 0,
+          label: activationEvent?.label ?? null,
+          eventId: activationEvent?.id ?? null,
+          actor: activationEvent?.actor ?? null,
+          occurredAt: activationEvent?.createdAt ?? null,
+        },
+        comments,
+        changeRequest: null,
+      },
+      activationEvents: activationEvents.filter(({ label }) => label === activationEvent?.label),
+      changeNumbers: links.numbers,
+      linkAmbiguities: links.ambiguities,
+    };
+  }
+
+  async function readActiveChanges(
+    ref: TicketRef,
+    data: Awaited<ReturnType<typeof readSnapshotData>>,
+    ambiguities: string[],
+  ): Promise<{ boundary: RecoveryEvidence["activeBoundary"]; changes: NormalizedChangeRequest[] }> {
+    const boundary = activeBoundary(data.snapshot, data.activationEvents, ambiguities);
+    const changes = (await Promise.all(data.changeNumbers.map((number) => readChangeRequest(ref, number))))
+      .filter((change) => withinActiveBoundary(data.snapshot, boundary, change.createdAt, ambiguities));
+    return { boundary, changes };
+  }
+
   return {
     kind: "github",
 
@@ -184,50 +309,143 @@ export function createGitHubAdapter(
 
     readRepository,
 
-    async readTicket(ref: TicketRef): Promise<ProviderTicketSnapshot> {
-      const path = ticketPath(ref);
-      const repository = await readRepository(ref.repository);
-      const issueResponse = await request(path, "active");
-      const issue = object(issueResponse.data, "GitHub issue");
-      const open = normalizeIssueState(issue);
-      const labels = normalizeLabels(issue.labels);
-      const timeline = await listAll(`${path}/timeline?per_page=100`, "active");
-      const comments = (await listAll(`${path}/comments?per_page=100`, "active"))
-        .map(normalizeComment);
-
-      const activeLabels = activationLabels.filter((label) => labels.includes(label));
-      const activationEvent = [...timeline].reverse().find((event) =>
-        activeLabels.some((label) => isLabelEvent(event, "labeled", label)));
-      const activationLabel = activationEvent
-        ? activeLabels.find((label) => isLabelEvent(activationEvent, "labeled", label)) ?? null
-        : null;
-      const activation = activationEvent
-        ? object(activationEvent, "GitHub activation event")
-        : null;
-      const changeNumber = findChangeRequestNumber(
-        timeline,
-        new URL(`repos/${repositoryPath(ref.repository)}`, apiBase),
-      );
-
+    async readTicket(ref: TicketRef, pinnedActivationLabel?: string): Promise<ProviderTicketSnapshot> {
+      const data = await readSnapshotData(ref, pinnedActivationLabel);
+      const { changes } = await readActiveChanges(ref, data, []);
+      const change = uniqueChange(changes, "GitHub issue has multiple related pull requests");
       return {
-        ref,
-        repository,
-        title: string(issue, "title"),
-        description: optionalString(issue.body, "GitHub issue body"),
-        open,
-        labels,
-        updatedAt: string(issue, "updated_at"),
-        activation: {
-          present: activeLabels.length > 0,
-          label: activationLabel,
-          eventId: activation ? identifier(activation.id, "GitHub activation event id") : null,
-          actor: activation ? normalizeActor(activation.actor, "GitHub activation actor") : null,
-          occurredAt: activation ? string(activation, "created_at") : null,
-        },
-        comments,
-        changeRequest: changeNumber === null
-          ? null
-          : await readChangeRequest(ref, changeNumber),
+        ...data.snapshot,
+        changeRequest: change,
+      };
+    },
+
+    async readRecoveryEvidence(ref: TicketRef, pinnedActivationLabel?: string): Promise<RecoveryEvidence> {
+      const data = await readSnapshotData(ref, pinnedActivationLabel);
+      const ambiguities: string[] = [...data.linkAmbiguities];
+      const { boundary, changes } = await readActiveChanges(ref, data, ambiguities);
+      const reviewRows = await Promise.all(changes.map(async (change) => ({
+        change,
+        values: await listAll(
+          `repos/${repositoryPath(ref.repository)}/pulls/${change.number}/reviews?per_page=100`,
+          "active",
+        ),
+      })));
+      const reviewEdits = await reviewEditProvenance(reviewRows.flatMap(({ values }) => values));
+      const permissionCache = new Map<string, boolean>();
+      const authorized = async (actor: Actor): Promise<boolean> => {
+        const cached = permissionCache.get(actor.providerId);
+        if (cached !== undefined) return cached;
+        const allowed = ["write", "maintain", "admin"].includes(await (async () => {
+          const response = await request(
+            `repos/${repositoryPath(ref.repository)}/collaborators/${encodeURIComponent(actor.login)}/permission`,
+            "active",
+          );
+          return permission(string(object(response.data, "GitHub permission"), "permission"));
+        })());
+        permissionCache.set(actor.providerId, allowed);
+        return allowed;
+      };
+      if (data.snapshot.activation.present) {
+        if (!data.snapshot.activation.actor) ambiguities.push("activation author is unavailable");
+        else if (!await authorized(data.snapshot.activation.actor)) ambiguities.push("activation author is not authorized");
+      }
+      const publications: Publication[] = [];
+      let legacyActive = false;
+      const canonicalRepository = data.snapshot.repository.name;
+      const addPublication = async (
+        kind: "comment" | "change-request" | "review",
+        id: string,
+        body: string,
+        createdAt: string,
+        updatedAt: string | null,
+        actor: Actor,
+        provenanceAvailable = true,
+      ): Promise<void> => {
+        const key = publicationKey("github", apiScope, canonicalRepository, kind, id);
+        const parsed = parsePublication(body);
+        if (parsed.kind === "unmarked") return;
+        if (!withinActiveBoundary(data.snapshot, boundary, createdAt, ambiguities)) return;
+        if (parsed.kind === "legacy") {
+          legacyActive = true;
+          return;
+        }
+        if (parsed.kind === "invalid") {
+          ambiguities.push(`invalid publication marker: ${key}`);
+          return;
+        }
+        if (parsed.kind !== "current") return;
+        const metadata = parsed.metadata;
+        const original = (updatedAt === null || updatedAt === createdAt || kind === "change-request")
+          && provenanceAvailable;
+        if (!original && kind === "comment") {
+          ambiguities.push(`publication provenance is unavailable: ${key}`);
+          return;
+        }
+        if (!await authorized(actor)) {
+          ambiguities.push(`publication author is not authorized: ${key}`);
+          return;
+        }
+        publications.push({ key, createdAt, metadata, ...original ? {} : { ownershipEligible: false } });
+      };
+      for (const comment of data.snapshot.comments) {
+        await addPublication("comment", comment.id, comment.body, comment.createdAt, comment.updatedAt, comment.actor);
+      }
+      for (const change of changes) {
+        const marked = parsePublication(change.body).kind === "current";
+        const provenanceAvailable = !marked || change.updatedAt === change.createdAt
+          || !await githubDescriptionWasEdited(ref, change.number);
+        await addPublication(
+          "change-request",
+          String(change.number),
+          change.body,
+          change.createdAt,
+          change.updatedAt,
+          change.actor,
+          provenanceAvailable,
+        );
+      }
+      const reviews: NormalizedReview[] = [];
+      for (const { change, values } of reviewRows) {
+        for (const value of values) {
+          const row = object(value, "GitHub review");
+          const body = optionalString(row.body, "GitHub review body");
+          const parsed = parsePublication(body);
+          if (parsed.kind === "unmarked") continue;
+          const id = identifier(row.id, "GitHub review id");
+          const submittedAt = optionalString(row.submitted_at, "GitHub review submitted_at");
+          if (!submittedAt) {
+            ambiguities.push(`review submission time is unavailable: ${publicationKey("github", apiScope, canonicalRepository, "review", id)}`);
+            continue;
+          }
+          const actor = normalizeActor(row.user, "GitHub review actor");
+          if (parsed.kind === "current") {
+            try {
+              const original = reviewEdits.has(String(row.node_id))
+                && (reviewEdits.get(String(row.node_id)) === null
+                  || Date.parse(reviewEdits.get(String(row.node_id))!) < Date.parse(submittedAt));
+              if (original) reviews.push(normalizeReview(row));
+              await addPublication("review", id, body, submittedAt, null, actor, original);
+            } catch (error) {
+              ambiguities.push(`invalid review evidence: ${publicationKey("github", apiScope, canonicalRepository, "review", id)}: ${error instanceof Error ? error.message : "unknown error"}`);
+            }
+          } else {
+            await addPublication("review", id, body, submittedAt, null, actor);
+          }
+        }
+      }
+      for (const key of unanchoredPublicationKeys(publications)) {
+        ambiguities.push(`publication provenance is unavailable: ${key}`);
+      }
+      if (changes.length > 1) ambiguities.push("multiple linked pull requests");
+      return {
+        snapshot: { ...data.snapshot, changeRequest: changes.length === 1 ? changes[0]! : null },
+        publications,
+        changes,
+        reviews,
+        ambiguities,
+        complete: true,
+        activeBoundary: boundary,
+        legacyActive,
       };
     },
 
@@ -302,6 +520,7 @@ export function createGitHubAdapter(
       ref: TicketRef,
       changeNumber: number,
       marker: string,
+      excludedIds: readonly string[] = [],
     ): Promise<NormalizedReview | null> {
       assertTicket(ref, allowlist);
       assertPositiveInteger(changeNumber, "pull request number");
@@ -309,11 +528,14 @@ export function createGitHubAdapter(
         `repos/${repositoryPath(ref.repository)}/pulls/${changeNumber}/reviews?per_page=100`,
         "active",
       );
-      const matches = reviews.filter((value) =>
-        optionalString(object(value, "GitHub review").body, "GitHub review body")
-          .split(/\r?\n/, 1)[0] === marker);
+      const excluded = new Set(excludedIds);
+      const matches = reviews.filter((value) => {
+        const review = object(value, "GitHub review");
+        return !excluded.has(identifier(review.id, "GitHub review id"))
+          && optionalString(review.body, "GitHub review body").split(/\r?\n/, 1)[0] === marker;
+      });
       if (matches.length > 1) {
-        throw new Error("multiple GitHub reviews have the same attempt marker");
+        throw new Error("multiple GitHub reviews match the publication marker");
       }
       return matches[0] === undefined ? null : normalizeReview(matches[0]);
     },
@@ -358,6 +580,8 @@ function normalizePull(value: unknown, repository: string): NormalizedChangeRequ
     headSha: string(object(pull.head, "GitHub pull request head"), "sha"),
     state,
     actor: normalizeActor(pull.user, "GitHub pull request actor"),
+    body: optionalString(pull.body, "GitHub pull request body"),
+    createdAt: string(pull, "created_at"),
     updatedAt: string(pull, "updated_at"),
   };
 }
@@ -421,19 +645,27 @@ function normalizeLabels(value: unknown): string[] {
   });
 }
 
-function findChangeRequestNumber(timeline: unknown[], repositoryUrl: URL): number | null {
-  for (let index = timeline.length - 1; index >= 0; index -= 1) {
-    const event = object(timeline[index], "GitHub timeline event");
-    if (event.event !== "cross-referenced") continue;
-    const source = nullableObject(event.source);
-    const issue = nullableObject(source?.issue);
-    if (!issue || issue.pull_request === undefined) continue;
-    if (!sameRepositoryUrl(issue.repository_url, repositoryUrl)) continue;
-    const number = integer(issue, "number");
-    assertPositiveInteger(number, "pull request number");
-    return number;
+function findChangeRequestNumbers(
+  timeline: unknown[],
+  repositoryUrl: URL,
+): { numbers: number[]; ambiguities: string[] } {
+  const candidates = new Set<number>();
+  const ambiguities: string[] = [];
+  for (const value of timeline) {
+    const event = object(value, "GitHub timeline event");
+    if (event.event === "cross-referenced") {
+      const source = nullableObject(event.source);
+      const issue = nullableObject(source?.issue);
+      if (!issue || issue.pull_request === undefined || !sameRepositoryUrl(issue.repository_url, repositoryUrl)) continue;
+      const number = integer(issue, "number");
+      assertPositiveInteger(number, "pull request number");
+      candidates.add(number);
+      continue;
+    }
+    if (event.event !== "connected") continue;
+    ambiguities.push(`unresolved connected GitHub pull request: ${identifier(event.id, "GitHub timeline event id")}`);
   }
-  return null;
+  return { numbers: [...candidates].sort((left, right) => left - right), ambiguities };
 }
 
 function sameRepositoryUrl(value: unknown, expected: URL): boolean {
@@ -448,6 +680,73 @@ function sameRepositoryUrl(value: unknown, expected: URL): boolean {
   } catch {
     return false;
   }
+}
+
+function uniqueChange(changes: readonly NormalizedChangeRequest[], message: string): NormalizedChangeRequest | null {
+  if (changes.length > 1) throw new Error(message);
+  return changes[0] ?? null;
+}
+
+function canonicalApiScope(value: URL): string {
+  const scope = new URL(value);
+  scope.username = "";
+  scope.password = "";
+  scope.search = "";
+  scope.hash = "";
+  scope.pathname = `${scope.pathname.replace(/\/+$/, "")}/`;
+  return scope.href;
+}
+
+function publicationKey(
+  provider: "github" | "gitlab",
+  apiScope: string,
+  repository: string,
+  kind: "comment" | "change-request" | "review",
+  id: string,
+): string {
+  return JSON.stringify([provider, apiScope, repository, kind, id]);
+}
+
+function activeBoundary(
+  snapshot: ProviderTicketSnapshot,
+  events: ReadonlyArray<{ kind: "add" | "remove"; createdAt: string }>,
+  ambiguities: string[],
+): "known" | "fresh" | "ambiguous" {
+  if (!snapshot.activation.present) return "known";
+  if (!snapshot.activation.occurredAt || !snapshot.activation.actor) {
+    ambiguities.push("activation boundary is unavailable");
+    return "ambiguous";
+  }
+  if (events.some((event) => event.kind === "remove" && event.createdAt < snapshot.activation.occurredAt!)) {
+    return "fresh";
+  }
+  const firstActivation = events.length === 1
+    && events[0]!.kind === "add"
+    && !snapshot.labels.includes("agent-flow:managed")
+    && !snapshot.labels.some((label) => label.startsWith("agent-stage:"));
+  return firstActivation ? "fresh" : "known";
+}
+
+function withinActiveBoundary(
+  snapshot: ProviderTicketSnapshot,
+  boundary: "known" | "fresh" | "ambiguous",
+  createdAt: string,
+  ambiguities: string[],
+): boolean {
+  if (!snapshot.activation.present || boundary === "ambiguous" || snapshot.activation.occurredAt === null) {
+    return false;
+  }
+  const activationTime = Date.parse(snapshot.activation.occurredAt);
+  const publicationTime = Date.parse(createdAt);
+  if (!Number.isFinite(activationTime) || !Number.isFinite(publicationTime)) {
+    ambiguities.push("publication or activation timestamp is invalid");
+    return false;
+  }
+  if (publicationTime === activationTime) {
+    ambiguities.push("publication order at the activation timestamp is ambiguous");
+    return false;
+  }
+  return publicationTime > activationTime;
 }
 
 function discoverySince(window: DiscoveryWindow): string {

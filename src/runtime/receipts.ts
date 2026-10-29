@@ -21,6 +21,7 @@ import type {
   TicketRef,
 } from "../provider/types.js";
 import { ProviderHttpError } from "../provider/http.ts";
+import { parsePublication, renderPublication } from "../provider/publication.ts";
 import { allowedAgentEvents, type AttemptMode } from "./agent-protocol.ts";
 
 const MAX_DECISION_BYTES = 1024 * 1024;
@@ -32,10 +33,14 @@ export interface DecisionExpectation {
   stateId: string;
   mode: AttemptMode;
   resultContract: ResultContract;
+  configRevision: string;
+  activationLabel?: string;
+  controllerId: string;
+  publicationKeys: readonly string[];
+  reusableCommentIds?: readonly string[];
   flowInstanceId: string;
   attemptId: string;
   ticket: TicketRef;
-  startedAt: string;
   sourceComment: ProviderComment | null;
   pinnedChangeRequest: NormalizedChangeRequest | null;
 }
@@ -133,7 +138,7 @@ export async function readDecisionAndBuildReceipt(
     invalidDecision("decision event is not allowed by the pinned flow state");
   }
 
-  const initialTicket = await decisionProviderRead(() => provider.readTicket(expected.ticket));
+  const initialTicket = await decisionProviderRead(() => provider.readTicket(expected.ticket, expected.activationLabel));
   assertDecisionTicket(initialTicket, expected.ticket);
   if (expected.resultContract === "verification" && decision.event === "agent-succeeded") {
     assertPinnedChange(initialTicket, expected, "verification");
@@ -193,7 +198,7 @@ export async function readDecisionAndBuildReceipt(
   }
 
   const finalTicket = await decisionProviderReadback(
-    () => provider.readTicket(expected.ticket),
+    () => provider.readTicket(expected.ticket, expected.activationLabel),
     "provider ticket disappeared during final readback",
   );
   assertDecisionTicket(finalTicket, expected.ticket);
@@ -224,14 +229,12 @@ async function discoverDecisionComment(
   expected: DecisionExpectation,
   provider: ProviderAdapter,
 ): Promise<ProviderComment> {
-  const expectedMarker = decisionMarker(expected, artifactKind);
-  const fresh = ticket.comments.filter((comment) => isFreshEvidence(comment.createdAt, expected.startedAt));
-  const sameAttempt = fresh.filter((comment) => attemptArtifact(comment.body, expected) !== null);
-  if (sameAttempt.some((comment) => attemptArtifact(comment.body, expected) !== artifactKind)) {
-    decisionTrust("fresh same-attempt comment marker has the wrong artifact kind");
-  }
-
-  const matches = fresh.filter((comment) => comment.body.split(/\r?\n/, 1)[0] === expectedMarker);
+  const expectedMarker = decisionMarker(expected);
+  const candidates = ticket.comments.filter((comment) => !isBaseline(expected, "comment", comment.id));
+  const reusable = new Set(expected.reusableCommentIds ?? []);
+  const marked = candidates.filter((comment) => hasExpectedPublication(comment.body, expected));
+  const fresh = marked.filter(({ id }) => !reusable.has(id));
+  const matches = fresh.length > 0 ? fresh : marked;
   if (matches.length === 0) {
     evidenceUnavailable(`${artifactKind} comment evidence is unavailable`);
   }
@@ -246,15 +249,16 @@ async function discoverDecisionComment(
   if (!sameCommentUrl(published.url, discovered.url, expected, provider.kind, discovered.id)) {
     decisionTrust("provider comment URL changed during readback");
   }
-  if (published.body.split(/\r?\n/, 1)[0] !== expectedMarker) {
+  if (!published.body.split(/\r?\n/).includes(expectedMarker)) {
     decisionTrust("provider comment marker changed during readback");
   }
   if (!sameProviderComment(discovered, published, expected, provider.kind)) {
     decisionTrust("provider comment changed during readback");
   }
-  if (published.body.split(/\r?\n/)[1]?.startsWith("<!-- agent-flow-review:")) {
+  if (published.body.split(/\r?\n/).some((line) => line.startsWith("<!-- agent-flow-review:"))) {
     decisionTrust("non-review comment contains review metadata");
   }
+  await assertAuthorizedPublication(provider, expected, published.actor);
   return published;
 }
 
@@ -270,8 +274,12 @@ async function readDecisionChange(
     decisionTrust("linked change request identity does not match the pinned change request");
   }
   if (linked.state !== "open") decisionTrust("linked change request state is not open");
-  if (!isFreshEvidence(linked.updatedAt, expected.startedAt)) {
-    evidenceUnavailable("linked change request was not updated during the attempt");
+  if (!hasExpectedPublication(linked.body, expected)) {
+    evidenceUnavailable("linked change request publication marker is unavailable");
+  }
+  if (isBaseline(expected, "change-request", String(linked.number))
+    && (!expected.pinnedChangeRequest || linked.headSha === expected.pinnedChangeRequest.headSha)) {
+    evidenceUnavailable("linked change request was not updated for the current iteration");
   }
 
   const published = await decisionProviderReadback(
@@ -280,9 +288,10 @@ async function readDecisionChange(
   );
   assertChangeTicketIdentity(published, expected.ticket);
   assertSameDecisionChange(linked, published);
-  if (!isFreshEvidence(published.updatedAt, expected.startedAt)) {
-    evidenceUnavailable("linked change request was not updated during the attempt");
+  if (!hasExpectedPublication(published.body, expected)) {
+    decisionTrust("linked change request publication marker changed during readback");
   }
+  await assertAuthorizedPublication(provider, expected, published.actor);
   return published;
 }
 
@@ -305,15 +314,13 @@ async function readDecisionReview(
   }
   if (linked.state !== "open") decisionTrust("linked change request state is not open for review");
 
-  const reviewMarker = decisionMarker(expected, "review");
+  const reviewMarker = decisionMarker(expected);
+  const excludedIds = baselineIds(expected, "review");
   const discovered = await decisionProviderRead(
-    () => provider.findReview(expected.ticket, linked.number, reviewMarker),
+    () => provider.findReview(expected.ticket, linked.number, reviewMarker, excludedIds),
     "provider review evidence could not be verified",
   );
   if (!discovered) evidenceUnavailable("provider review evidence is unavailable");
-  if (!isFreshEvidence(discovered.submittedAt, expected.startedAt)) {
-    evidenceUnavailable("provider review was not submitted during the attempt");
-  }
   const published = await decisionProviderReadback(
     () => provider.readReview(expected.ticket, linked.number, discovered.id),
     "provider review disappeared during readback",
@@ -330,12 +337,13 @@ async function readDecisionReview(
   }
   const lines = published.body.split(/\r?\n/);
   if (lines[0] !== reviewMarker) decisionTrust("provider review marker does not match the attempt");
+  if (!hasExpectedPublication(published.body, expected)) {
+    decisionTrust("provider review publication marker is invalid");
+  }
   const metadata = `<!-- agent-flow-review:v1 head=${pinned.headSha} verdict=${verdict} -->`;
   if (lines[1] !== metadata) decisionTrust("provider review metadata does not match the logical verdict");
-  if (!isFreshEvidence(published.submittedAt, expected.startedAt)) {
-    evidenceUnavailable("provider review was not submitted during the attempt");
-  }
   if (!sameReview(discovered, published)) decisionTrust("provider review changed during readback");
+  await assertAuthorizedPublication(provider, expected, published.actor);
   return published;
 }
 
@@ -350,7 +358,7 @@ async function readHumanSource(
     () => provider.readComment(expected.ticket, pinned.id),
     "human source comment disappeared during readback",
   );
-  if (published.body.split(/\r?\n/, 1)[0]?.startsWith("<!-- agent-flow:")) {
+  if (parsePublication(published.body).kind !== "unmarked") {
     decisionTrust("human source comment must be unmarked");
   }
   if (!sameProviderComment(pinned, published, expected, provider.kind)) {
@@ -392,7 +400,7 @@ function commentArtifact(
     kind: "comment",
     id: published.id,
     url: published.url,
-    marker: decisionMarker(expected, artifactKind),
+    marker: decisionMarker(expected),
     artifactKind,
   };
 }
@@ -525,25 +533,60 @@ function sameReview(left: NormalizedReview, right: NormalizedReview): boolean {
     && left.body === right.body;
 }
 
-function decisionMarker(
+function decisionMarker(expected: DecisionExpectation): string {
+  return renderPublication({ config: expected.configRevision, controller: expected.controllerId });
+}
+
+function hasExpectedPublication(body: string, expected: DecisionExpectation): boolean {
+  const parsed = parsePublication(body);
+  return parsed.kind === "current"
+    && parsed.metadata.config === expected.configRevision
+    && parsed.metadata.controller === expected.controllerId
+    && body.split(/\r?\n/).includes(decisionMarker(expected));
+}
+
+function baselineIds(expected: DecisionExpectation, kind: "comment" | "change-request" | "review"): string[] {
+  return expected.publicationKeys.flatMap((key) => {
+    try {
+      const parsed = JSON.parse(key);
+      if (!Array.isArray(parsed)
+        || parsed.length !== 5
+        || parsed[0] !== expected.ticket.provider
+        || typeof parsed[1] !== "string"
+        || parsed[1].length === 0
+        || parsed[2] !== expected.ticket.repository
+        || !["comment", "change-request", "review"].includes(parsed[3])
+        || typeof parsed[4] !== "string"
+        || parsed[4].length === 0) {
+        decisionTrust("publication baseline is invalid");
+      }
+      return parsed[3] === kind ? [parsed[4]] : [];
+    } catch {
+      decisionTrust("publication baseline is invalid");
+    }
+  });
+}
+
+function isBaseline(
   expected: DecisionExpectation,
-  artifact: "assessment" | "plan" | "diagnostic" | "question" | "review",
-): string {
-  return `<!-- agent-flow:v1 flow=${expected.flowInstanceId} attempt=${expected.attemptId} artifact=${artifact} -->`;
+  kind: "comment" | "change-request" | "review",
+  id: string,
+): boolean {
+  return baselineIds(expected, kind).includes(id);
 }
 
-function attemptArtifact(body: string, expected: DecisionExpectation): string | null {
-  const line = body.split(/\r?\n/, 1)[0] ?? "";
-  const prefix = `<!-- agent-flow:v1 flow=${expected.flowInstanceId} attempt=${expected.attemptId} artifact=`;
-  return line.startsWith(prefix) && line.endsWith(" -->")
-    ? line.slice(prefix.length, -4)
-    : null;
-}
-
-function isFreshEvidence(timestamp: string, startedAt: string): boolean {
-  const evidenceTime = Date.parse(timestamp);
-  const startTime = Date.parse(startedAt);
-  return Number.isFinite(evidenceTime) && Number.isFinite(startTime) && evidenceTime >= startTime;
+async function assertAuthorizedPublication(
+  provider: ProviderAdapter,
+  expected: DecisionExpectation,
+  actor: ProviderComment["actor"],
+): Promise<void> {
+  const permission = await decisionProviderReadback(
+    () => provider.permission(expected.ticket.repository, actor),
+    "publication author permission could not be verified",
+  );
+  if (!AUTHORIZED_PERMISSIONS.has(permission)) {
+    decisionTrust("publication author lacks write permission");
+  }
 }
 
 async function decisionProviderRead<T>(

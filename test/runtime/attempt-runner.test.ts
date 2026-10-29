@@ -85,7 +85,7 @@ function request(options: { bundle?: ConfigBundle; control?: ControlState; input
   const ticket = snapshot();
   return { ref: ticket.ref, snapshot: ticket, control: options.control ?? control(), bundle: configured,
     stateId: "development", state: configured.flow.spec.states.development!, agentId: "developer", mode: "stage",
-    sourceComment: null, resultContract: "development", inputRevision: options.inputRevision ?? "input:one" };
+    controllerId: FLOW, publicationKeys: [], sourceComment: null, resultContract: "development", inputRevision: options.inputRevision ?? "input:one" };
 }
 
 function receipt(attemptId: string, outcome: "succeeded" | "needs-human" = "succeeded"): AgentReceipt {
@@ -210,7 +210,7 @@ test("persists and reads back started before a background launch", async () => {
   subject.process.resolve(OK); await waitIdle(subject);
   assert.match(subject.prompts[0]!, new RegExp(`/data/sessions/${ATTEMPT_1}/context\\.json`));
   assert.match(subject.prompts[0]!, new RegExp(`/data/sessions/${ATTEMPT_1}/decision\\.json`));
-  assert.match(subject.prompts[0]!, new RegExp(`flow=${FLOW} attempt=${ATTEMPT_1} artifact=question`));
+  assert.match(subject.prompts[0]!, new RegExp(`"config":"${REVISION}","controller":"${FLOW}"`));
   assert.equal(subject.verifications[0]?.path, `/data/sessions/${ATTEMPT_1}/decision.json`);
   assert.equal(typeof subject.verifications[0]?.validate, "function");
   assert.deepEqual({
@@ -221,7 +221,9 @@ test("persists and reads back started before a background launch", async () => {
     flowInstanceId: subject.verifications[0]?.expected.flowInstanceId,
     attemptId: subject.verifications[0]?.expected.attemptId,
     ticket: subject.verifications[0]?.expected.ticket,
-    startedAt: subject.verifications[0]?.expected.startedAt,
+    configRevision: subject.verifications[0]?.expected.configRevision,
+    controllerId: subject.verifications[0]?.expected.controllerId,
+    publicationKeys: subject.verifications[0]?.expected.publicationKeys,
     sourceComment: subject.verifications[0]?.expected.sourceComment,
     pinnedChangeRequest: subject.verifications[0]?.expected.pinnedChangeRequest,
   }, {
@@ -232,7 +234,9 @@ test("persists and reads back started before a background launch", async () => {
     flowInstanceId: FLOW,
     attemptId: ATTEMPT_1,
     ticket: subject.request.ref,
-    startedAt: NOW,
+    configRevision: REVISION,
+    controllerId: FLOW,
+    publicationKeys: [],
     sourceComment: null,
     pinnedChangeRequest: subject.request.snapshot.changeRequest,
   });
@@ -523,4 +527,12 @@ test("restart and failed recovery resolve readiness before a deferred retry dela
     await subject.runner.cancel(FLOW);
     assert.equal(subject.runner.isRunning(FLOW), false);
   }
+});
+
+test("passes the surviving control's activation pin to result verification", async () => {
+  const subject = fixture({ request: request({ control: control({ activationLabel: "bugfix" }) }) });
+  await subject.runner.start(subject.request);
+  subject.process.resolve(OK);
+  await waitIdle(subject);
+  assert.equal(subject.verifications[0]?.expected.activationLabel, "bugfix");
 });

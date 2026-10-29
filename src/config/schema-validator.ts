@@ -16,11 +16,13 @@ const schemaFiles = [
   "agent-receipt.schema.json",
   "control-state.schema.json",
   "flow.schema.json",
+  "local-execution.schema.json",
   "runtime-config.schema.json",
   "stack.schema.json",
 ] as const;
 
 const schemaIds: Record<SchemaKind, string> = {
+  LocalExecution: "https://agent-flow.dev/schemas/v1/local-execution.schema.json",
   Stack: "https://agent-flow.dev/schemas/v1/stack.schema.json",
   RuntimeConfig: "https://agent-flow.dev/schemas/v1/runtime-config.schema.json",
   Flow: "https://agent-flow.dev/schemas/v1/flow.schema.json",

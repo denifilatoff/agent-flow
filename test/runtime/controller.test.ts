@@ -957,3 +957,21 @@ test("reports running and stopped snapshots around a polling repository scan", a
   });
   assert.deepEqual(discovered, [{ updatedAfter: "2026-08-29T10:00:00.000Z", overlapSeconds: 1 }]);
 });
+
+test("retains ambiguous recovery without a flow instance in operator observations", async () => {
+  const controller = createController({
+    providers: [{ adapter: idleGitHub(), repositories: [GITHUB_ONE.repository] }],
+    concurrency: 1,
+    launcher: launcher(),
+    async reconcile(ref) {
+      return { ...outcome(ref), flowInstanceId: null, stateId: null, stateKind: null,
+        runnable: false, recoveryDisposition: "ambiguous", recoveryReason: "Review the linked change head before resuming." };
+    },
+  });
+  await controller.bootstrap();
+  await controller.reconcileNow(GITHUB_ONE);
+  assert.equal(controller.snapshot().tickets.length, 1);
+  assert.equal(controller.snapshot().tickets[0]?.recoveryDisposition, "ambiguous");
+  assert.equal(controller.snapshot().tickets[0]?.recoveryReason, "Review the linked change head before resuming.");
+  assert.equal(controller.snapshot().activeWork.length, 0);
+});

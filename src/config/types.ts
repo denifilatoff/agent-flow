@@ -1,4 +1,4 @@
-export type SchemaKind = "Stack" | "RuntimeConfig" | "Flow" | "AgentCatalog" | "ControlState" | "AgentReceipt" | "AgentDecision";
+export type SchemaKind = "Stack" | "RuntimeConfig" | "Flow" | "AgentCatalog" | "ControlState" | "AgentReceipt" | "AgentDecision" | "LocalExecution";
 export type HarnessTarget = "codex" | "claude";
 export type ResultContract = "assessment" | "plan" | "diagnostic" | "verification" | "development" | "review" | "human-gate" | "none";
 
@@ -196,4 +196,14 @@ export interface ControlChangeRequest {
   url: string;
   headSha: string;
   state: "open" | "closed" | "merged";
+}
+
+export interface LocalExecution {
+  controllerId: string;
+  observedAt: string;
+  owner: { controllerId: string; publicationKey: string } | null;
+  disposition: "ready" | "waiting" | "foreign" | "ambiguous" | "inactive";
+  reason: string | null;
+  publicationKeys: string[];
+  control: ControlState | null;
 }

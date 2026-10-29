@@ -49,6 +49,8 @@ function dependencies(calls: string[], fail?: string): PreflightDependencies {
     async run() {}, async reconcileNow() {},
   };
   return {
+    async loadControllerId() { calls.push("identity"); return "11111111-1111-4111-8111-111111111111"; },
+    openLocalStore() { calls.push("store:open"); return { close() { calls.push("store:close"); } } as import("../src/runtime/local-store.ts").LocalStore; },
     runtime: { effective: () => runtimeConfig, bindCatalog() {} } as RuntimeManager,
     async loadConfig() { calls.push("config:load"); if (fail === "config") throw new Error("token=secret"); return bundle; },
     async validateConfig() { calls.push("config:validate"); if (fail === "validate") throw new Error("secret schema"); },
@@ -80,7 +82,7 @@ test("runs fail-closed startup checks in a fixed order", async () => {
   });
   assert.equal(ready.redactSessionContent("credential=secret"), "credential=[REDACTED]");
   assert.deepEqual(calls, [
-    "config:load", "config:validate", "directories", "github:rest", "provider:environment",
+    "config:load", "config:validate", "directories", "identity", "store:open", "github:rest", "provider:environment",
     "gh:auth status --hostname api.github.test", "git:--version", "apm:--version",
     "claude:auth", "codex:auth", "controller:create", "controller:bootstrap",
   ]);
@@ -138,3 +140,27 @@ for (const target of ["claude", "codex"] as const) {
     await assert.rejects(runPreflight(configured), { message: `${target} harness preflight failed` });
   });
 }
+
+for (const [failure, message] of [
+  ["identity", "controller identity load failed"],
+  ["store", "local execution store open failed"],
+] as const) {
+  test(`fails closed when local ${failure} initialization fails`, async () => {
+    const calls: string[] = [];
+    const configured = dependencies(calls);
+    if (failure === "identity") configured.loadControllerId = async () => { throw new Error("secret/path"); };
+    else configured.openLocalStore = () => { throw new Error("secret/path"); };
+    await assert.rejects(runPreflight(configured), { message });
+    assert.equal(calls.includes("github:rest"), false);
+  });
+}
+
+test("closes SQLite when provider authentication prevents startup", async () => {
+  const calls: string[] = [];
+  const configured = dependencies(calls);
+  configured.createProviders = () => ({ github: {
+    ...provider(calls), async verifyAuth() { throw new Error("secret"); },
+  } });
+  await assert.rejects(runPreflight(configured), { message: "github REST authentication failed" });
+  assert.equal(calls.filter((call) => call === "store:close").length, 1);
+});

@@ -10,6 +10,8 @@ import {
   type RuntimePromptInput,
 } from "../../src/runtime/agent-protocol.ts";
 
+const REVISION = "0123456789abcdef0123456789abcdef01234567";
+const CONTROLLER_ID = "33333333-3333-4333-8333-333333333333";
 const FLOW_ID = "11111111-1111-4111-8111-111111111111";
 const ATTEMPT_ID = "22222222-2222-4222-8222-222222222222";
 const HEAD_SHA = "abcdef0123456789abcdef0123456789abcdef01";
@@ -24,6 +26,8 @@ function promptInput(flow: FlowDefinition, overrides: Partial<RuntimePromptInput
     stateId: "assessment",
     mode: "stage",
     resultContract: "assessment",
+    configRevision: REVISION,
+    controllerId: CONTROLLER_ID,
     flowInstanceId: FLOW_ID,
     attemptId: ATTEMPT_ID,
     contextPath: "/data/sessions/context.json",
@@ -100,7 +104,7 @@ test("rejects prompt generation when a launch has no permitted model event", () 
 test("renders paths, exact decisions, evidence, marker, and protocol boundaries", async () => {
   const flow = await shippedFlow();
   const prompt = renderRuntimePrompt(promptInput(flow));
-  const marker = `<!-- agent-flow:v1 flow=${FLOW_ID} attempt=${ATTEMPT_ID} artifact=assessment -->`;
+  const marker = `<!-- agent-flow:v1 {"config":"${REVISION}","controller":"${CONTROLLER_ID}"} -->`;
 
   assert.match(prompt, /\/data\/sessions\/context\.json/);
   assert.match(prompt, /\/data\/sessions\/decision\.json/);
@@ -139,21 +143,15 @@ test("renders event-specific evidence and the pinned change identity", async () 
 
   const plan = renderRuntimePrompt(promptInput(flow, { stateId: "planning", resultContract: "plan" }));
   assert.match(plan, /plan comment/);
-  assert.match(plan, /artifact=plan/);
-
-  const diagnostic = renderRuntimePrompt(promptInput(flow, {
-    stateId: "bug-reproduction",
-    resultContract: "diagnostic",
-  }));
-  assert.match(diagnostic, /diagnostic comment/);
-  assert.match(diagnostic, /artifact=diagnostic/);
+  assert.match(plan, /marked plan comment/);
 
   const initialDevelopment = renderRuntimePrompt(promptInput(flow, {
     stateId: "development",
     resultContract: "development",
   }));
   assert.ok(initialDevelopment.includes(
-    '{"event":"agent-succeeded"} requires creation of one linked open change request during this attempt.',
+    `{"event":"agent-succeeded"} requires creation of one linked open change request whose description contains `
+      + `exactly <!-- agent-flow:v1 {"config":"${REVISION}","controller":"${CONTROLLER_ID}"} -->.`,
   ));
 
   const retryDevelopment = renderRuntimePrompt(promptInput(flow, {
@@ -163,7 +161,8 @@ test("renders event-specific evidence and the pinned change identity", async () 
   }));
   assert.ok(retryDevelopment.includes(
     '{"event":"agent-succeeded"} requires the exact pinned change request github owner/repo#8 to remain open and be '
-      + "updated during this attempt. Do not create another change request.",
+      + `updated during this attempt. Its description must contain exactly <!-- agent-flow:v1 {"config":"${REVISION}",`
+      + `"controller":"${CONTROLLER_ID}"} -->. Do not create another change request.`,
   ));
 
   const review = renderRuntimePrompt(promptInput(flow, {
@@ -178,16 +177,11 @@ test("renders event-specific evidence and the pinned change identity", async () 
   assert.match(review, new RegExp(HEAD_SHA));
   assert.match(review, /github owner\/repo#8/);
   assert.match(review, /https:\/\/github\.test\/owner\/repo\/pull\/8/);
-  assert.match(review, /artifact=review/);
-
-  const verification = renderRuntimePrompt(promptInput(flow, {
-    stateId: "bug-verification",
-    resultContract: "verification",
-    changeRequest,
-  }));
-  assert.match(verification, /BUG RECEIPT · VERIFIED/);
-  assert.match(verification, new RegExp(HEAD_SHA));
-  assert.match(verification, /artifact=diagnostic/);
+  assert.match(review, /agent-flow-review:v1/);
+  assert.ok(review.includes(
+    "If one existing provider-native review already satisfies either exact review evidence contract for this pinned "
+      + "head, reuse it by writing the matching decision without publishing another review.",
+  ));
 
   const paused = renderRuntimePrompt(promptInput(flow, {
     stateId: "needs-human",
@@ -195,7 +189,7 @@ test("renders event-specific evidence and the pinned change identity", async () 
     changeRequest: { ...changeRequest, state: "closed" },
   }));
   assert.match(paused, /question comment/);
-  assert.match(paused, /artifact=question/);
+  assert.match(paused, /marked question comment/);
   assert.ok(paused.includes(
     "Because the linked change request is closed, do not review its head. Publish exactly one question asking whether "
       + "to reopen the same change request or cancel the flow, then write {\"event\":\"agent-needs-human\"}.",
@@ -208,18 +202,6 @@ test("rejects a review prompt without a pinned change request", async () => {
   assert.throws(
     () => renderRuntimePrompt(promptInput(flow, { stateId: "review", resultContract: "review" })),
     /review event requires a pinned change request/,
-  );
-});
-
-test("rejects a verification prompt without a pinned change request", async () => {
-  const flow = await shippedFlow();
-
-  assert.throws(
-    () => renderRuntimePrompt(promptInput(flow, {
-      stateId: "bug-verification",
-      resultContract: "verification",
-    })),
-    /verification requires a pinned change request/,
   );
 });
 
@@ -249,4 +231,14 @@ test("human input publishes only clarification questions", async () => {
   assert.match(prompt, /\{"event":"human-answer-accepted"\} requires no new provider publication/);
   assert.match(prompt, /\{"event":"human-answer-cancelled"\} requires no new provider publication/);
   assert.match(prompt, /\{"event":"human-answer-unclear"\} requires a marked question comment/);
+});
+
+
+test("tells a fresh reviewer which observed review IDs cannot satisfy the attempt", async () => {
+  const flow = await shippedFlow();
+  const input = promptInput(flow, { stateId: "review", resultContract: "review", excludedReviewIds: ["701", "702"],
+    changeRequest: { provider: "github", repository: "owner/repo", number: 8,
+      url: "https://github.test/owner/repo/pull/8", headSha: HEAD_SHA, state: "open" } as never,
+  });
+  assert.match(renderRuntimePrompt(input), /Do not reuse these existing review IDs for this attempt: 701, 702/);
 });

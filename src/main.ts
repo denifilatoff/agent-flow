@@ -21,10 +21,9 @@ import { createHealthServer, createOperationalStatus } from "./health.ts";
 import { createGitHubAdapter } from "./provider/github.ts";
 import { createGitLabAdapter } from "./provider/gitlab.ts";
 import { createRateLimitedHttpClient } from "./provider/http.ts";
-import { listControlComments } from "./provider/control-comment.ts";
 import type { ProviderAdapter, ProviderKind } from "./provider/types.ts";
 import { createStartupRedactor } from "./redaction.ts";
-import { runPreflight, type PreflightDependencies, type ReadyDependencies } from "./preflight.ts";
+import { runPreflight, type PreflightDependencies, type ReadyDependencies, type StartupRuntime } from "./preflight.ts";
 import { createAttemptRunner, type AttemptRunnerDependencies } from "./runtime/attempt-runner.ts";
 import { createControlWriter, type ControlWriter } from "./runtime/control-state.ts";
 import { createController, type Controller } from "./runtime/controller.ts";
@@ -129,6 +128,10 @@ export async function main(
     }
   } finally {
     readiness.markNotReady();
+    try { ready?.store.close(); } catch {
+      dependencies.reportError("agent-flow local execution store shutdown failed");
+      exitCode = 1;
+    }
     dependencies.signals.removeListener("SIGINT", stop);
     dependencies.signals.removeListener("SIGTERM", stop);
     try {
@@ -234,9 +237,9 @@ export function createProductionDependencies(
           : {}),
       };
     },
-    createController(bundle: ConfigBundle, providers: Providers, harnesses: Harnesses): Controller {
+    createController(bundle: ConfigBundle, providers: Providers, harnesses: Harnesses, local: StartupRuntime): Controller {
       if (!loadedCredential) throw new Error("provider credential is not loaded");
-      return composeController(bundle, providers, harnesses, load, runtime, loadedCredential, overrides);
+      return composeController(bundle, providers, harnesses, load, runtime, loadedCredential, overrides, local);
     },
     redactSessionContent: startupRedactor.redact,
     registerStartupSecret: startupRedactor.register,
@@ -252,6 +255,7 @@ function composeController(
   runtime: RuntimeManager,
   credential: import("./harness/types.ts").ProviderCredential,
   overrides: ProductionOverrides,
+  local: StartupRuntime,
 ): Controller {
   const configured = runtime.effective();
   const dataDirectory = configured.runtime.dataDirectory;
@@ -263,7 +267,7 @@ function composeController(
   for (const kind of ["github", "gitlab"] as const) {
     const provider = providers[kind];
     if (!provider) continue;
-    const writeControl = createControlWriter(provider);
+    const writeControl = createControlWriter(local.store, local.providerScopes[kind]!, local.controllerId);
     writers[kind] = writeControl;
     runners[kind] = createAttemptRunner({
       ...attemptRunnerOverrides,
@@ -316,20 +320,8 @@ function composeController(
         concurrency: effective.runtime.concurrency,
       };
     },
-    async prepareBootstrap(refs) {
-      const revisions = new Set<string>([bundle.revision]);
-      for (const ref of refs) {
-        const provider = providers[ref.provider];
-        if (!provider) throw new Error("ticket provider is not configured");
-        const snapshot = await provider.readTicket(ref);
-        for (const { state } of listControlComments(snapshot.comments)) {
-          if (state.stateId !== "done" && state.stateId !== "cancelled") revisions.add(state.configRevision);
-        }
-      }
-      for (const revision of revisions) {
-        const pinned = revision === bundle.revision ? bundle : await loadPinned(revision);
-        runtime.bindCatalog(await validateSemantics(pinned));
-      }
+    async prepareBootstrap() {
+      runtime.bindCatalog(await validateSemantics(bundle));
     },
     launcher,
     reconcile: (ref) => {
@@ -338,6 +330,8 @@ function composeController(
       if (!provider || !writeControl) throw new Error("ticket provider is not configured");
       return reconcileTicket({
         provider,
+        controllerId: local.controllerId,
+        providerApiUrl: configured.provider.apiUrl,
         launcher: requiredRunner(runners, ref.provider),
         writeControl,
         config: {

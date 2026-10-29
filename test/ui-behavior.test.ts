@@ -371,6 +371,15 @@ test("renders operational links and directed graph focus from the dashboard proj
   assert.equal(waitingLink?.attributes.get("target"), "_blank");
   assert.equal(waitingLink?.attributes.get("rel"), "noreferrer noopener");
 
+  ui.renderWaiting([{
+    provider: "github", repository: "owner/repo", number: 43,
+    stateId: null, stateKind: null, configRevision: null,
+    recoveryDisposition: "ambiguous", recoveryReason: "Inspect the linked review head before resuming.",
+    actionUrl: "https://github.example.test/owner/repo/issues/43",
+  }]);
+  assert.match(document.getElementById("waiting-panel").descendants().map((node) => node.textContent).join(" "),
+    /ambiguous: Inspect the linked review head before resuming\./);
+
   const flow = {
     metadata: { id: "development", activationLabel: "agent-flow:development" },
     spec: {
