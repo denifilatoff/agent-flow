@@ -41,6 +41,7 @@ export const EVENT_SOURCES: Readonly<Record<FlowEventType, EventSource>> = Objec
   "change-request-updated": "provider",
   "change-request-merged": "provider",
   "change-request-closed": "provider",
+  "ci-failed": "provider",
   "attempts-exhausted": "controller",
   "authorized-comment": "controller",
 });

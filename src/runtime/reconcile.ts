@@ -26,6 +26,7 @@ import type {
   ProviderComment,
   ProviderTicketSnapshot,
   RecoveryEvidence,
+  RequiredChecks,
   TicketRef,
 } from "../provider/types.js";
 import { deriveEvent } from "./derive-event.ts";
@@ -527,7 +528,52 @@ async function reconcileControl(
 
   let next = control;
   let changed = false;
+  let transitionControl = control;
   let machineEvent = deriveEvent(activeSnapshot, control, bundle.flow);
+  // The publication is evidence of agent work; CI is independently read on every poll.
+  const required = bundle.flow.spec.requiredChecks;
+  const publicationHead = control.latestReceipt?.artifacts.find((artifact) => artifact.kind === "change-request" || artifact.kind === "review");
+  if (required && publicationHead && "headSha" in publicationHead
+    && publicationHead.headSha !== activeSnapshot.changeRequest?.headSha
+    && (machineEvent?.type === "agent-succeeded" && configuredState?.resultContract === "development"
+      || machineEvent?.type === "review-approved" && configuredState?.resultContract === "review")) {
+    machineEvent = null;
+  }
+  const gatedSuccess = machineEvent?.type === "agent-succeeded" && ["development", "verification"].includes(configuredState?.resultContract ?? "")
+    || machineEvent?.type === "review-approved" && configuredState?.resultContract === "review";
+  if (required && gatedSuccess) {
+    const change = activeSnapshot.changeRequest;
+    let ci: RequiredChecks | null = null;
+    try {
+      if (change?.state === "open") {
+        const candidate = await provider.readRequiredChecks(ref, change);
+        const current = await provider.readChangeRequest(ref, change.number);
+        if (current.headSha === change.headSha && current.state === "open") ci = candidate;
+      }
+    } catch { /* Unreadable CI is never passing evidence. Retry on the next poll. */ }
+    const checks = ci?.headSha === change?.headSha ? ci?.checks : undefined;
+    const failing = checks?.filter((check) => required.includes(check.name) && check.status === "failure") ?? [];
+    const passing = checks && required.every((name) => {
+      const matches = checks.filter((check) => check.name === name);
+      return matches.length > 0 && matches.every((check) => check.status === "success");
+    });
+    if (!passing && failing.length === 0) {
+      await ownLabels(provider, ref, snapshot.labels, bundle, control.stateId, false, control.activationLabel);
+      return { ...outcome(control, bundle, activeSnapshot, false, false), recoveryReason: "Waiting for required current-head CI: " + required.join(", ") };
+    }
+    if (failing.length > 0) {
+      const receipt = control.latestReceipt!;
+      const series = control.attemptSeries!;
+      transitionControl = { ...control,
+        latestReceipt: { ...receipt, outcome: "failed", summary: "Required CI failed on " + change!.headSha + ": " + failing.map((check) => check.name).join(", "),
+          error: { code: "REQUIRED_CI_FAILED", message: "Fix the required CI checks before completing development." } },
+        attemptSeries: { ...series, current: { ...series.current!, status: "failed" } },
+      };
+      machineEvent = flowEvent(configuredState?.resultContract === "development" && series.consumed >= series.maxAttempts
+        ? "attempts-exhausted" : "ci-failed", activeSnapshot, false);
+      changed = true;
+    }
+  }
   if (!machineEvent && control.stateId === "blocked") {
     const source = await firstAuthorizedComment(provider, ref, snapshot, control);
     if (source) machineEvent = flowEvent("authorized-comment", activeSnapshot, true);
@@ -556,11 +602,11 @@ async function reconcileControl(
         result = { ...rerouted, actions: [...result.actions, ...rerouted.actions] };
       }
     }
-    next = advanceControlState(control, {
+    next = advanceControlState(transitionControl, {
       stateId: result.stateId,
       resumeStateId: result.resumeStateId,
       attemptSeries: applyAttemptActions(
-        control.attemptSeries,
+        transitionControl.attemptSeries,
         result.actions,
         result.stateId === control.stateId,
       ),

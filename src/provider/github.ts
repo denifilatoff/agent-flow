@@ -11,6 +11,7 @@ import type {
   ProviderAdapter,
   ProviderComment,
   RecoveryEvidence,
+  RequiredChecks,
   ProviderRepository,
   ProviderResponse,
   ProviderTicketSnapshot,
@@ -514,6 +515,40 @@ export function createGitHubAdapter(
       return normalizeLabels(issue.labels);
     },
 
+    async readRequiredChecks(ref, change) {
+      assertTicket(ref, allowlist);
+      if (change.provider !== "github" || change.repository !== ref.repository || !/^[0-9a-f]{40}$/.test(change.headSha)) {
+        throw new Error("CI change request identity mismatch");
+      }
+      const checks: RequiredChecks["checks"] = [];
+      const visited = new Set<string>();
+      let path: string | null = `repos/${repositoryPath(ref.repository)}/commits/${change.headSha}/check-runs?filter=latest&per_page=100`;
+      while (path) {
+        if (visited.has(path)) throw new Error("GitHub CI pagination cycle");
+        visited.add(path);
+        const response = await request(path, "active");
+        const page = object(response.data, "GitHub checks");
+        for (const item of array(page.check_runs, "GitHub check runs")) {
+          const run = object(item, "GitHub check run");
+          if (string(run, "head_sha") !== change.headSha) throw new Error("CI head mismatch");
+          const status = string(run, "status");
+          checks.push({ name: string(run, "name"), status: status !== "completed" ? "pending"
+            : run.conclusion === "success" ? "success" : "failure" });
+        }
+        path = response.pagination.next;
+      }
+      // Commit statuses are a separate CI mechanism; include the latest value per context.
+      const statuses = await listAll(`repos/${repositoryPath(ref.repository)}/commits/${change.headSha}/statuses?per_page=100`, "active");
+      const seen = new Set<string>();
+      for (const item of statuses) {
+        const status = object(item, "GitHub commit status");
+        const name = string(status, "context");
+        if (seen.has(name)) continue;
+        seen.add(name);
+        checks.push({ name, status: status.state === "success" ? "success" : status.state === "pending" ? "pending" : "failure" });
+      }
+      return { headSha: change.headSha, checks };
+    },
     readChangeRequest,
 
     async findReview(

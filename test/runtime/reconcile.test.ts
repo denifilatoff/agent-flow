@@ -289,6 +289,9 @@ class FakeProvider implements ProviderAdapter {
   updated = 0;
   recoveryEvidence: RecoveryEvidence | null = null;
 
+  async readRequiredChecks(_ref: TicketRef, change: NormalizedChangeRequest): Promise<import("../../src/provider/types.ts").RequiredChecks> {
+    return { headSha: change.headSha, checks: [{ name: "verify", status: "success" }] };
+  }
   async verifyAuth(): Promise<Actor> { return MAINTAINER; }
   async discover(_repository: string, _window: DiscoveryWindow, _cursor?: string): Promise<DiscoveryPage> {
     return { tickets: [], nextCursor: null };
@@ -2949,4 +2952,91 @@ test("warm review rerouting rejects a replacement linked change request before c
   assert.equal(provider.events.includes("provider:set-labels"), false);
   assert.equal(runtime.writer.load!(TICKET)?.value.control?.changeRequest?.number, 31);
   assert.equal(runtime.writer.load!(TICKET)?.value.control?.stateId, "awaiting-merge");
+});
+
+test("required current-head CI independently gates accepted development and review results", async () => {
+  for (const policy of ["development", "development-autonomous"]) {
+    for (const stateId of ["development", "review", "bug-development", "bug-review", "bug-verification"]) {
+      for (const status of ["pending", "missing", "unreadable", "head-unreadable", "stale", "success"]) {
+        const provider = new FakeProvider();
+        const launcher = new FakeLauncher();
+        const bundle = structuredClone(BUNDLE);
+        bundle.flow = validateDocument("Flow", await parseYaml(`config/flows/${policy}.yaml`));
+        const state = bundle.flow.spec.states[stateId]!;
+        const receipt = state.resultContract === "review" ? reviewReceipt() : assessmentReceipt();
+        if (state.resultContract === "development") receipt.artifacts = [{ kind: "change-request", number: 31, url: controlChange().url, headSha: OLD_HEAD, state: "open" }];
+        const control = controlState({ stateId, flowId: policy, changeRequest: controlChange(), latestReceipt: receipt,
+          attemptSeries: attemptSeries({ stateId, agentId: state.agent! }) });
+        provider.snapshot = snapshot({ comments: [controlComment(control)], changeRequest: changeRequest() });
+        provider.readRequiredChecks = async () => {
+          if (status === "unreadable") throw new Error("CI unavailable");
+          return { headSha: status === "stale" ? NEW_HEAD : OLD_HEAD,
+            checks: status === "missing" ? [] : [{ name: "verify", status: ["success", "head-unreadable"].includes(status) ? "success" : "pending" }, { name: "optional-skipped", status: "failure" }] };
+        };
+        const readChangeRequest = provider.readChangeRequest.bind(provider);
+        if (status === "head-unreadable") {
+          provider.readChangeRequest = async () => { throw new Error("Current head unavailable"); };
+        }
+        const deps = dependencies(provider, launcher);
+        deps.config = { loadCurrent: async () => bundle, loadPinned: async () => bundle };
+        const result = await reconcileTicket(deps, TICKET);
+        assert.equal(result.changed, status === "success", `${policy} ${stateId} ${status}`);
+        if (status !== "success") {
+          assert.equal(result.stateId, stateId);
+          assert.equal(result.started, false);
+          assert.equal(launcher.requests.length, 0);
+        }
+        if (status === "head-unreadable") {
+          assert.match(result.recoveryReason!, /Waiting for required current-head CI/);
+          assert.deepEqual(parseControlComment(provider.snapshot.comments[0]!.body)!.latestReceipt, receipt);
+          provider.readChangeRequest = readChangeRequest;
+          const recovered = await reconcileTicket(deps, TICKET);
+          assert.equal(recovered.changed, true, `${policy} ${stateId} head read recovered`);
+        }
+      }
+    }
+  }
+});
+
+test("failed required CI routes corrective work and exhausts the existing development budget", async () => {
+  for (const stateId of ["development", "review", "bug-development", "bug-review", "bug-verification"]) {
+    for (const consumed of [1, 3]) {
+      const provider = new FakeProvider();
+      const state = BUNDLE.flow.spec.states[stateId]!;
+      const receipt = state.resultContract === "review" ? reviewReceipt() : assessmentReceipt();
+      if (state.resultContract === "development") receipt.artifacts = [{ kind: "change-request", number: 31, url: controlChange().url, headSha: OLD_HEAD, state: "open" }];
+      const control = controlState({ stateId, changeRequest: controlChange(), latestReceipt: receipt,
+        attemptSeries: attemptSeries({ stateId, agentId: state.agent!, consumed }) });
+      provider.snapshot = snapshot({ comments: [controlComment(control)], changeRequest: changeRequest() });
+      provider.readRequiredChecks = async () => ({ headSha: OLD_HEAD, checks: [{ name: "verify", status: "failure" }] });
+      const result = await reconcileTicket(dependencies(provider), TICKET);
+      const exhausted = state.resultContract === "development" && consumed === 3;
+      assert.equal(result.stateId, exhausted ? "blocked" : stateId.startsWith("bug-") ? "bug-development" : "development");
+      const saved = parseControlComment(provider.snapshot.comments[0]!.body)!;
+      assert.equal(saved.latestReceipt!.error!.code, "REQUIRED_CI_FAILED");
+      assert.equal(saved.attemptSeries!.consumed, consumed);
+    }
+  }
+});
+
+test("a moved publication head starts fresh work and a head moving during CI never advances", async () => {
+  for (const stateId of ["development", "review"]) {
+    for (const duringRead of [false, true]) {
+      const provider = new FakeProvider();
+      const launcher = new FakeLauncher();
+      const receipt = stateId === "review" ? reviewReceipt() : assessmentReceipt();
+      if (stateId === "development") receipt.artifacts = [{ kind: "change-request", number: 31, url: controlChange().url, headSha: OLD_HEAD, state: "open" }];
+      const control = controlState({ stateId, changeRequest: controlChange(), latestReceipt: receipt,
+        attemptSeries: attemptSeries({ stateId, agentId: stateId === "review" ? "reviewer" : "developer" }) });
+      provider.snapshot = snapshot({ comments: [controlComment(control)], changeRequest: changeRequest({ headSha: duringRead ? OLD_HEAD : NEW_HEAD }) });
+      provider.readRequiredChecks = async () => {
+        provider.snapshot.changeRequest!.headSha = NEW_HEAD;
+        return { headSha: OLD_HEAD, checks: [{ name: "verify", status: "success" }] };
+      };
+      const result = await reconcileTicket(dependencies(provider, launcher), TICKET);
+      assert.equal(result.stateId, stateId);
+      assert.equal(result.started, !duringRead);
+      if (!duringRead) assert.equal(launcher.requests[0]!.snapshot.changeRequest!.headSha, NEW_HEAD);
+    }
+  }
 });

@@ -95,6 +95,11 @@ export interface DiscoveryPage {
   nextCursor: string | null;
 }
 
+export interface RequiredChecks {
+  headSha: string;
+  checks: Array<{ name: string; status: "success" | "pending" | "failure" }>;
+}
+
 export interface ProviderAdapter {
   readonly kind: ProviderKind;
   verifyAuth(): Promise<Actor>;
@@ -113,6 +118,7 @@ export interface ProviderAdapter {
     add: string[],
     pinnedActivationLabels?: readonly string[],
   ): Promise<string[]>;
+  readRequiredChecks(ref: TicketRef, change: NormalizedChangeRequest): Promise<RequiredChecks>;
   readChangeRequest(ref: TicketRef, number: number): Promise<NormalizedChangeRequest>;
   findReview(
     ref: TicketRef,

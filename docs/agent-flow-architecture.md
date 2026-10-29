@@ -213,6 +213,16 @@ attempt without advancing the machine.
 - Requested changes return the ticket to development. Development and review may repeat within the same flow instance.
 - When the authenticated provider user authored the pull request, a GitHub review is published as a comment and
   machine-readable verdict rather than an impossible self-approval.
+- Both shipped flow policies pin `spec.requiredChecks: [verify]`. Before accepting development success, review approval,
+  or bug verification success, the controller independently reads these named checks on the current PR/MR head and
+  confirms that the head is still current. Only explicit success passes. Optional jobs do not gate advancement.
+- Pending, missing, or unreadable CI keeps the accepted agent publication and waits through ordinary reconciliation
+  without launching another model. Failed or cancelled required checks record `REQUIRED_CI_FAILED` and route corrective
+  development through the existing finite retry budget. Exhaustion uses the ordinary blocked-state human resume path.
+- GitHub evidence includes check runs and latest commit status contexts. GitLab evidence uses jobs from the newest
+  exact-source-head MR pipeline, excluding retried jobs. Required skipped jobs cannot pass; optional skipped jobs do
+  not block. Required names are explicit flow policy, independent of branch protection. Older pinned flow revisions
+  without this field retain their original policy until explicitly migrated.
 - Merge is manual initially. A later configuration option may enable automerge.
 - Human gates are flow policy, not hard-coded stage behavior. A conservative flow may require review after intermediate
   stages; a trusted flow may pause only when an agent reports that human input is needed.
