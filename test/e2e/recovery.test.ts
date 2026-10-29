@@ -228,3 +228,34 @@ test("warm SQLite restart reuses the result published before its receipt was com
   assert.equal((await run.control()).attemptSeries?.consumed, 2);
   assert.equal(await run.controllerCommentWrites(), 0);
 });
+
+
+test("prepared comments reconcile uncertain creates without another model call on both providers", async () => {
+  for (const provider of ["github", "gitlab"] as const) {
+    const run = await startFixture(provider, { usage: true, preparedComments: true, uncertainCreate: true });
+    try {
+      await run.untilState("assessment-review");
+      assert.equal((await run.control()).attemptSeries?.consumed, 1);
+      assert.equal((await run.sessions()).length, 1);
+      assert.equal(await run.controllerCommentWrites(), 1);
+      const comment = (await run.latestAgentComment())!;
+      assert.equal(comment.createdAt, comment.updatedAt);
+      assert.equal(comment.body.match(/Usage:/g)?.length, 1);
+      await run.restart();
+      await run.untilState("assessment-review");
+      assert.equal((await run.sessions()).length, 1);
+      assert.equal(await run.controllerCommentWrites(), 1);
+    } finally { await run.close(); }
+  }
+});
+
+test("legacy pins retain usage in receipts without editing their existing stage comments", async (t) => {
+  const run = await startFixture("github", { usage: true, firstAttempt: "exit-failure" });
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  assert.equal((await run.control()).attemptSeries?.consumed, 2);
+  assert.equal((await run.sessions()).length, 2);
+  assert.equal((await run.receipts()).at(-1)?.usage?.totalTokens, 1100);
+  assert.equal(await run.controllerCommentWrites(), 0);
+  assert.doesNotMatch((await run.latestAgentComment())!.body, /Usage:/);
+});

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { annotateUsage, usageLine } from "../../src/runtime/usage-annotation.ts";
+import { usageLine } from "../../src/runtime/usage-annotation.ts";
 import type { AgentReceipt } from "../../src/config/types.ts";
 import type { ProviderAdapter, ProviderComment } from "../../src/provider/types.ts";
 
@@ -17,25 +17,4 @@ test("renders known totals, estimates, zero, native and cost-only usage", () => 
   assert.equal(usageLine({ totalTokens: 0 }), "Usage: 0 tokens");
   assert.equal(usageLine({ costUsd: 0, costSource: "harness" }), "Usage: $0.00 harness estimate");
   assert.equal(usageLine({ inputTokens: 3 }), null);
-});
-
-test("updates exactly the existing comment idempotently and preserves prior attempt lines", async () => {
-  let comment: ProviderComment = { id: "4", url: receipt.artifacts[0]!.url, body: `Plan text.\n\n${marker}`,
-    actor: { login: "agent", providerId: "1" }, createdAt: "2026-10-29T00:00:00Z", updatedAt: "2026-10-29T00:00:00Z" };
-  let edits = 0;
-  const provider = { kind: "github", readComment: async () => comment,
-    updateComment: async (_ref: unknown, id: string, body: string) => {
-      assert.equal(id, "4"); edits++; return comment = { ...comment, body };
-    }, createComment: async () => { throw new Error("must never create usage comment"); } } as unknown as ProviderAdapter;
-  await annotateUsage(provider, ref, receipt);
-  await annotateUsage(provider, ref, receipt);
-  assert.equal(edits, 1);
-  assert.ok(comment.body.startsWith(`Plan text.\n\n${marker}`));
-  await annotateUsage(provider, ref, { ...receipt, attemptId: "44444444-4444-4444-8444-444444444444" });
-  assert.equal(comment.body.match(/Usage:/g)?.length, 2);
-  comment = { ...comment, body: "Human edited away the marker." };
-  await annotateUsage(provider, ref, receipt);
-  assert.equal(edits, 2);
-  await annotateUsage(provider, ref, { ...receipt, artifacts: [] });
-  assert.equal(edits, 2);
 });

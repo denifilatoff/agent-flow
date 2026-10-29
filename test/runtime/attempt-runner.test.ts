@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { inspect } from "node:util";
 
 import type { ConfigBundle } from "../../src/config/load.ts";
@@ -119,6 +122,8 @@ function fixture(options: {
   preparePinnedAgent?: AttemptRunnerDependencies["preparePinnedAgent"];
   packageDirectory?: string;
   archive?: (receipt: AgentReceipt) => Promise<void>;
+  dataDirectory?: string;
+  provider?: ProviderAdapter;
 } = {}): Fixture {
   const events: string[] = [], controls: ControlState[] = [], attempts: string[] = [], delays: number[] = [];
   const prompts: string[] = [];
@@ -130,6 +135,10 @@ function fixture(options: {
   const ids = [...(options.ids ?? [SERIES, ATTEMPT_1, ATTEMPT_2])];
   const harness: HarnessAdapter = { target: "codex", async preflight() {}, async run(input) {
     events.push("harness:spawn");
+    if (options.dataDirectory) {
+      await writeFile(input.session.decisionPath, JSON.stringify({ event: "agent-needs-human" }));
+      await writeFile(join(input.session.root, "prepared-comment.txt"), "Please clarify the ticket.");
+    }
     prompts.push(input.stagePrompt);
     assert.deepEqual(input.providerCredential, {
       provider: "github", name: "GH_TOKEN", value: "github-ticket-token", apiUrl: "https://api.github.com",
@@ -147,7 +156,7 @@ function fixture(options: {
   });
   const runner = createAttemptRunner({
     archiveReceipt: async (_root, value) => options.archive?.(value),
-    dataDirectory: "/data", provider: { kind: "github" } as ProviderAdapter,
+    dataDirectory: options.dataDirectory ?? "/data", provider: options.provider ?? { kind: "github" } as ProviderAdapter,
     providerConfig: { apiUrl: "https://api.github.com", repositories: ["owner/repo"] },
     providerCredential: options.providerCredential
       ?? {
@@ -174,6 +183,12 @@ function fixture(options: {
       ticketNumber: 7, flowInstanceId: FLOW,
     }; } }, harnesses: { codex: harness }, writeControl,
     async createSession(_data, _flow, attemptId, context) { attempts.push(attemptId); events.push("session:create");
+      if (options.dataDirectory) {
+        const root = join(options.dataDirectory, "sessions", FLOW, attemptId);
+        await mkdir(root, { recursive: true });
+        return { root, contextPath: join(root, "context.json"), decisionPath: join(root, "decision.json"),
+          logPath: join(root, "harness.log"), harnessSessionDirectory: join(root, "harness-session") };
+      }
       assert.equal(context.controlState.attemptSeries?.current?.attemptId, attemptId);
       assert.equal(inspect(context).includes("github-ticket-token"), false); return {
         root: `/data/sessions/${attemptId}`, contextPath: `/data/sessions/${attemptId}/context.json`,
@@ -582,4 +597,39 @@ test("passes the surviving control's activation pin to result verification", asy
   subject.process.resolve(OK);
   await waitIdle(subject);
   assert.equal(subject.verifications[0]?.expected.activationLabel, "bugfix");
+});
+
+
+test("restart delivers a completed prepared attempt without another harness launch or retry charge", async (t) => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "runner-prepared-"));
+  t.after(() => rm(dataDirectory, { recursive: true, force: true }));
+  const configured = request();
+  configured.bundle.stack.spec.publication = "controller-prepared-v1";
+  let published: { id: string; url: string; body: string; createdAt: string } | undefined;
+  let creates = 0;
+  const provider = { kind: "github", readTicket: async () => ({ ...snapshot(), comments: published ? [published] : [] }),
+    createComment: async (_ref: unknown, body: string) => {
+      creates++;
+      published = { id: "9", url: "https://github.test/comment/9", body, createdAt: NOW };
+      throw new Error("uncertain create");
+    }, readComment: async () => published } as unknown as ProviderAdapter;
+  const first = fixture({ request: configured, dataDirectory, provider, results: [{ ...OK, usage: { totalTokens: 27 } }] });
+  await first.runner.start(first.request);
+  await new Promise<void>((resolve) => first.runner.onSettled!(resolve));
+  const retained = first.controls.at(-1)!;
+  assert.equal(retained.attemptSeries?.current?.status, "started");
+  assert.equal(first.attempts.length, 1);
+  const second = fixture({ request: request({ bundle: configured.bundle, control: retained }), dataDirectory, provider,
+    verify: async (_path, expected) => receipt(expected.attemptId, "needs-human") });
+  await second.runner.start(second.request);
+  for (let i = 0; second.runner.isRunning(FLOW) && i < 100; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(second.runner.isRunning(FLOW), false);
+  assert.equal(second.attempts.length, 0);
+  assert.equal(second.events.includes("harness:spawn"), false);
+  assert.equal(second.controls.at(-1)?.attemptSeries?.consumed, 1);
+  assert.equal(second.controls.at(-1)?.latestReceipt?.usage?.totalTokens, 27);
+  assert.equal(second.controls.at(-1)?.attemptSeries?.current?.status, "succeeded");
+  assert.equal(creates, 1);
 });

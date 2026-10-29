@@ -51,7 +51,6 @@ export interface AttemptRequest {
 }
 
 export interface AttemptLauncher {
-  reconcileUsage?(control: ControlState, snapshot: ProviderTicketSnapshot, controllerId: string): Promise<void>;
   start(request: AttemptRequest): Promise<void>;
   cancel(flowInstanceId: string): Promise<void>;
   isRunning(flowInstanceId: string): boolean;
@@ -129,12 +128,6 @@ export async function reconcileTicket(
     if (dependencies.writeControl.load && dependencies.writeControl.recordRecovery) {
       const result = await reconcileLocal(dependencies, evidence, decision);
       const observed = dependencies.writeControl.load(ref)?.value;
-      if (observed?.control && snapshot.open && snapshot.activation.present
-        && (observed.disposition === "ready" || observed.disposition === "waiting")
-        && observed.control.stateId !== "cancelled" && observed.control.stateId !== "done") {
-        try { await launcher.reconcileUsage?.(observed.control, snapshot, dependencies.controllerId); }
-        catch { /* Optional annotation delivery cannot affect workflow reconciliation. */ }
-      }
       return { ...result, recoveryDisposition: observed?.disposition, recoveryReason: observed?.reason };
     }
     const controls = recoveryControls(snapshot);

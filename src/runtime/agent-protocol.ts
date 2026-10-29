@@ -82,6 +82,7 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
       + "Do not publish stage comments. The controller publishes the prepared text, publication marker, and usage together "
       + "after the agent and its native subagents finish. Write only substantive text, without publication or usage markers. "
       + "Keep the decision JSON unchanged. When reusing a suitable existing result, leave this file absent. "
+      + `The controller adds ${marker(input)}. `
       + "Change-request creation/updates and provider-native reviews still use the existing publication protocol.");
   }
   if (input.sourceComment) {

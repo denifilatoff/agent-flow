@@ -31,3 +31,21 @@ controller unready; it does not migrate the affected instance.
 If new-format instances have already started, do not roll the old controller back over them. Stop new activations and
 complete those instances with the new controller before a format downgrade. If that cannot be done, keep the service
 stopped and plan an explicit migration; do not rewrite provider state or run two controllers against the same tickets.
+
+
+## Attempt accounting and publication pins
+
+Existing configuration pins keep agent-owned publication. The controller can retain optional usage on their receipts,
+including unsuccessful attempts, but does not edit their published stage comments. Existing receipts without usage and
+strict pinned receipt/control schemas remain supported through the validated controller-owned telemetry projection.
+
+To enable usage in the initial stage comment, start new flows on a configuration revision whose Stack declares
+`spec.publication: controller-prepared-v1`. Keep active flows on their original pins unless explicitly migrated.
+The updated runtime prompt prepares local comment text; the controller publishes it with accounting after execution
+and verifies provider readback before advancement. PR/MR and native review publication are unchanged.
+
+Preserve disposable session directories when restarting if pending prepared results or accounting should survive.
+Delivery reconciliation reuses completed work and does not automatically run another model. An uncertain write with
+unavailable or mismatched provider evidence stays pending for inspection; do not delete local delivery state to force
+another create. Old post-publication `usage-delivery.json` records are no longer processed. No existing comment is
+edited for accounting, and no historic receipts are backfilled. See [the contracts](prototype-contracts.md#completed-attempt-accounting-and-prepared-stage-comments).

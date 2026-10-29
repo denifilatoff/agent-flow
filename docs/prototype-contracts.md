@@ -296,3 +296,35 @@ liveness. `/health/ready` returns success after configuration validation, identi
 authentication, filesystem checks, harness preflight, and startup reconciliation complete. `/api/status` exposes safe
 runtime and restart status. The read-only dashboard includes recovery disposition and reason for paused tickets,
 including tickets whose local flow identity could not be reconstructed. Secret values and paths remain excluded.
+
+
+## Completed-attempt accounting and prepared stage comments
+
+An `AgentReceipt` may include optional `usage`: total tokens, available input/output/cache/reasoning categories,
+actual model when one model describes the whole attempt, and paired `costUsd`/`costSource` (`harness` or `estimated`).
+Counters are nonnegative safe integers. Unknown values remain absent; zero is valid. Legacy receipts remain valid.
+Codex cached input and reasoning output are subsets of input/output. Claude cache creation/read are separate from
+uncached input. Accounting includes the entry agent and its native descendants exactly once; it excludes earlier retries.
+See [protocol evidence](harness-usage-protocols.md) for pinned-version sources and fixtures.
+
+Harness cost takes precedence. Estimates require complete actual-model, token-category and pricing dimensions from
+`src/harness/usage-cost.ts`; unknown models, cache distinctions, tiers or incomplete descendants omit the amount.
+Pricing definitions include their source, effective date and version. Change rates only with reviewed evidence and
+regression tests; never reprice stored receipts. A harness amount is still an estimate rather than an invoice.
+
+New Stack pins opt into `spec.publication: controller-prepared-v1`. The agent writes substantive stage comment text
+to the runtime-supplied `prepared-comment.txt` and its unchanged minimal decision to `decision.json`. It leaves prepared
+text absent when reusing a suitable existing publication. PR/MR creation and provider-native reviews retain their
+existing contracts. After the harness and native descendants finish, the controller validates and freezes the decision,
+text and accounting, then creates one complete comment containing the substantive result, unchanged common publication
+marker and compact usage line. It reads back the exact target/body and performs normal provider evidence verification
+before accepting the result. No accounting edit or usage-only comment is made. Reused publications remain unchanged.
+
+Each attempt session retains its immutable finalized `receipt.json`. A prepared attempt also retains
+`prepared-publication.json` before delivery, with a separate attempt identifier outside the common marker. A restart or
+transient delivery failure resumes that completed attempt without rerunning the model or consuming another attempt.
+Explicit provider rejections may retry after reading current evidence. Transport/server errors remain uncertain: retries
+look for the exact existing publication and read it back; if no matching evidence can be established they remain pending
+with a diagnostic rather than create a possible duplicate. Cancellation or foreign/ambiguous ownership prevents writes
+and advancement. These session records and SQLite remain disposable local artifacts, never a canonical workflow store.
+Losing them may lose accounting or unpublished prepared work; provider evidence still controls recovery.
