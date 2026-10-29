@@ -7,10 +7,11 @@ import { dirname, join, resolve } from "node:path";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 
 import { RuntimeManager } from "../../src/config/runtime.ts";
 import { parseControlComment } from "../../src/provider/control-comment.ts";
+import { parseDocumentation, renderDocumentation } from "../../src/provider/documentation.ts";
 import { electOwner, parsePublication, type Publication } from "../../src/provider/publication.ts";
 import type {
   AgentDecision,
@@ -29,11 +30,17 @@ const NEXT_HEAD = "1111111111111111111111111111111111111111";
 const MAINTAINER = { login: "maintainer", providerId: "7" };
 const CONTROLLER = { login: "controller", providerId: "51" };
 
-type AttemptMode = "success" | "exit-failure" | "block" | "late" | "crash-after-publish" | "reuse" | "race";
+type AttemptMode = "success" | "exit-failure" | "block" | "late" | "crash-after-publish" | "crash-after-push" | "reuse" | "race";
 
 interface FixtureOptions {
   firstAttempt?: AttemptMode;
   forceStartupFailure?: boolean;
+  policy?: "conservative" | "autonomous";
+  scenario?: "feature" | "bugfix";
+  documentationEdits?: boolean;
+  documentationAttempt?: AttemptMode;
+  reviewRework?: boolean;
+  legacyFlow?: boolean;
 }
 
 interface StoredComment {
@@ -99,6 +106,7 @@ export interface FixtureRun {
   changeRequest(): Promise<NormalizedChangeRequest | null>;
   close(): Promise<void>;
   closeChangeRequest(): Promise<void>;
+  reopenChangeRequest(): Promise<void>;
   control(): Promise<ControlState>;
   controllerLabels(): Promise<string[]>;
   compilations(): Promise<Array<Omit<RoutingEvent, "kind">>>;
@@ -188,7 +196,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   await createCertificate(certificate, key);
   certificatesChanged = true;
   setDefaultCACertificates([...originalCertificates, await readFile(certificate, "utf8")]);
-  const state = new FixtureState(provider, options.firstAttempt);
+  const state = new FixtureState(provider, options.firstAttempt, options);
   server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
     void state.handle(request, response).catch((error: unknown) => {
       response.writeHead(500, { "content-type": "application/json" });
@@ -228,6 +236,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     operatorAuthFile,
     60,
     options.firstAttempt === "race" ? 30 : 5,
+    options,
   );
 
   environmentChanged = true;
@@ -298,6 +307,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
       await cleanup();
     },
     async closeChangeRequest() { state.setChangeState("closed"); },
+    async reopenChangeRequest() { state.setChangeState("open"); },
     control: async () => requireControl(currentControl()),
     controllerId: async () => (await readFile(join(dataDirectory, "controller-id"), "utf8")).trim(),
     controllerLabels: async () => state.labels.filter((label) => label.startsWith("agent-")).sort(),
@@ -497,7 +507,17 @@ class FixtureState {
   #reviewId = 700;
   #lastTimestamp = Date.now();
 
-  constructor(provider: ProviderKind, firstAttempt?: AttemptMode) {
+  readonly options: FixtureOptions;
+  activationLabel = "agent-flow:development";
+  reworkRequested = false;
+
+  constructor(provider: ProviderKind, firstAttempt?: AttemptMode, options: FixtureOptions = {}) {
+    this.options = options;
+    if (options.scenario === "bugfix") {
+      this.activationLabel = "bugfix";
+      this.labels = [this.activationLabel];
+    }
+    if (options.documentationAttempt) this.nextModes.set(options.scenario === "bugfix" ? "bug-documentation" : "documentation", [options.documentationAttempt]);
     this.provider = provider;
     this.repository = provider === "github" ? "owner/repo" : "group/project";
     this.number = provider === "github" ? 17 : 23;
@@ -514,13 +534,13 @@ class FixtureState {
   }
 
   activate(): void {
-    if (!this.labels.includes("agent-flow:development")) this.labels.push("agent-flow:development");
+    if (!this.labels.includes(this.activationLabel)) this.labels.push(this.activationLabel);
     this.activationId += 1;
     this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
   }
 
   removeActivation(): void {
-    this.labels = this.labels.filter((label) => label !== "agent-flow:development");
+    this.labels = this.labels.filter((label) => label !== this.activationLabel);
     this.activationId += 1;
     this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
   }
@@ -679,6 +699,13 @@ class FixtureState {
     const key = control.stateId === "needs-human" ? "needs-human" : control.stateId;
     const queue = this.nextModes.get(key) ?? [];
     const mode = queue.shift() ?? "success";
+    if (mode === "crash-after-push") {
+      if (!this.change) throw new Error("documentation push needs an existing request");
+      this.change.headSha = (BigInt(`0x${this.change.headSha}`) + 1n).toString(16).padStart(40, "0");
+      this.change.updatedAt = this.touch();
+      this.nextModes.set(key, ["reuse"]);
+      return;
+    }
     if (mode === "crash-after-publish") {
       this.publish(context, attemptId);
       this.nextModes.set(key, ["reuse"]);
@@ -752,8 +779,12 @@ class FixtureState {
       if (!existing) this.addComment(`${context.publicationMarker}\nFixture ${artifactKind}.`);
       return { event: "agent-succeeded" };
     }
-    if (state === "development") {
+    if (state === "development" || state === "bug-development") {
       const timestamp = this.touch();
+      if (this.change && this.reworkRequested) {
+        this.change.headSha = (BigInt(`0x${this.change.headSha}`) + 1n).toString(16).padStart(40, "0");
+        this.change.updatedAt = timestamp;
+      }
       this.change ??= {
         number: this.provider === "github" ? 31 : 41,
         headSha: HEAD,
@@ -764,8 +795,38 @@ class FixtureState {
       };
       return { event: "agent-succeeded" };
     }
-    if (state === "review") {
+    if (state === "bug-reproduction" || state === "bug-verification") {
+      this.addComment(`${context.publicationMarker}\n${state === "bug-verification" ? "BUG RECEIPT · VERIFIED" : "Fixture reproduction brief."}\nChecked the reproduction against the delivered fix.`);
+      return { event: "agent-succeeded" };
+    }
+    if (state === "documentation" || state === "bug-documentation") {
+      if (!this.change || !context.controlState.changeRequest) throw new Error("documentation input is missing");
+      if (this.change.state !== "open") {
+        this.addComment(`${context.publicationMarker}\nReopen the existing change request or cancel documentation?`);
+        return { event: "agent-needs-human" };
+      }
+      const inputHead = context.controlState.changeRequest.headSha;
+      const existing = this.comments.some(({ body }) => {
+        const report = parseDocumentation(body);
+        return report?.change === this.change!.number && report.inputHead === inputHead
+          && report.resultHead === this.change!.headSha && body.includes(context.publicationMarker);
+      });
+      if (!existing && this.options.documentationEdits && this.change.headSha === inputHead) {
+        this.change.headSha = (BigInt(`0x${inputHead}`) + 1n).toString(16).padStart(40, "0");
+        this.change.updatedAt = this.touch();
+      }
+      if (!existing) this.addComment(`${context.publicationMarker}\n${renderDocumentation({
+        change: this.change.number, inputHead, resultHead: this.change.headSha,
+      })}\nDocumentation checked against all delivered APIs and existing usage examples.`);
+      return { event: "agent-succeeded" };
+    }
+    if (state === "review" || state === "bug-review") {
       if (!this.change) throw new Error("review change request is missing");
+      if (this.options.reviewRework && !this.reworkRequested) {
+        this.reworkRequested = true;
+        this.addReview(context.publicationMarker, "changes-requested");
+        return { event: "review-changes-requested" };
+      }
       this.addReview(context.publicationMarker, "approved");
       return { event: "review-approved" };
     }
@@ -817,7 +878,7 @@ class FixtureState {
       const value = decodeURIComponent(label[1]!);
       const present = this.labels.includes(value);
       this.labels = this.labels.filter((candidate) => candidate !== value);
-      if (present && value === "agent-flow:development") {
+      if (present && value === this.activationLabel) {
         this.activationId += 1;
         this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
       }
@@ -827,7 +888,7 @@ class FixtureState {
       for (const value of (body as { labels: string[] }).labels) {
         if (!this.labels.includes(value)) {
           this.labels.push(value);
-          if (value === "agent-flow:development") {
+          if (value === this.activationLabel) {
             this.activationId += 1;
             this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
           }
@@ -892,7 +953,7 @@ class FixtureState {
       for (const value of update.remove_labels?.split(",").filter(Boolean) ?? []) {
         const present = this.labels.includes(value);
         this.labels = this.labels.filter((candidate) => candidate !== value);
-        if (present && value === "agent-flow:development") {
+        if (present && value === this.activationLabel) {
           this.activationId += 1;
           this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
         }
@@ -900,7 +961,7 @@ class FixtureState {
       for (const value of update.add_labels?.split(",").filter(Boolean) ?? []) {
         if (!this.labels.includes(value)) {
           this.labels.push(value);
-          if (value === "agent-flow:development") {
+          if (value === this.activationLabel) {
             this.activationId += 1;
             this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
           }
@@ -978,7 +1039,7 @@ class FixtureState {
       event: event.action === "add" ? "labeled" : "unlabeled",
       created_at: event.createdAt,
       actor: this.githubActor(MAINTAINER),
-      label: { name: "agent-flow:development" },
+      label: { name: this.activationLabel },
     }));
     if (this.change) events.push({
       id: 900,
@@ -1027,7 +1088,7 @@ class FixtureState {
     return this.labelEvents.map((event) => ({
       id: event.id,
       action: event.action,
-      label: { name: "agent-flow:development" },
+      label: { name: this.activationLabel },
       user: { id: 7, username: "maintainer" },
       created_at: event.createdAt,
     }));
@@ -1128,14 +1189,24 @@ async function createConfiguration(
   operatorAuthFile = join(dirname(repository), "operator-password"),
   pollingIntervalSeconds = 60,
   timeoutSeconds = 5,
+  fixtureOptions: FixtureOptions = {},
 ): Promise<string> {
   await mkdir(join(repository, "config/flows"), { recursive: true });
   await Promise.all([
     cp(join(ROOT, "schemas"), join(repository, "schemas"), { recursive: true }),
     cp(join(ROOT, "agent-packages"), join(repository, "agent-packages"), { recursive: true }),
-    cp(join(ROOT, "config/flows/development.yaml"), join(repository, "config/flows/development.yaml")),
+    cp(join(ROOT, fixtureOptions.policy === "autonomous" ? "config/flows/development-autonomous.yaml" : "config/flows/development.yaml"), join(repository, "config/flows/development.yaml")),
     cp(join(ROOT, "config/stack.yaml"), join(repository, "config/stack.yaml")),
   ]);
+  if (fixtureOptions.legacyFlow) {
+    const flowPath = join(repository, "config/flows/development.yaml");
+    const flow = parse(await readFile(flowPath, "utf8"));
+    for (const prefix of ["", "bug-"]) {
+      flow.spec.states[`${prefix}development`].on["agent-succeeded"].target = `${prefix}review`;
+      delete flow.spec.states[`${prefix}documentation`];
+    }
+    await writeFile(flowPath, stringify(flow));
+  }
   await cp(join(ROOT, "config/agents.yaml"), join(repository, "config/agents.yaml"));
   const stackFile = join(repository, "config/stack.yaml");
   await writeFile(stackFile, (await readFile(stackFile, "utf8"))
@@ -1164,7 +1235,7 @@ async function createConfiguration(
     execution: {
       agents: {
         architect: execution("claude"), planner: execution("claude"),
-        developer: execution("codex"), reviewer: execution("codex"),
+        documentarian: execution("claude"), developer: execution("codex"), reviewer: execution("codex"),
         "bug-investigator": execution("claude"), bugfixer: execution("codex"),
       },
       harnesses: { codex: { authFile: codexAuthFile }, claude: { authFile: claudeAuthFile } },

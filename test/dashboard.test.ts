@@ -59,10 +59,10 @@ test("projects the real runtime and pinned configuration without paths to secret
 
   assert.equal(dashboard.available, true);
   assert.equal(dashboard.configuration.revision, bundle.revision);
-  assert.equal(Object.keys(dashboard.flow.spec.states).length, 14);
+  assert.equal(Object.keys(dashboard.flow.spec.states).length, 16);
   assert.equal(dashboard.flow.spec.activationRoutes?.bugfix, "bug-reproduction");
   assert.deepEqual(Object.keys(dashboard.catalog.agents), [
-    "architect", "planner", "developer", "reviewer", "bug-investigator", "bugfixer",
+    "architect", "planner", "developer", "documentarian", "reviewer", "bug-investigator", "bugfixer",
   ]);
   assert.equal(dashboard.preflight.status, "ready");
   assert.equal(dashboard.controller.lifecycle, "ready");
@@ -77,6 +77,7 @@ test("projects the real runtime and pinned configuration without paths to secret
       architect: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/architect`,
       planner: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/planner`,
       developer: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/developer`,
+      documentarian: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/documentarian`,
       reviewer: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/reviewer`,
       "bug-investigator": `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/bug-investigator`,
       bugfixer: `https://github.com/example/agent-stack/tree/${bundle.revision}/agent-packages/bugfixer`,

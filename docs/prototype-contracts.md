@@ -157,6 +157,10 @@ After a successful harness exit, the controller reads the decision and discovers
   pinned head throughout readback. A development attempt without a linked change request creates one linked open
   change request during the current attempt. A retry with a pinned change request keeps that exact request open and
   updates it during the current attempt instead of creating another;
+- Documentation `agent-succeeded` requires a substantive marked ticket report and the same linked open change request.
+  Its metadata binds the implementation input and current result heads; equal heads are a valid no-op. Both objects
+  are read back and recorded, and the reviewer receives the resulting head. The documentation comment artifact also
+  caches its verified `inputHead` so subsequent reconciliation rejects edited input metadata;
 - `agent-needs-human` requires one marked question comment;
 - `review-approved` and `review-changes-requested` require one native review on the pinned head whose logical verdict
   agrees with the decision;
@@ -170,6 +174,32 @@ fields. The model never supplies those values.
 A missing or malformed decision, an unavailable required artifact, or a syntactically valid event that lacks required
 evidence is a retryable attempt failure. Evidence that refers to another ticket, change request, flow, attempt, or
 pinned head is a non-retryable trust-boundary failure. Neither case advances XState.
+
+## Documentation report
+
+The controller supplies this separate metadata line alongside the unchanged common publication block:
+
+```html
+<!-- agent-flow-documentation:v1 {"change":31,"inputHead":"<full-implementation-sha>","resultHead":"<full-result-sha>"} -->
+```
+
+`change` is the positive integer PR/MR number, not the ticket number. The object has exactly these three fields; both
+heads are full 40-character lowercase hexadecimal IDs. The parser rejects malformed or duplicate lines and ignores
+quoted/fenced examples. A final report identifies affected documents and checks, or explains why existing documentation
+already matches the complete delivered diff. Metadata alone is insufficient completion evidence.
+
+The controller checks the report author, exact common marker, publication baseline, pinned request identity and input
+head, provider result head, comment membership, and stable readback. Wrong iterations, closed requests, stale heads,
+duplicate reports, or changing evidence cannot advance the stage. Development still requires its existing request to
+advance; documentation may leave the head unchanged. Documentation scope is a role/review responsibility rather than
+an extension-based filename filter.
+
+A technical retry retains the implementation boundary from local control state and inspects already-pushed work before
+publishing/reusing its report. It does not require a second commit. After complete local-state loss, current-head no-op
+reports can be reassessed and reused. Reports consumed by ordered reviews before implementation rework remain in the
+baseline and cannot satisfy the new iteration. When provider evidence cannot independently establish the original
+implementation boundary (including an edited-head report or a push with no report), recovery pauses for clarification
+instead of trusting model-supplied metadata as proof.
 
 ## Cross-file validation
 

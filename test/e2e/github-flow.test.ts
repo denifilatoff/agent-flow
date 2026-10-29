@@ -21,8 +21,9 @@ test("GitHub activation reaches done through both human gates", async (t) => {
   assert.deepEqual(await run.controllerLabels(), ["agent-flow:managed", "agent-stage:done"]);
   assert.equal(await run.controllerCommentWrites(), 0);
   const decisions = await run.decisions();
-  assert.equal(decisions.length, 6);
+  assert.equal(decisions.length, 7);
   assert.deepEqual(decisions.map(({ event }) => event).toSorted(), [
+    "agent-succeeded",
     "agent-succeeded",
     "agent-succeeded",
     "agent-succeeded",
@@ -44,16 +45,17 @@ test("GitHub activation reaches done through both human gates", async (t) => {
     { outcome: "succeeded", summary: "Agent completed the stage.", artifacts: [{ kind: "comment", artifactKind: "plan" }], humanGate: undefined },
     { outcome: "succeeded", summary: "Human approved the result.", artifacts: [], humanGate: { verdict: "approved", notes: [] } },
     { outcome: "succeeded", summary: "Agent completed the stage.", artifacts: [{ kind: "change-request", number: 31, headSha: "0123456789abcdef0123456789abcdef01234567", state: "open" }], humanGate: undefined },
+    { outcome: "succeeded", summary: "Agent completed the stage.", artifacts: [{ kind: "comment", artifactKind: "documentation" }, { kind: "change-request", number: 31, headSha: "0123456789abcdef0123456789abcdef01234567", state: "open" }], humanGate: undefined },
     { outcome: "succeeded", summary: "Review approved the change.", artifacts: [{ kind: "review", headSha: "0123456789abcdef0123456789abcdef01234567", verdict: "approved" }], humanGate: undefined },
   ]);
   assert.equal(new Set(receipts.map(({ flowInstanceId }) => flowInstanceId)).size, 1);
-  assert.equal(new Set(receipts.map(({ attemptId }) => attemptId)).size, 6);
+  assert.equal(new Set(receipts.map(({ attemptId }) => attemptId)).size, 7);
   assert.deepEqual(
     receipts.map(({ flowInstanceId, attemptId }) => `${flowInstanceId}/${attemptId}`).toSorted(),
     (await run.sessions()).toSorted(),
   );
 
-  const [assessment, assessmentGate, plan, planGate, development, review] = receipts;
+  const [assessment, assessmentGate, plan, planGate, development, documentation, review] = receipts;
   const metadata = { config: (await run.control()).configRevision, controller: await run.controllerId() };
   assertCommentReceipt(assessment!, "assessment", "#issuecomment-", metadata);
   assertCommentReceipt(plan!, "plan", "#issuecomment-", metadata);
@@ -81,6 +83,7 @@ test("GitHub activation reaches done through both human gates", async (t) => {
     { agentId: "planner", target: "claude" },
     { agentId: "planner", target: "claude" },
     { agentId: "developer", target: "codex" },
+    { agentId: "documentarian", target: "claude" },
     { agentId: "reviewer", target: "codex" },
   ]);
   assert.deepEqual(await run.compilations(), [
@@ -89,6 +92,7 @@ test("GitHub activation reaches done through both human gates", async (t) => {
     { agentId: "planner", target: "claude" },
     { agentId: "planner", target: "claude" },
     { agentId: "developer", target: "codex" },
+    { agentId: "documentarian", target: "claude" },
     { agentId: "reviewer", target: "codex" },
   ]);
 });

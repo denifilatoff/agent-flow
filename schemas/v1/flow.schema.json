@@ -56,7 +56,7 @@
         "agent": { "$ref": "#/$defs/id" },
         "resultContract": {
           "type": "string",
-          "enum": ["assessment", "plan", "diagnostic", "verification", "development", "review", "human-gate", "none"]
+          "enum": ["assessment", "plan", "diagnostic", "verification", "documentation", "development", "review", "human-gate", "none"]
         },
         "context": {
           "type": "array",

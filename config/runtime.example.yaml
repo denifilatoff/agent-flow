@@ -33,6 +33,13 @@ execution:
       maxAttempts: 3
       delaySeconds: 30
       timeoutSeconds: 7200
+    documentarian:
+      harness: claude
+      model: example-documentarian-model
+      reasoning: high
+      maxAttempts: 3
+      delaySeconds: 30
+      timeoutSeconds: 2700
     reviewer:
       harness: codex
       model: example-reviewer-model

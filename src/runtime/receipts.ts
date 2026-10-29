@@ -21,6 +21,7 @@ import type {
   TicketRef,
 } from "../provider/types.js";
 import { ProviderHttpError } from "../provider/http.ts";
+import { parseDocumentation } from "../provider/documentation.ts";
 import { parsePublication, renderPublication } from "../provider/publication.ts";
 import { allowedAgentEvents, type AttemptMode } from "./agent-protocol.ts";
 
@@ -165,6 +166,21 @@ export async function readDecisionAndBuildReceipt(
       if (expected.resultContract === "verification") assertVerifiedBugReceipt(published.body);
       verifiedComments.push(published);
       artifacts.push(commentArtifact(published, artifactKind, expected));
+    } else if (expected.resultContract === "documentation") {
+      const pinned = expected.pinnedChangeRequest;
+      if (!pinned) decisionTrust("documentation requires a pinned implementation input");
+      const published = await discoverDecisionComment(initialTicket, "documentation", expected, provider);
+      const metadata = parseDocumentation(published.body);
+      if (!published.body.split(/\r?\n/).some((line) => line.trim() && !line.trim().startsWith("<!--"))) {
+        decisionTrust("documentation report has no substantive result");
+      }
+      if (!metadata || metadata.change !== pinned.number || metadata.inputHead !== pinned.headSha) {
+        decisionTrust("documentation report does not match the pinned implementation iteration");
+      }
+      verifiedChange = await readDecisionChange(initialTicket, expected, provider);
+      if (metadata.resultHead !== verifiedChange.headSha) decisionTrust("documentation report result head does not match the linked request");
+      verifiedComments.push(published);
+      artifacts.push({ ...commentArtifact(published, "documentation", expected), inputHead: metadata.inputHead }, changeArtifact(verifiedChange));
     } else if (expected.resultContract === "development") {
       verifiedChange = await readDecisionChange(initialTicket, expected, provider);
       artifacts.push(changeArtifact(verifiedChange));
@@ -225,14 +241,16 @@ export async function readDecisionAndBuildReceipt(
 
 async function discoverDecisionComment(
   ticket: ProviderTicketSnapshot,
-  artifactKind: "assessment" | "plan" | "diagnostic" | "question",
+  artifactKind: "assessment" | "plan" | "diagnostic" | "question" | "documentation",
   expected: DecisionExpectation,
   provider: ProviderAdapter,
 ): Promise<ProviderComment> {
   const expectedMarker = decisionMarker(expected);
   const candidates = ticket.comments.filter((comment) => !isBaseline(expected, "comment", comment.id));
   const reusable = new Set(expected.reusableCommentIds ?? []);
-  const marked = candidates.filter((comment) => hasExpectedPublication(comment.body, expected));
+  const marked = candidates.filter((comment) => hasExpectedPublication(comment.body, expected)
+    && (artifactKind !== "documentation" || parseDocumentation(comment.body) !== null)
+    && (artifactKind !== "question" || parseDocumentation(comment.body) === null));
   const fresh = marked.filter(({ id }) => !reusable.has(id));
   const matches = fresh.length > 0 ? fresh : marked;
   if (matches.length === 0) {
@@ -277,7 +295,7 @@ async function readDecisionChange(
   if (!hasExpectedPublication(linked.body, expected)) {
     evidenceUnavailable("linked change request publication marker is unavailable");
   }
-  if (isBaseline(expected, "change-request", String(linked.number))
+  if (expected.resultContract !== "documentation" && isBaseline(expected, "change-request", String(linked.number))
     && (!expected.pinnedChangeRequest || linked.headSha === expected.pinnedChangeRequest.headSha)) {
     evidenceUnavailable("linked change request was not updated for the current iteration");
   }
@@ -393,7 +411,7 @@ function humanVerdict(event: AgentEventType): ReceiptHumanGate["verdict"] {
 
 function commentArtifact(
   published: ProviderComment,
-  artifactKind: "assessment" | "plan" | "diagnostic" | "question",
+  artifactKind: "assessment" | "plan" | "diagnostic" | "question" | "documentation",
   expected: DecisionExpectation,
 ): ReceiptComment {
   return {

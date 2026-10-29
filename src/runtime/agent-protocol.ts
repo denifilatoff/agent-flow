@@ -5,6 +5,7 @@ import type {
 } from "../config/types.js";
 import type { FlowEventType } from "../flow/types.js";
 import type { NormalizedChangeRequest, ProviderComment } from "../provider/types.js";
+import { renderDocumentation } from "../provider/documentation.ts";
 import { renderPublication } from "../provider/publication.ts";
 
 type EventSource = "agent" | "provider" | "controller";
@@ -156,6 +157,22 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
     if (input.resultContract === "verification") {
       return `a marked diagnostic comment containing exactly ${marker(input)} followed by `
         + `BUG RECEIPT · VERIFIED for pinned head ${input.changeRequest!.headSha}`;
+    }
+    if (input.resultContract === "documentation") {
+      const change = input.changeRequest;
+      if (!change || change.state !== "open") {
+        return "an open pinned linked change request; documentation cannot succeed with a missing or closed request. "
+          + "Publish a focused marked question and return agent-needs-human";
+      }
+      return `the same linked open change request ${change.repository}#${change.number} and a final documentation `
+        + `report on the ticket containing exactly ${marker(input)} and a metadata line in this form: `
+        + `${renderDocumentation({ change: change.number, inputHead: change.headSha, resultHead: change.headSha })}. `
+        + "Keep inputHead fixed to the supplied implementation boundary; replace resultHead with the current full head "
+        + "after inspecting the complete diff against the target branch, including rework. Report affected documents "
+        + "and checks, or a reasoned no-op with equal heads and no empty commit. Reconcile any head movement before "
+        + "claiming completion. Reuse a suitable final report, never an obsolete iteration report; on a retry after "
+        + "pushing, inspect existing work and finish the report without duplicating commits. If the implementation "
+        + "boundary or concurrent changes cannot be established, ask a focused question. Do not create another request";
     }
     if (input.resultContract === "development") {
       if (!input.changeRequest) {

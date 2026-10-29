@@ -19,6 +19,7 @@ import {
   renderControlComment,
   type ParsedControlComment,
 } from "../provider/control-comment.ts";
+import { parseDocumentation } from "../provider/documentation.ts";
 import { electOwner, parsePublication } from "../provider/publication.ts";
 import type {
   Permission,
@@ -457,16 +458,29 @@ function clearUncommittedReceipt(
         && review.headSha === artifact.headSha
         && review.verdict === artifact.verdict);
     }
+    if (artifact.artifactKind === "documentation") {
+      const comment = evidence.snapshot.comments.find(({ id }) => id === artifact.id);
+      const report = comment && parseDocumentation(comment.body);
+      return report !== null && report !== undefined && evidence.snapshot.changeRequest?.state === "open"
+        && report.inputHead === artifact.inputHead
+        && report.change === evidence.snapshot.changeRequest.number
+        && report.resultHead === evidence.snapshot.changeRequest.headSha;
+    }
     return true;
   }) && (!receipt.humanGate || evidence.snapshot.comments.some((comment) =>
     comment.id === receipt.humanGate!.sourceCommentId && !isMarked(comment.body)));
   if (committed && (receipt.artifacts.length > 0 || receipt.humanGate)) return control;
 
+  const documentation = receipt.artifacts.find((artifact) =>
+    artifact.kind === "comment" && artifact.artifactKind === "documentation");
+  const changeRequest = control.changeRequest && documentation?.kind === "comment" && documentation.inputHead
+    ? { ...control.changeRequest, headSha: documentation.inputHead }
+    : normalizedChange(evidence.snapshot.changeRequest);
   return advanceControlState(control, {
     attemptSeries: control.attemptSeries ? { ...control.attemptSeries, current: null } : null,
     latestReceipt: null,
     humanGate: control.humanGate?.interpretedByAttemptId === receipt.attemptId ? null : control.humanGate,
-    changeRequest: normalizedChange(evidence.snapshot.changeRequest),
+    changeRequest,
   }, now(dependencies));
 }
 
@@ -650,6 +664,7 @@ function hasValidLocalResume(flow: FlowDefinition, control: ControlState): boole
 }
 
 type PublicationObjectKind = "comment" | "change-request" | "review";
+type RecoveryPublicationKind = PublicationObjectKind | "documentation";
 
 type RecoveryIteration =
   | { kind: "ready"; baselineKeys: string[]; humanCutoff: string | null; reassessState?: string }
@@ -677,7 +692,7 @@ function recoveryIteration(
   if (!committed) {
     return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
   }
-  const active = evidence.publications
+  let active = evidence.publications
     .filter(({ metadata }) => ownerController === null || metadata.controller === ownerController)
     .filter((publication) => {
       if (publication.ownershipEligible === false
@@ -689,7 +704,54 @@ function recoveryIteration(
     })
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
-  const kinds = active.map((publication) => publicationObjectKind(publication.key, evidence.snapshot.ref, bundle));
+  const documentationEnabled = Object.values(bundle.flow.spec.states).some((state) => state.resultContract === "documentation");
+  if (documentationEnabled) {
+    const rework = evidence.reviews.filter((review) => review.verdict === "changes-requested"
+      && evidence.publications.some((publication) => publication.metadata.controller === ownerController
+        && publication.ownershipEligible !== false
+        && hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", review.id)))
+      .toSorted((left, right) => Date.parse(right.submittedAt) - Date.parse(left.submittedAt))[0];
+    if (rework && linked && rework.headSha !== linked.headSha) {
+      const boundary = Date.parse(rework.submittedAt);
+      active = active.filter((publication) => {
+        if (Date.parse(publication.createdAt) > boundary) return true;
+        const kind = publicationObjectKind(publication.key, evidence.snapshot.ref, bundle);
+        if (kind === "review") return false;
+        if (kind !== "comment") return true;
+        const comment = evidence.snapshot.comments.find(({ id }) =>
+          hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", id));
+        const report = comment && parseDocumentation(comment.body);
+        if (!report || report.change !== linked.number) return true;
+        // An ordered review on the report's result head proves that this report belongs to a consumed iteration.
+        return !evidence.reviews.some((review) => review.headSha === report.resultHead
+          && Date.parse(review.submittedAt) > Date.parse(publication.createdAt)
+          && Date.parse(review.submittedAt) <= boundary
+          && evidence.publications.some((candidate) => candidate.metadata.controller === ownerController
+            && hasPublicationIdentity(candidate.key, evidence.snapshot.ref, "review", review.id)));
+      });
+    }
+  }
+  const kinds = active.map((publication) => {
+    const kind = publicationObjectKind(publication.key, evidence.snapshot.ref, bundle);
+    if (kind !== "comment") return kind;
+    const comment = evidence.snapshot.comments.find(({ id }) =>
+      hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", id));
+    return comment && parseDocumentation(comment.body) ? "documentation" : kind;
+  });
+  const documentation = active.flatMap((publication, index) => {
+    if (kinds[index] !== "documentation") return [];
+    const comment = evidence.snapshot.comments.find(({ id }) =>
+      hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", id))!;
+    return [{ metadata: parseDocumentation(comment.body)!, publication }];
+  });
+  // Provider changes expose only the current head, not the implementation boundary before a documentation push.
+  // With no local state, only an unchanged-head report establishes both boundaries independently.
+  if (documentation.some(({ metadata }) => !linked || metadata.change !== linked.number
+    || metadata.resultHead !== linked.headSha || metadata.inputHead !== metadata.resultHead)
+    || (bundle.flow.spec.states[stage]?.resultContract === "documentation" && documentation.length !== 1)) {
+    return { kind: "ambiguous", baselineKeys,
+      reason: "documentation implementation boundary cannot be established from provider evidence" };
+  }
   if (kinds.some((kind) => kind === null) || !active.every(({ key }) => baselineKeys.includes(key))) {
     return { kind: "ambiguous", baselineKeys, reason: "publication identity cannot be verified for the active work" };
   }
@@ -740,13 +802,13 @@ function recoveryIteration(
   };
 }
 
-function successfulPublicationPath(flow: FlowDefinition, target: string, activationLabel: string | null): PublicationObjectKind[] | null {
-  const queue: Array<{ stateId: string; kinds: PublicationObjectKind[]; visited: Set<string> }> = [{
+function successfulPublicationPath(flow: FlowDefinition, target: string, activationLabel: string | null): RecoveryPublicationKind[] | null {
+  const queue: Array<{ stateId: string; kinds: RecoveryPublicationKind[]; visited: Set<string> }> = [{
     stateId: entryStage(flow, activationLabel),
     kinds: [],
     visited: new Set(),
   }];
-  const matches: PublicationObjectKind[][] = [];
+  const matches: RecoveryPublicationKind[][] = [];
   while (queue.length > 0) {
     const current = queue.shift()!;
     if (current.stateId === target) {
@@ -774,7 +836,8 @@ function successfulPublicationPath(flow: FlowDefinition, target: string, activat
   return matches[0]!;
 }
 
-function resultPublicationKind(result: ResultContract | undefined): PublicationObjectKind | null {
+function resultPublicationKind(result: ResultContract | undefined): RecoveryPublicationKind | null {
+  if (result === "documentation") return "documentation";
   if (result === "assessment" || result === "plan" || result === "diagnostic" || result === "verification") return "comment";
   if (result === "development") return "change-request";
   if (result === "review") return "review";
@@ -1141,7 +1204,7 @@ async function startIfNeeded(
   }
 
   if (!agentId || !resultContract) throw new Error("launchable flow state is missing its agent contract");
-  const inputRevision = attemptInputRevision(control, snapshot, sourceComment);
+  const inputRevision = attemptInputRevision(control, snapshot, sourceComment, resultContract);
   if (hasAcceptedAttempt(control, agentId, inputRevision)) return false;
 
   await dependencies.launcher.start({
@@ -1178,6 +1241,7 @@ function attemptInputRevision(
   control: ControlState,
   snapshot: ProviderTicketSnapshot,
   sourceComment: ProviderComment | null,
+  resultContract: ResultContract,
 ): string {
   const parts: unknown[] = [
     ["config", control.configRevision],
@@ -1192,7 +1256,7 @@ function attemptInputRevision(
         snapshot.changeRequest.provider,
         snapshot.changeRequest.repository,
         snapshot.changeRequest.number,
-        snapshot.changeRequest.headSha,
+        resultContract === "documentation" ? control.changeRequest?.headSha : snapshot.changeRequest.headSha,
         snapshot.changeRequest.state,
       ]);
     }

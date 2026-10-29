@@ -10,7 +10,7 @@ The prototype's executable YAML and JSON contracts are defined in
 
 ## Purpose
 
-The controller moves a ticket through architectural assessment, planning, development, review, rework, and merge. A
+The controller moves a ticket through architectural assessment, planning, development, documentation, review, rework, and merge. A
 different headless agent may handle each stage. Humans may approve intermediate results or answer questions, depending
 on the configured flow policy.
 
@@ -204,13 +204,17 @@ attempt without advancing the machine.
 - The planning agent consumes that assessment and publishes the complete plan as a ticket comment.
 - The development agent consumes the accepted ticket context, edits the repository, and creates or updates one pull or
   merge request for the ticket.
+- The documentarian inspects the complete implementation diff against the target branch and synchronizes only affected
+  documentation in that same request. It follows repository conventions and uses the pinned `documentation-and-adrs`
+  skill, without unsolicited ADRs, changelogs, generated-file edits, or implementation repairs. Its APM package supports
+  Claude and Codex. A reasoned no-op succeeds without an empty commit.
 - The review agent reviews the pinned pull or merge request head. A head change invalidates an in-flight result for the
   older revision.
 - If the linked pull or merge request closes without merge while the ticket remains open, the flow enters
   `needs-human`. The agent asks whether the existing change request should be reopened or the flow should be cancelled.
 - The agent must not create a replacement change request automatically. The one-change-request-per-ticket invariant
   remains in force.
-- Requested changes return the ticket to development. Development and review may repeat within the same flow instance.
+- Requested changes return the ticket to development. Development, documentation, and review repeat within the same flow instance.
 - When the authenticated provider user authored the pull request, a GitHub review is published as a comment and
   machine-readable verdict rather than an impossible self-approval.
 - Merge is manual initially. A later configuration option may enable automerge.
@@ -231,7 +235,9 @@ attempt without advancing the machine.
   directly.
 - The bugfixer consumes that reproduction, adds a regression check, fixes the responsible code path, and creates or
   updates the linked change request.
-- The existing reviewer reviews the pinned head. Approval advances to independent verification; requested changes
+- The documentarian checks the complete fix and updates affected documentation in the same linked request after every
+  bugfixer iteration.
+- The existing reviewer reviews the documented head. Approval advances to independent verification; requested changes
   return to the bugfixer.
 - The bug investigator applies the pinned `bug-receipt` skill to the reviewed head. Only `VERIFIED` advances to manual
   merge; `PARTIAL` or `BLOCKED` requests human input.
@@ -251,6 +257,8 @@ attempt without advancing the machine.
   same attempt cannot repair these conditions.
 - Entering a new state or observing a new pinned input revision, such as a new pull or merge request head SHA, starts
   a fresh series with the configured budget.
+- Documentation retries retain the accepted implementation input head even after a documentation push. The verified
+  report and request result head become the reviewer's input.
 - Every retry uses a new agent process and a new local session directory.
 - The controller commits an attempt start to SQLite before launching the agent. Surviving local records preserve retry
   consumption across normal restarts. Losing SQLite may reset the budget; a surviving `blocked` label still stops work.
@@ -280,7 +288,8 @@ stateDiagram-v2
     [*] --> Assessment: development label
     Assessment --> Planning: assessment published
     Planning --> Development: plan published
-    Development --> Review: PR or MR updated
+    Development --> Documentation: PR or MR updated
+    Documentation --> Review: documentation report verified
     Review --> Development: changes requested
     Review --> AwaitingMerge: review accepted
     AwaitingMerge --> Done: PR or MR merged
@@ -296,7 +305,8 @@ stateDiagram-v2
 
     [*] --> BugReproduction: bugfix label
     BugReproduction --> Bugfix: diagnostic published
-    Bugfix --> Review: PR or MR updated
+    Bugfix --> Documentation: PR or MR updated
+    Documentation --> Review: documentation report verified
     Review --> Bugfix: changes requested
     Review --> BugVerification: review accepted
     BugVerification --> Review: PR or MR head changed
@@ -349,6 +359,10 @@ agent-packages/
     apm.yml
     .apm/
       <agent-primitives>
+  documentarian/
+    apm.yml
+    .apm/
+      <agent-primitives>
   reviewer/
     apm.yml
     .apm/
@@ -381,6 +395,7 @@ the default agent behavior; external APM artifacts are optional, narrow dependen
 | Human gate verdict | Minimal model decision verified against the authorized human comment |
 | Attempts, retry consumption, verified receipts | Local SQLite only; recover or recompute after loss |
 | Development result | One linked pull or merge request and its pinned head SHA |
+| Documentation result | Marked ticket report with request number, implementation input and result heads; equal heads allow a no-op |
 | Review result | Provider review or marked comment tied to the reviewed head SHA |
 | Linked change request closed without merge | `agent-stage:needs-human` while the ticket remains open |
 | Ticket closed during an active flow | Cancellation unless a merged change completes `awaiting-merge` |

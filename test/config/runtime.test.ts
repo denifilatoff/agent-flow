@@ -224,3 +224,24 @@ test("accepts reloadable generations and drains on restart-only or invalid repla
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("documentarian requires a complete runtime binding and supports either declared harness", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-flow-documentarian-binding-"));
+  try {
+    const path = join(root, "runtime.yaml");
+    const initial = await readFile("config/runtime.example.yaml", "utf8");
+    await writeFile(path, initial);
+    const manager = await RuntimeManager.create(path);
+    manager.bindCatalog({ documentarian: ["claude", "codex"] });
+    assert.equal((await manager.execution("documentarian")).executionSnapshot.harness, "claude");
+    await writeFile(path, initial.replace("documentarian:\n      harness: claude", "documentarian:\n      harness: codex"));
+    await manager.reload();
+    assert.equal((await manager.execution("documentarian")).executionSnapshot.harness, "codex");
+    await writeFile(path, initial.replace(/    documentarian:\n(?:      .+\n){6}/, ""));
+    await manager.reload();
+    assert.equal(manager.mayStartWork(), false);
+    assert.match(manager.status().validationErrors.join(" "), /bindings/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

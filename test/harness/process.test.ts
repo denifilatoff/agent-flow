@@ -909,3 +909,38 @@ test("preserves an existing destination when exclusive auth copy collides", asyn
 
   assert.equal(await readFile(destination, "utf8"), "existing credential\n");
 });
+
+test("both adapters deliver documentarian skills, report protocol, and context paths", async (t) => {
+  for (const target of ["claude", "codex"] as const) {
+    const fixture = await runFixture(target);
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const runtime = fixture.input.compiledAgent.runtimeDirectory;
+    const agentDirectory = target === "claude" ? ".claude/agents" : ".codex/agents";
+    const extension = target === "claude" ? "md" : "toml";
+    await rename(join(runtime, agentDirectory, `developer.${extension}`), join(runtime, agentDirectory, `documentarian.${extension}`));
+    await writeFile(join(runtime, agentDirectory, `documentarian.${extension}`), target === "claude"
+      ? "---\nname: documentarian\n---\n\nSynchronize affected documentation.\n"
+      : 'name = "documentarian"\ndeveloper_instructions = "Synchronize affected documentation.\\n"\n');
+    const skills = target === "claude" ? ".claude/skills" : ".agents/skills";
+    await mkdir(join(runtime, skills, "documentation-and-adrs"));
+    await writeFile(join(runtime, skills, "documentation-and-adrs/SKILL.md"), "# Documentation skill\n");
+    fixture.input.compiledAgent.agentId = "documentarian";
+    fixture.input.compiledAgent.instructions = "Synchronize affected documentation.";
+    fixture.input.stagePrompt = "Publish the final report with <!-- agent-flow-documentation:v1 -->.";
+    const processes = processFixture();
+    const adapter = target === "claude"
+      ? createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies)
+      : createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+    const pending = adapter.run(fixture.input);
+    await waitForSpawn(processes.calls);
+    const call = processes.calls[0]!;
+    t.after(() => call.child.finish(0, null));
+    const home = target === "claude" ? call.env.CLAUDE_CONFIG_DIR! : call.env.CODEX_HOME!;
+    assert.match(await readFile(join(home, "skills/documentation-and-adrs/SKILL.md"), "utf8"), /Documentation skill/);
+    assert.equal(call.env.AGENT_FLOW_CONTEXT_PATH, fixture.input.session.contextPath);
+    assert.equal(call.env.AGENT_FLOW_DECISION_PATH, fixture.input.session.decisionPath);
+    assert.match(Buffer.concat(call.child.input).toString(), /agent-flow-documentation:v1/);
+    call.child.finish(0, null);
+    assert.equal((await pending).exitCode, 0);
+  }
+});

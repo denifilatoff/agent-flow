@@ -122,6 +122,20 @@ that new object from the pre-attempt candidate by object identity, then validate
 matching objects remain ambiguous. If the available evidence does not justify a transition, continue unfinished work
 or ask for clarification.
 
+Documentation is a separate result contract between implementation and review in both shipped policies and scenarios.
+A generic marked comment, an unresolved question, or the existing PR/MR marker cannot prove it completed. Recovery
+classifies a documentation report by its strict metadata and validates request/head association. Current-head no-op
+reports can be reassessed after publication-before-label interruption or local-state loss without posting duplicates.
+Provably consumed reports and reviews before an ordered rework boundary remain excluded from the current iteration.
+Warm retries after a documentation push retain the original implementation input and finish inspection/reporting;
+a locally verified report can advance review on its resulting head after a label-write interruption.
+
+The provider interface exposes the current request head, not an immutable history of accepted implementation heads.
+After total local-state loss, an edited report's self-declared input or a push without a report does not independently
+establish that boundary. Pause with a visible recovery reason when the boundary or publication ordering cannot be
+proved. Do not synthesize completion, create an empty commit, skip documentation, or guess a resume target. Existing
+questions remain questions; when the stage context is lost, use the operator clarification path described below.
+
 An external operation with an uncertain API response must be read back before retrying publication. Reuse an existing
 matching PR/MR or result. If several objects match and identity is unclear, pause instead of choosing arbitrarily.
 

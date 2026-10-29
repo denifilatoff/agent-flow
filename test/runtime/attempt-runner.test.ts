@@ -536,3 +536,24 @@ test("passes the surviving control's activation pin to result verification", asy
   await waitIdle(subject);
   assert.equal(subject.verifications[0]?.expected.activationLabel, "bugfix");
 });
+
+test("documentation retries preserve implementation input after a push and hand off the result head", async () => {
+  const configured = bundle();
+  configured.flow.spec.states.development!.resultContract = "documentation";
+  const original = "c".repeat(40);
+  const input = request({ bundle: configured, control: control({ changeRequest: {
+    provider: "github", repository: "owner/repo", number: 8,
+    url: "https://github.test/owner/repo/pull/8", state: "open", headSha: original,
+  } }) });
+  input.resultContract = "documentation";
+  const subject = fixture({ request: input, results: [OK, OK], verify: async (_path, expected) => {
+    assert.equal(expected.pinnedChangeRequest?.headSha, original);
+    if (expected.attemptId === ATTEMPT_1) throw new DecisionReadbackError();
+    return receipt(expected.attemptId);
+  } });
+  await subject.runner.start(subject.request);
+  await waitIdle(subject);
+  assert.equal(subject.verifications.length, 2);
+  assert.ok(subject.prompts.every((p) => p.includes(`"inputHead":"${original}"`)));
+  assert.equal(subject.controls.at(-1)?.changeRequest?.headSha, HEAD);
+});

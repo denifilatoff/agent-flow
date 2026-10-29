@@ -2616,6 +2616,13 @@ test("empty-store recovery returns an open change with a stale review to review"
     },
   ], { changes: [change], reviews: [review] });
   const runtime = await localRuntime(t, provider);
+  // This configuration was pinned before the documentation stage existed.
+  const legacy = structuredClone(BUNDLE);
+  for (const prefix of ["", "bug-"]) {
+    legacy.flow.spec.states[`${prefix}development`]!.on!["agent-succeeded"]!.target = `${prefix}review`;
+    delete legacy.flow.spec.states[`${prefix}documentation`];
+  }
+  runtime.configured.config = { loadCurrent: async () => BUNDLE, loadPinned: async () => legacy };
 
   const result = await reconcileTicket(runtime.configured, TICKET);
 
@@ -2949,4 +2956,134 @@ test("warm review rerouting rejects a replacement linked change request before c
   assert.equal(provider.events.includes("provider:set-labels"), false);
   assert.equal(runtime.writer.load!(TICKET)?.value.control?.changeRequest?.number, 31);
   assert.equal(runtime.writer.load!(TICKET)?.value.control?.stateId, "awaiting-merge");
+});
+
+function documentationBundle(): ConfigBundle {
+  const value = structuredClone(BUNDLE);
+  value.flow.spec.initial = "development";
+  value.flow.spec.states.development!.on!["agent-succeeded"]!.target = "documentation";
+  value.flow.spec.states.documentation = { ...structuredClone(value.flow.spec.states.development!),
+    resultContract: "documentation", on: {
+      "agent-succeeded": { target: "review", guards: ["receipt-valid"] },
+      "agent-needs-human": { target: "needs-human", actions: ["remember-resume-state"] },
+      "attempts-exhausted": { target: "blocked", actions: ["remember-resume-state"] },
+    } };
+  return value;
+}
+
+test("documentation recovery separates final reports from generic comments and preserves retry input", async (t) => {
+  for (const reportKind of ["noop", "edited", "question", "missing", "wrong-request"] as const) {
+    await t.test(reportKind, async (context) => {
+      const provider = new FakeProvider();
+      const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+      const linked = changeRequest({ body: `${marker}\nImplementation.`, createdAt: "2026-08-26T10:30:00.000Z" });
+      const report = comment("documentation", `${marker}\n` + (reportKind === "question" ? "Which API behavior is intended?" :
+        `<!-- agent-flow-documentation:v1 ${JSON.stringify({ change: reportKind === "wrong-request" ? 99 : linked.number,
+          inputHead: reportKind === "edited" ? NEW_HEAD : OLD_HEAD, resultHead: OLD_HEAD })} -->\nNo documentation updates needed; checked all changed APIs.`), MAINTAINER, "2026-08-26T11:30:00.000Z");
+      provider.snapshot.labels.push("agent-stage:documentation", "agent-flow:managed");
+      provider.snapshot.changeRequest = linked;
+      if (reportKind !== "missing") provider.snapshot.comments.push(report);
+      provider.recoveryEvidence = recoveryEvidence(provider, [
+        { key: publicationKey("change-request", String(linked.number)), createdAt: linked.createdAt!, metadata: { config: SHA, controller: FLOW_1 } },
+        ...provider.snapshot.comments.map((c) => ({ key: publicationKey("comment", c.id), createdAt: c.createdAt, metadata: { config: SHA, controller: FLOW_1 } })),
+      ], { changes: [linked] });
+      const runtime = await localRuntime(context, provider);
+      const configured = documentationBundle();
+      runtime.configured.config = { loadCurrent: async () => configured, loadPinned: async () => configured };
+      const result = await reconcileTicket(runtime.configured, TICKET);
+      if (reportKind === "noop") {
+        assert.equal(result.stateId, "documentation");
+        assert.equal(runtime.launcher.requests.length, 1);
+        assert.ok(!runtime.launcher.requests[0]!.publicationKeys.includes(publicationKey("comment", report.id)));
+      } else {
+        assert.equal(result.runnable, false);
+        assert.equal(result.recoveryDisposition, "ambiguous");
+      }
+    });
+  }
+});
+
+test("warm documentation retry keeps its accepted implementation boundary despite an already-pushed head", async (t) => {
+  const provider = new FakeProvider();
+  provider.snapshot.labels.push("agent-stage:documentation", "agent-flow:managed");
+  provider.snapshot.changeRequest = changeRequest({ headSha: NEW_HEAD });
+  const runtime = await localRuntime(t, provider);
+  const configured = documentationBundle();
+  runtime.configured.config = { loadCurrent: async () => configured, loadPinned: async () => configured };
+  await runtime.writer(TICKET, null, controlState({ stateId: "documentation", changeRequest: controlChange(),
+    attemptSeries: attemptSeries({ stateId: "documentation", agentId: "developer", current: null }) }));
+  await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(runtime.launcher.requests[0]?.control.changeRequest?.headSha, OLD_HEAD);
+  const first = runtime.launcher.requests[0]?.inputRevision;
+  runtime.launcher.running.clear();
+  provider.snapshot.changeRequest.headSha = "3".repeat(40);
+  await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(runtime.launcher.requests[1]?.inputRevision, first);
+});
+
+test("verified documentation advances review on its result head and rejects edited input metadata", async (t) => {
+  for (const tampered of [false, true, "replacement"] as const) await t.test(tampered === "replacement" ? "replacement request" : tampered ? "edited input" : "verified handoff", async (context) => {
+    const provider = new FakeProvider();
+    const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+    const report = comment("documentation", `${marker}\n<!-- agent-flow-documentation:v1 ${JSON.stringify({
+      change: 31, inputHead: tampered === true ? "3".repeat(40) : OLD_HEAD, resultHead: NEW_HEAD,
+    })} -->\nUpdated configuration documentation and checked its examples.`, MAINTAINER, "2026-08-26T11:30:00.000Z");
+    const change = changeRequest({ headSha: NEW_HEAD, body: `${marker}\nImplementation.` });
+    provider.snapshot.labels.push("agent-stage:documentation", "agent-flow:managed");
+    provider.snapshot.changeRequest = tampered === "replacement" ? { ...change, number: 32, url: change.url.replace("31", "32") } : change; provider.snapshot.comments.push(report);
+    provider.recoveryEvidence = recoveryEvidence(provider, [
+      { key: publicationKey("comment", report.id), createdAt: report.createdAt, metadata: { config: SHA, controller: FLOW_1 } },
+      { key: publicationKey("change-request", "31"), createdAt: "2026-08-26T10:30:00.000Z", metadata: { config: SHA, controller: FLOW_1 } },
+    ], { changes: [change] });
+    const runtime = await localRuntime(context, provider);
+    const configured = documentationBundle();
+    runtime.configured.config = { loadCurrent: async () => configured, loadPinned: async () => configured };
+    await runtime.writer(TICKET, null, controlState({ stateId: "documentation", changeRequest: controlChange({ headSha: NEW_HEAD }),
+      attemptSeries: attemptSeries({ stateId: "documentation", agentId: "developer" }), latestReceipt: {
+        apiVersion: "agent-flow/v1alpha1", kind: "AgentReceipt", flowInstanceId: FLOW_1, attemptId: ATTEMPT,
+        outcome: "succeeded", summary: "Documentation completed.", artifacts: [
+          { kind: "comment", id: report.id, url: report.url, marker, artifactKind: "documentation", inputHead: OLD_HEAD },
+          { kind: "change-request", number: 31, url: change.url, headSha: NEW_HEAD, state: "open" },
+        ],
+      } }));
+    const result = await reconcileTicket(runtime.configured, TICKET);
+    assert.equal(result.stateId, tampered ? "documentation" : "review");
+    assert.equal(runtime.launcher.requests[0]?.control.changeRequest?.headSha, tampered ? OLD_HEAD : NEW_HEAD);
+    assert.equal(runtime.launcher.requests[0]?.control.changeRequest?.number, 31);
+  });
+});
+
+test("provider-only documentation recovery excludes reports consumed by earlier rework reviews", async (t) => {
+  const provider = new FakeProvider();
+  const marker = `<!-- agent-flow:v1 {"config":"${SHA}","controller":"${FLOW_1}"} -->`;
+  const report = (id: string, head: string, time: string) => comment(id,
+    `${marker}\n<!-- agent-flow-documentation:v1 ${JSON.stringify({ change: 31, inputHead: head, resultHead: head })} -->\nChecked existing documentation against the full implementation.`, MAINTAINER, time);
+  const old = report("old-doc", OLD_HEAD, "2026-08-26T10:40:00.000Z");
+  const current = report("current-doc", NEW_HEAD, "2026-08-26T11:40:00.000Z");
+  const change = changeRequest({ headSha: NEW_HEAD, body: `${marker}\nImplementation.`, createdAt: "2026-08-26T10:30:00.000Z" });
+  const review: NormalizedReview = { id: "old-review", url: "https://github.example.test/reviews/1", actor: MAINTAINER,
+    submittedAt: "2026-08-26T11:00:00.000Z", headSha: OLD_HEAD, verdict: "changes-requested",
+    body: `${marker}\n<!-- agent-flow-review:v1 head=${OLD_HEAD} verdict=changes-requested -->\nRework required.` };
+  provider.snapshot.labels.push("agent-stage:documentation", "agent-flow:managed");
+  provider.snapshot.comments.push(old, current); provider.snapshot.changeRequest = change;
+  provider.recoveryEvidence = recoveryEvidence(provider, [
+    { key: publicationKey("change-request", "31"), createdAt: change.createdAt!, metadata: { config: SHA, controller: FLOW_1 } },
+    ...[old, current].map((c) => ({ key: publicationKey("comment", c.id), createdAt: c.createdAt, metadata: { config: SHA, controller: FLOW_1 } })),
+    { key: publicationKey("review", review.id), createdAt: review.submittedAt, metadata: { config: SHA, controller: FLOW_1 } },
+  ], { changes: [change], reviews: [review] });
+  const runtime = await localRuntime(t, provider);
+  const configured = documentationBundle();
+  runtime.configured.config = { loadCurrent: async () => configured, loadPinned: async () => configured };
+  const result = await reconcileTicket(runtime.configured, TICKET);
+  assert.equal(result.stateId, "documentation");
+  assert.equal(runtime.launcher.requests.length, 1);
+  assert.ok(runtime.launcher.requests[0]!.publicationKeys.includes(publicationKey("comment", old.id)));
+  assert.ok(!runtime.launcher.requests[0]!.publicationKeys.includes(publicationKey("comment", current.id)));
+  provider.snapshot.labels = provider.snapshot.labels.map((label) => label === "agent-stage:documentation" ? "agent-stage:review" : label);
+  const afterTransition = await localRuntime(t, provider);
+  afterTransition.configured.config = runtime.configured.config;
+  const reviewed = await reconcileTicket(afterTransition.configured, TICKET);
+  assert.equal(reviewed.stateId, "review");
+  assert.equal(afterTransition.launcher.requests[0]?.snapshot.changeRequest?.headSha, NEW_HEAD);
+  assert.ok(afterTransition.launcher.requests[0]!.publicationKeys.includes(publicationKey("comment", current.id)));
 });
