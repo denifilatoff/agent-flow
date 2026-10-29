@@ -48,7 +48,7 @@
         "marker": { "type": "string", "minLength": 1, "maxLength": 500 },
         "artifactKind": {
           "type": "string",
-          "enum": ["assessment", "plan", "question", "review", "diagnostic"]
+          "enum": ["assessment", "plan", "question", "review", "diagnostic", "documentation"]
         }
       }
     },

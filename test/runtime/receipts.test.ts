@@ -1042,3 +1042,51 @@ test("accepts one newly published plan when reassessment replaces its earlier in
   }), provider);
   assert.equal(receipt.artifacts[0]?.kind === "comment" && receipt.artifacts[0].id, completed.id);
 });
+
+function documentationComment(inputHead = OLD_HEAD, resultHead = HEAD_SHA): ProviderComment {
+  return comment("plan", { body: `${marker("plan")}\n<!-- agent-flow-documentation:v1 ${JSON.stringify({
+    change: 31, inputHead, resultHead,
+  })} -->\nUpdated affected API documentation; checked examples against the implementation.` });
+}
+
+function documentationExpectation(overrides: Partial<DecisionExpectationSpec> = {}): DecisionExpectationSpec {
+  return expectation({ stateId: "development", resultContract: "documentation",
+    pinnedChangeRequest: change({ headSha: OLD_HEAD }), ...overrides });
+}
+
+test("documentation accepts edits and no-op reports with both verified artifacts", async () => {
+  for (const input of [HEAD_SHA, OLD_HEAD]) {
+    const provider = new FakeProvider();
+    installComments(provider, [documentationComment(input)]);
+    const receipt = await readDecision({ event: "agent-succeeded" }, documentationExpectation({
+      pinnedChangeRequest: change({ headSha: input }),
+    }), provider);
+    assert.equal(receipt.artifacts.length, 2);
+    assert.equal(receipt.artifacts[0]?.kind === "comment" && receipt.artifacts[0].artifactKind, "documentation");
+    assert.equal(receipt.artifacts[1]?.kind === "change-request" && receipt.artifacts[1].headSha, HEAD_SHA);
+  }
+});
+
+test("documentation rejects absent, wrong-iteration, duplicate, and contradictory evidence", async (t) => {
+  for (const [name, mutate] of [
+    ["question", (p: FakeProvider) => installComments(p, [comment("question")])],
+    ["wrong input", (p: FakeProvider) => installComments(p, [documentationComment(HEAD_SHA)])],
+    ["wrong result", (p: FakeProvider) => installComments(p, [documentationComment(OLD_HEAD, OLD_HEAD)])],
+    ["wrong request", (p: FakeProvider) => installComments(p, [{ ...documentationComment(), body: documentationComment().body.replace('"change":31', '"change":99') }])],
+    ["unmarked", (p: FakeProvider) => installComments(p, [{ ...documentationComment(), body: documentationComment().body.replace(marker("plan"), "") }])],
+    ["duplicate", (p: FakeProvider) => installComments(p, [documentationComment(), { ...documentationComment(), id: "999", url: `${COMMENT_URL}999` }])],
+    ["unauthorized", (p: FakeProvider) => { p.actorPermission = "read"; }],
+    ["closed", (p: FakeProvider) => { p.ticket.changeRequest = change({ state: "closed" }); }],
+    ["merged", (p: FakeProvider) => { p.ticket.changeRequest = change({ state: "merged" }); }],
+    ["missing request", (p: FakeProvider) => { p.ticket.changeRequest = null; }],
+    ["wrong repository", (p: FakeProvider) => { p.ticket.changeRequest = change({ repository: "wrong/repo" }); }],
+    ["head readback", (p: FakeProvider) => { p.changeRequest = change({ headSha: OLD_HEAD }); }],
+    ["comment readback", (p: FakeProvider) => { p.comments.set("101", { ...documentationComment(), body: "changed" }); }],
+    ["final head", (p: FakeProvider) => { p.ticketReads = [p.ticket, { ...p.ticket, changeRequest: change({ headSha: OLD_HEAD }) }]; }],
+  ] as const) await t.test(name, async () => {
+    const provider = new FakeProvider();
+    installComments(provider, [documentationComment()]);
+    mutate(provider);
+    await assert.rejects(readDecision({ event: "agent-succeeded" }, documentationExpectation(), provider));
+  });
+});

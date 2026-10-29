@@ -1,6 +1,6 @@
 export type SchemaKind = "Stack" | "RuntimeConfig" | "Flow" | "AgentCatalog" | "ControlState" | "AgentReceipt" | "AgentDecision" | "LocalExecution";
 export type HarnessTarget = "codex" | "claude";
-export type ResultContract = "assessment" | "plan" | "diagnostic" | "verification" | "development" | "review" | "human-gate" | "none";
+export type ResultContract = "assessment" | "plan" | "diagnostic" | "verification" | "documentation" | "development" | "review" | "human-gate" | "none";
 
 export type AgentEventType =
   | "agent-succeeded"
@@ -106,7 +106,7 @@ export interface ReceiptComment {
   id: string;
   url: string;
   marker: string;
-  artifactKind: "assessment" | "plan" | "question" | "review" | "diagnostic";
+  artifactKind: "assessment" | "plan" | "question" | "review" | "diagnostic" | "documentation";
 }
 
 export interface ReceiptChangeRequest {
