@@ -56,6 +56,44 @@ test("same-configuration planning replay requires a fresh plan and downstream hu
   assert.equal((await run.migrationReceipts()).length, 1);
 });
 
+test("planning replay revisions survive SQLite loss at the human gate and downstream stages", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.changeRequest();
+  const controller = await run.controllerId();
+  const target = await run.migrate("planning", true);
+  await run.reconcile();
+  await run.untilState("plan-review");
+  await run.answer("Changes requested: include restart validation.");
+  await run.untilState("planning");
+  await run.untilState("plan-review");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("plan-review");
+  await run.blockNextAttempt("development");
+  await run.blockNextAttempt("review");
+  await run.answer("approved");
+  await run.untilState("development");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("review");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal((await run.changeRequest())!.body, before!.body);
+  assert.equal(await run.controllerId(), controller);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  assert.equal(await run.maximumConcurrentAttempts(), 1);
+});
+
 test("changed-CI migration of fixture issue 2 preserves PR 8 despite incidental PR 11 and requires target CI", async (t) => {
   const run = await startFixture("github", { oldCiPolicy: true });
   t.after(() => run.close());

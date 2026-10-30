@@ -910,6 +910,50 @@ async function recoveryIteration(
     if (!committed) {
       return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
     }
+    if (migration && recoveryStart && bundle.flow.spec.states[recoveryStart]?.kind === "agent") {
+      const gates = Object.entries(bundle.flow.spec.states).filter(([id, state]) => state.kind === "human-gate"
+        && successfulPublicationPath(bundle.flow, id, evidence.snapshot.activation.label, recoveryStart)
+        && successfulPublicationPath(bundle.flow, stage, evidence.snapshot.activation.label, id));
+      // Identical comment contracts across multiple gates cannot locate revisions
+      // unambiguously. Leave those sequences to the ordinary ambiguity checks.
+      for (const [gateId] of gates.length === 1 ? gates : []) {
+        const path = successfulPublicationPath(bundle.flow, gateId, evidence.snapshot.activation.label, recoveryStart);
+        if (!path?.length || path.at(-1) !== "comment" || path.length > committed.length
+          || !path.every((kind, index) => committed![index] === kind)) continue;
+        const index = path.length - 1;
+        const answered: number[] = [];
+        for (let offset = index; active[offset]; offset++) {
+          const next = active[offset + 1];
+          if ((!next && stage === gateId)
+            || publicationObjectKind(active[offset]!.key, evidence.snapshot.ref, bundle) !== "comment"
+            || (next && publicationObjectKind(next.key, evidence.snapshot.ref, bundle) !== "comment")) break;
+          let authorized = false;
+          for (const comment of evidence.snapshot.comments) {
+            if (comment.createdAt <= active[offset]!.createdAt || (next && comment.createdAt >= next.createdAt)
+              || isMarked(comment.body) || isMigrationCommand(comment.body)
+              || comment.body.includes("<!-- agent-flow-migration-diagnostic:")) continue;
+            const permission = await providerCall("provider permission read failed", () =>
+              provider.permission(evidence.snapshot.ref.repository, comment.actor));
+            if (AUTHORIZED.has(permission)) { authorized = true; break; }
+          }
+          if (!authorized) break;
+          const results = active.slice(offset, offset + 2).map((publication) =>
+            evidence.snapshot.comments.find((comment) =>
+              hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id)));
+          if (results.some((result) => !result)) break;
+          const permissions = await Promise.all(results.map((result) =>
+            providerCall("provider permission read failed", () =>
+              provider.permission(evidence.snapshot.ref.repository, result!.actor))));
+          if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
+          answered.push(offset);
+        }
+        // At the gate, every answered predecessor before a newer result is a revision.
+        // Downstream, the final answer advances the gate: preserve its result and
+        // the following development candidate for ordinary contract validation.
+        const retired = stage === gateId ? answered.length : Math.max(0, answered.length - 1);
+        active.splice(index, retired);
+      }
+    }
     if (migration && migration.receipt.start !== stage
       && bundle.flow.spec.states[migration.receipt.start]?.kind === "human-gate"
       && active.length > committed.length) {
@@ -1063,7 +1107,8 @@ async function recoveryIteration(
       return {
         kind: "ready", reassessState: predecessor,
         baselineKeys: baselineKeys.filter((key) => key !== candidate?.key),
-        humanCutoff: prefix.length === 0 ? null : active[prefix.length - 1]!.createdAt,
+        humanCutoff: migration && candidate ? candidate.createdAt
+          : prefix.length === 0 ? null : active[prefix.length - 1]!.createdAt,
       };
     }
   }

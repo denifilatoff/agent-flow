@@ -46,7 +46,9 @@ last interpreted human comment so recovery can skip consumed input while leaving
 Missing predecessor evidence rejects the migration and requests an explicit replay. If later feedback produces
 revised predecessor publications, empty-store recovery revalidates the newest publication before selecting its
 pending human answer. Completed gate revisions remain history when reconstructing downstream development, review
-and merge-wait paths.
+and merge-wait paths. This also applies when planning replay reaches plan review: authorized human feedback
+separates revised plans, the newest plan is revalidated at the gate, and its pending answer stays eligible.
+Downstream recovery preserves that plan and the current development completion for ordinary validation.
 Recovery uses authorized human input between publications to separate completed gate revisions from downstream
 results; a current agent result remains available for revalidation. Completed development/review rework pairs are also
 history when a marked, authorized changes-requested review closes a development completion. Recovery checks the

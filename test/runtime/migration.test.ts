@@ -1303,3 +1303,47 @@ test("migrated approvals superseded by a head change recover through merge wait"
     });
   }
 });
+
+test("planning replay recovers revised plans at the gate and downstream stages", async (t) => {
+  for (const stage of ["plan-review", "development", "development-with-result", "review"] as const) {
+    await t.test(stage, async (t) => {
+      const f = await migrationFixture(t);
+      const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+      const { readFile } = await import("node:fs/promises");
+      const { parse } = await import("yaml");
+      f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+      f.target.flow = structuredClone(f.source.flow);
+      f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest --resume-from planning";
+      await reconcileTicket(f.d as never, f.ref);
+      const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+      f.snapshot.comments.push(
+        f.comment("20", marker + "\nPlan."),
+        f.comment("21", "Changes requested: include restart validation."),
+        f.comment("22", marker + "\nRevised plan."),
+        f.comment("23", "Changes requested: include recovery details."),
+        f.comment("24", marker + "\nFinal revised plan."),
+        f.comment("25", "Approved"),
+      );
+      const recorded = stage === "development-with-result" ? "development" : stage;
+      if (stage === "development-with-result" || stage === "review") {
+        f.snapshot.comments.push(f.comment("26", marker + "\nDevelopment complete."));
+      }
+      f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:" + recorded];
+      await f.reset();
+      const result = await reconcileTicket(f.d as never, f.ref);
+      assert.equal(result.configRevision, f.target.revision);
+      assert.equal(result.stateId, stage === "plan-review" ? "planning" : recorded);
+      const request = f.starts.at(-1) as import("../../src/runtime/reconcile.ts").AttemptRequest;
+      assert.equal(request.mode, "stage");
+      for (const id of ["20", "22"]) assert.ok(request.publicationKeys.some((key) => JSON.parse(key)[4] === id));
+      assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === "24"), stage !== "plan-review");
+      assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === "26"), stage === "review");
+      assert.equal(f.counts().creates, 1);
+      f.snapshot.comments.find((comment) => comment.id === "21")!.actor = { login: "outsider", providerId: "2" };
+      f.d.provider.permission = async (...args: unknown[]) =>
+        (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+      await f.reset();
+      assert.equal((await reconcileTicket(f.d as never, f.ref)).recoveryDisposition, "ambiguous");
+    });
+  }
+});

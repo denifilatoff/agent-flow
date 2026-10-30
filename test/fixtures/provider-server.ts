@@ -795,7 +795,9 @@ class FixtureState {
     }
     if (state === "assessment" || state === "planning" || state === "bug-reproduction" || state === "bug-verification") {
       const artifactKind = state === "assessment" ? "assessment" as const : state === "planning" ? "plan" as const : state === "bug-reproduction" ? "diagnostic" as const : "verification" as const;
-      const existing = context.artifacts.some((artifact) => !context.migration?.baseline.comments.includes(String(artifact.id)) && "body" in artifact
+      const input = this.comments.find((comment) => comment.id === context.controlState.humanGate?.sourceCommentId);
+      const existing = context.artifacts.some((artifact) => (!input || ("createdAt" in artifact && artifact.createdAt > input.createdAt))
+        && !context.migration?.baseline.comments.includes(String(artifact.id)) && "body" in artifact
         && artifact.body.split(/\r?\n/).includes(context.publicationMarker)
         && artifact.body.includes(`Fixture ${artifactKind}.`));
       if (!existing) this.addComment(`${context.publicationMarker}\n${state === "bug-verification" ? "BUG RECEIPT · VERIFIED" : `Fixture ${artifactKind}.`}`);
