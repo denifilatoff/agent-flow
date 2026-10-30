@@ -786,10 +786,6 @@ async function recoveryIteration(
     }
     return { kind: "ready", baselineKeys, humanCutoff: null };
   }
-  const committed = successfulPublicationPath(bundle.flow, stage, evidence.snapshot.activation.label,evidence.migration?.receipt.start);
-  if (!committed) {
-    return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
-  }
   let active = evidence.publications
     .filter((publication) => !migration?.receipt.retained.some((retained) => retained.key === publication.key))
     .filter(({ metadata }) => ownerController === null || metadata.controller === ownerController)
@@ -800,6 +796,28 @@ async function recoveryIteration(
     })
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
+  let recoveryStart = migration?.receipt.start;
+  const startState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
+  const reworkTarget = startState?.on?.["review-changes-requested"]?.target;
+  if (migration && startState?.resultContract === "review" && reworkTarget
+    && bundle.flow.spec.states[reworkTarget]?.resultContract === "development") {
+    // A replay may return to a stage preceding its receipt boundary. Consume
+    // only a verified rejection before reconstructing that rework's success path.
+    const rejection = active[0] && evidence.reviews.find((review) =>
+      hasPublicationIdentity(active[0]!.key, evidence.snapshot.ref, "review", review.id));
+    if (rejection?.verdict === "changes-requested" && /^[0-9a-f]{40}$/.test(rejection.headSha)) {
+      const permission = await providerCall("provider permission read failed", () =>
+        provider.permission(evidence.snapshot.ref.repository, rejection.actor));
+      if (AUTHORIZED.has(permission)) {
+        active = active.slice(1);
+        recoveryStart = reworkTarget;
+      }
+    }
+  }
+  const committed = successfulPublicationPath(bundle.flow, stage, evidence.snapshot.activation.label, recoveryStart);
+  if (!committed) {
+    return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
+  }
   if (migration && migration.receipt.start !== stage
     && bundle.flow.spec.states[migration.receipt.start]?.kind === "human-gate"
     && active.length > committed.length) {
@@ -832,7 +850,7 @@ async function recoveryIteration(
       if (review?.resultContract !== "review"
         || review.on?.["review-changes-requested"]?.target !== developmentId) continue;
       const prefix = successfulPublicationPath(bundle.flow, developmentId,
-        evidence.snapshot.activation.label, migration.receipt.start);
+        evidence.snapshot.activation.label, recoveryStart);
       if (!prefix || !prefix.every((kind, index) => active[index]
         && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === kind)) continue;
       const index = prefix.length;
