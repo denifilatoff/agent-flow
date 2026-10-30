@@ -836,11 +836,36 @@ async function recoveryIteration(
       if (!prefix || !prefix.every((kind, index) => active[index]
         && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === kind)) continue;
       const index = prefix.length;
-      // A verified rejection closes that completion/review iteration, even if
-      // a later correction has moved the PR head. Keep both objects as context.
+      // CI retries can publish another completion without a rejection review.
+      // Supersede only authorized completions on a configured CI retry path;
+      // leave the newest result available for ordinary completion validation.
+      const retriesCi = Boolean(bundle.flow.spec.requiredChecks?.length)
+        && (development.on?.["ci-failed"]?.target === developmentId
+          || review.on?.["ci-failed"]?.target === developmentId);
       while (active[index] && active[index + 1]
-        && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === "comment"
-        && publicationObjectKind(active[index + 1]!.key, evidence.snapshot.ref, bundle) === "review") {
+        && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === "comment") {
+        const nextKind = publicationObjectKind(active[index + 1]!.key, evidence.snapshot.ref, bundle);
+        if (nextKind === "comment" && retriesCi) {
+          const completions = active.slice(index, index + 2).map((publication) =>
+            evidence.snapshot.comments.find((comment) =>
+              hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id)));
+          if (completions.some((completion) => !completion)) break;
+          // Intervening human input may belong to a gate revision instead.
+          // That boundary must be resolved by the gate logic above.
+          if (evidence.snapshot.comments.some((comment) =>
+            comment.createdAt > completions[0]!.createdAt
+            && comment.createdAt < completions[1]!.createdAt
+            && !isMarked(comment.body) && !isMigrationCommand(comment.body))) break;
+          const permissions = await Promise.all(completions.map((completion) =>
+            providerCall("provider permission read failed", () =>
+              provider.permission(evidence.snapshot.ref.repository, completion!.actor))));
+          if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
+          active.splice(index, 1);
+          continue;
+        }
+        // A verified rejection closes that completion/review iteration, even
+        // when a later correction has moved the PR head.
+        if (nextKind !== "review") break;
         const completion = evidence.snapshot.comments.find((comment) =>
           hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "comment", comment.id));
         const rejection = evidence.reviews.find((candidate) =>

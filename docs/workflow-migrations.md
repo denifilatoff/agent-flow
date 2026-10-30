@@ -50,6 +50,9 @@ results; a current agent result remains available for revalidation. Completed de
 history when a marked, authorized changes-requested review closes a development completion. Recovery checks the
 review head and verdict evidence before isolating the corrected completion and current-head approval; earlier
 rejections can refer to an older head. This does not discard the current completion candidate or accept stale approval.
+When required CI routes back to development, successive authorized development completions can supersede earlier
+completions without a rejection review. Recovery keeps the newest completion available for revalidation and still
+requires current-head CI and approval. Intervening human input remains subject to human-gate recovery checks.
 Other preceding publications remain context rather than being automatically accepted again. Rules that change
 contracts cannot retain those changed result contracts.
 

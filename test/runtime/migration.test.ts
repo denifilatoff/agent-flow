@@ -892,3 +892,44 @@ test("completed migrated development and review rework recovers after SQLite los
     }
   }
 });
+
+test("migrated CI retries recover the latest development completion after SQLite loss", async (t) => {
+  for (const stage of ["development", "review", "awaiting-merge"]) {
+    await t.test(stage, async (t) => {
+      const f = await migrationFixture(t);
+      const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+      await reconcileTicket(f.d as never, f.ref);
+      const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+      f.snapshot.comments.push(
+        f.comment("20", marker + "\nDevelopment complete before required CI failed."),
+        f.comment("21", marker + "\nFirst CI correction complete."),
+        f.comment("22", marker + "\nFinal CI correction complete."),
+      );
+      if (stage === "awaiting-merge") f.reviews.push({
+        id: "23", headSha: f.selected.headSha, verdict: "approved", actor: f.selected.actor,
+        body: `${marker}\n<!-- agent-flow-review:v1 head=${f.selected.headSha} verdict=approved -->`,
+        submittedAt: f.comment("23", "").createdAt,
+        url: "https://github.com/owner/repo/pull/8#pullrequestreview-23",
+      });
+      f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:" + stage];
+      await f.reset();
+      const result = await reconcileTicket(f.d as never, f.ref);
+      assert.equal(result.stateId, stage);
+      assert.equal(result.configRevision, f.target.revision);
+      if (stage === "development") {
+        const request = f.starts.at(-1) as import("../../src/runtime/reconcile.ts").AttemptRequest;
+        assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === "22"), false);
+        for (const id of ["20", "21"]) {
+          assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === id), true);
+        }
+      }
+      f.snapshot.comments.find((comment) => comment.id === "21")!.actor = { login: "outsider", providerId: "2" };
+      f.d.provider.permission = async (...args: unknown[]) =>
+        (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+      await f.reset();
+      const unauthorized = await reconcileTicket(f.d as never, f.ref);
+      assert.equal(unauthorized.recoveryDisposition, "ambiguous");
+      assert.equal(unauthorized.stateId, null);
+    });
+  }
+});
