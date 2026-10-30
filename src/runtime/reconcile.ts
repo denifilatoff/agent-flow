@@ -807,6 +807,27 @@ async function recoveryIteration(
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
   let recoveryStart = migration?.receipt.start;
+  const replayState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
+  const ciTarget = replayState?.on?.["ci-failed"]?.target;
+  if (migration && replayState?.resultContract === "verification"
+    && bundle.flow.spec.requiredChecks?.length && ciTarget
+    && bundle.flow.spec.states[ciTarget]?.resultContract === "development"
+    && (stage === ciTarget || (active[1]
+      && publicationObjectKind(active[1].key, evidence.snapshot.ref, bundle) === "comment"))) {
+    // Required CI can reject a published verification result and return before
+    // the replay boundary. Retire that authorized diagnostic, then reconstruct
+    // correction from the declared CI target without consuming its new result.
+    const completion = active[0] && evidence.snapshot.comments.find((comment) =>
+      hasPublicationIdentity(active[0]!.key, evidence.snapshot.ref, "comment", comment.id));
+    if (completion?.body.split(/\r?\n/)[1] === "BUG RECEIPT · VERIFIED") {
+      const permission = await providerCall("provider permission read failed", () =>
+        provider.permission(evidence.snapshot.ref.repository, completion.actor));
+      if (AUTHORIZED.has(permission)) {
+        active = active.slice(1);
+        recoveryStart = ciTarget;
+      }
+    }
+  }
   const boundaryState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
   const updatedTarget = boundaryState?.on?.["change-request-updated"]?.target;
   const repeatsReviewOnUpdate = boundaryState?.resultContract === "verification"

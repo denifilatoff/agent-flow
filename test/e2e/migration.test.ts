@@ -326,3 +326,45 @@ for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
   });
 
 }
+
+test("verification replay CI failure recovers correction after SQLite loss", async (t) => {
+  const run = await startFixture("github", { activationLabel: "bugfix" });
+  t.after(() => run.close());
+  await run.untilState("bug-reproduction-review");
+  await run.answer("approved");
+  await run.untilState("bug-awaiting-merge");
+  const before = await run.changeRequest();
+  const controller = await run.controllerId();
+  await run.setCi("failure");
+  const target = await run.migrate("bug-verification", true);
+  await run.reconcile();
+  await run.untilState("bug-verification");
+  await run.untilAttempt("succeeded");
+  await run.blockNextAttempt("bug-development");
+  await run.reconcile();
+  await run.untilState("bug-development");
+  await run.untilAttempt("started");
+  await run.setCi("success");
+  await run.blockNextAttempt("bug-development");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-development");
+  await run.untilAttempt("started");
+  await run.blockNextAttempt("bug-review");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-review");
+  await run.untilAttempt("started");
+  await run.blockNextAttempt("bug-verification");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-verification");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal((await run.changeRequest())!.body, before!.body);
+  assert.equal(await run.controllerId(), controller);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  assert.equal(await run.maximumConcurrentAttempts(), 1);
+});

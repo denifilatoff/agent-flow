@@ -69,6 +69,9 @@ After an earlier bugfix replay completes verification, recovery retires authoriz
 pairs before reconstructing fresh review and verification for the current head. Preceding replay results remain
 available, and the current-head verification result still requires ordinary revalidation. Missing or unauthorized
 completion evidence remains ambiguous rather than being discarded.
+A verification replay can also return to development through its declared `ci-failed` transition. Recovery
+isolates the authorized verification diagnostic before reconstructing correction and its later review/verification;
+the correction result remains available for ordinary validation after SQLite loss.
 When required CI routes back to development, successive authorized development completions can supersede earlier
 completions without a rejection review. Recovery keeps the newest completion available for revalidation and still
 requires current-head CI and approval. Intervening human input remains subject to human-gate recovery checks.
