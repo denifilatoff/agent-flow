@@ -314,7 +314,7 @@ export function createGitHubAdapter(
     async readTicket(ref: TicketRef, pinnedActivationLabel?: string): Promise<ProviderTicketSnapshot> {
       const data = await readSnapshotData(ref, pinnedActivationLabel);
       const { changes } = await readActiveChanges(ref, data, []);
-      const carried = data.snapshot.comments.flatMap(comment => { const parsed = parseMigrationReceipt(comment.body); return parsed ? [parsed.receipt.change.number] : []; }).at(-1);
+      const carried = data.snapshot.comments.filter(comment=>!data.snapshot.activation.occurredAt || Date.parse(comment.createdAt)>=Date.parse(data.snapshot.activation.occurredAt)).flatMap(comment => { const parsed = parseMigrationReceipt(comment.body); return parsed ? [parsed.receipt.change.number] : []; }).at(-1);
       const change = carried ? changes.find(change => change.number === carried) ?? null : uniqueChange(changes, "GitHub issue has multiple related pull requests");
       return {
         ...data.snapshot,

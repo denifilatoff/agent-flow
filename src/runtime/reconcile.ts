@@ -131,7 +131,7 @@ export async function reconcileTicket(
     }
     let evidence = currentActivationEvidence(observedEvidence);
     try {
-      evidence=await recoverMigration(evidence,revision=>dependencies.config.loadPinned(revision));
+      evidence=await recoverMigration(evidence,revision=>dependencies.config.loadPinned(revision),provider);
       evidence=await processMigration(dependencies,evidence);
     } catch(error) {
       evidence={...evidence,ambiguities:[...evidence.ambiguities,error instanceof Error?error.message:"Migration evidence conflicts"]};
@@ -383,7 +383,7 @@ async function reconcileLocal(
     const recovered: ControlState = {
       apiVersion: "agent-flow/v1alpha1",
       kind: "ControlState",
-      flowInstanceId: dependencies.newFlowInstanceId?.() ?? randomUUID(),
+      flowInstanceId: boundary?.receipt.workspace ?? dependencies.newFlowInstanceId?.() ?? randomUUID(),
       flowId: bundle.flow.metadata.id,
       configRevision: bundle.revision,
       sequence: 0,
@@ -734,6 +734,7 @@ function recoveryIteration(
 ): RecoveryIteration {
   const baselineKeys = markedObjectKeys(bundle, evidence, apiUrl);
   const linked = evidence.snapshot.changeRequest;
+  if(evidence.migration?.receipt.start===stage && bundle.flow.spec.states[stage]?.kind==="provider-wait" && evidence.migration.receipt.retained.length) return {kind:"ready",baselineKeys,humanCutoff:null};
   if (bundle.flow.spec.states[stage]?.kind === "provider-wait" && linked?.state === "merged") {
     const linkedPublication = evidence.publications.some((publication) =>
       publication.metadata.controller === ownerController
@@ -868,6 +869,7 @@ function markedObjectKeys(_bundle: ConfigBundle, evidence: RecoveryEvidence, api
       keys.add(JSON.stringify([evidence.snapshot.ref.provider, scope, evidence.snapshot.ref.repository, kind, object.id]));
     }
   }
+  if(scope && evidence.migration) for(const id of evidence.migration.receipt.baseline.reviews) keys.add(JSON.stringify([evidence.snapshot.ref.provider,scope,evidence.snapshot.ref.repository,"review",id]));
   return [...keys].sort();
 }
 

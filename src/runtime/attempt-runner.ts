@@ -110,7 +110,8 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       running.completion = job.catch((error: unknown) => {
         if (!running.launched) running.rejectReady(classifyAttemptError(error));
       }).finally(() => {
-        dependencies.attemptFinished?.();
+        if(running.terminationFailure) void running.terminationFailure.termination.then(()=>dependencies.attemptFinished?.());
+        else dependencies.attemptFinished?.();
         if (!running.launched) running.resolveReady();
         if (!running.terminationFailure && active.get(flowId) === running) active.delete(flowId);
         if (running.launched && !running.cancelled) onSettled?.(request.ref);

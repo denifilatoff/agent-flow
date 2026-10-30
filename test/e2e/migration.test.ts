@@ -1,0 +1,87 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { startFixture } from "../fixtures/provider-server.ts";
+import { parseMigrationReceipt } from "../../src/provider/migration-receipt.ts";
+
+test("agent-only update replays development on the same PR and recovers after SQLite loss", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.changeRequest(),
+    controller = await run.controllerId(),
+    comments = await run.agentCommentIds();
+  const target = await run.migrate("development", true);
+  await run.reconcile();
+  await run.untilState("awaiting-merge");
+  const receipt = parseMigrationReceipt((await run.migrationReceipts())[0]!)!;
+  assert.equal(receipt.receipt.target.config, target);
+  assert.equal(receipt.receipt.change.number, before!.number);
+  assert.equal(receipt.receipt.change.headBranch, "fixture-implementation");
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal(await run.controllerId(), controller);
+  assert.ok((await run.agentCommentIds()).length > comments.length);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  await run.restart();
+  await run.untilState("awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  assert.equal(await run.maximumConcurrentAttempts(), 1);
+});
+
+test("same-configuration planning replay requires a fresh plan and downstream human approval", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.control(),
+    ids = await run.agentCommentIds();
+  await run.migrate("planning");
+  await run.reconcile();
+  await run.untilState("plan-review");
+  assert.equal((await run.control()).configRevision, before.configRevision);
+  assert.ok((await run.agentCommentIds()).length > ids.length);
+  await run.reconcile();
+  assert.equal((await run.control()).stateId, "plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.migrationReceipts()).length, 1);
+});
+
+test("changed-CI migration of fixture issue 2 preserves PR 8 despite incidental PR 11 and requires target CI", async (t) => {
+  const run = await startFixture("github", { oldCiPolicy: true });
+  t.after(() => run.close());
+  await run.setCi("missing");
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.changeRequest();
+  assert.equal(before!.number, 8);
+  const target = await run.migrateCiPolicy();
+  await run.reconcile();
+  await run.untilState("development");
+  await run.untilAttempt("succeeded");
+  await run.reconcile();
+  assert.equal((await run.control()).stateId, "development");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, 8);
+  const receipt = parseMigrationReceipt((await run.migrationReceipts())[0]!)!;
+  assert.equal(receipt.receipt.ticket.number, 2);
+  assert.equal(receipt.receipt.change.number, 8);
+  await run.setCi("success");
+  await run.untilState("awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.changeRequest())!.number, 8);
+  assert.equal((await run.migrationReceipts()).length, 1);
+});

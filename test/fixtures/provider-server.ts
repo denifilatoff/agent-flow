@@ -7,11 +7,11 @@ import { dirname, join, resolve } from "node:path";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 
 import { RuntimeManager } from "../../src/config/runtime.ts";
 import { parseControlComment } from "../../src/provider/control-comment.ts";
-import { electOwner, parsePublication, type Publication } from "../../src/provider/publication.ts";
+import { electOwner, parsePublication, renderPublication, type Publication } from "../../src/provider/publication.ts";
 import type {
   AgentDecision,
   AgentReceipt,
@@ -32,6 +32,7 @@ const CONTROLLER = { login: "controller", providerId: "51" };
 type AttemptMode = "success" | "exit-failure" | "block" | "late" | "crash-after-publish" | "reuse" | "race";
 
 interface FixtureOptions {
+  oldCiPolicy?:boolean;
   firstAttempt?: AttemptMode;
   forceStartupFailure?: boolean;
   repairCiAfterFailure?: boolean;
@@ -112,6 +113,9 @@ export interface FixtureRun {
   latestAgentComment(): Promise<ProviderComment | null>;
   maximumConcurrentAttempts(): Promise<number>;
   mergeChangeRequest(): Promise<void>;
+  migrate(resume?:string,agentOnly?:boolean):Promise<string>;
+  migrateCiPolicy():Promise<string>;
+  migrationReceipts():Promise<string[]>;
   reconcile(): Promise<void>;
   receipts(): Promise<AgentReceipt[]>;
   reviewRequests(): Promise<string[]>;
@@ -191,7 +195,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   await createCertificate(certificate, key);
   certificatesChanged = true;
   setDefaultCACertificates([...originalCertificates, await readFile(certificate, "utf8")]);
-  const state = new FixtureState(provider, options.firstAttempt);
+  const state = new FixtureState(provider, options.firstAttempt,options.oldCiPolicy);
   state.ciAfterReview = options.ciAfterReview;
   state.repairCiAfterFailure = options.repairCiAfterFailure;
   server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
@@ -233,6 +237,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     operatorAuthFile,
     60,
     options.firstAttempt === "race" ? 30 : 5,
+    options.oldCiPolicy,
   );
 
   environmentChanged = true;
@@ -419,6 +424,30 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     },
     async maximumConcurrentAttempts() { return state.maximumActiveAttempts; },
     async mergeChangeRequest() { state.setChangeState("merged"); },
+    async migrate(resume,agentOnly=false) {
+      const control=requireControl(currentControl());
+      const worktree=join(dataDirectory,"worktrees",control.flowInstanceId);
+      const branch=(await execFile("git",["-C",worktree,"branch","--show-current"])).stdout.trim();
+      if(!branch) await execFile("git",["-C",worktree,"switch","-c","fixture-implementation"]);
+      if(agentOnly) {
+        const manifest=join(configRepository,"agent-packages/developer/.apm/agents/developer.agent.md");
+        await writeFile(manifest,(await readFile(manifest,"utf8"))+"\nRespect the accepted migration context.\n");
+        await execFile("git",["-C",configRepository,"add","."]);await execFile("git",["-C",configRepository,"commit","-m","Update developer guidance"]);
+      }
+      const sha=(await execFile("git",["-C",configRepository,"rev-parse","HEAD"])).stdout.trim();
+      state.addComment(`/agent-flow migrate --pr ${state.change!.number} --to latest${resume ? " --resume-from "+resume : ""}`,MAINTAINER);
+      return sha;
+    },
+    async migrateCiPolicy(){
+      const control=requireControl(currentControl());
+      await cp(join(ROOT,"config/flows/development.yaml"),join(configRepository,"config/flows/development.yaml"));
+      await mkdir(join(configRepository,"config/migrations"),{recursive:true});
+      await writeFile(join(configRepository,"config/migrations/ci-policy.yaml"),stringify({apiVersion:"agent-flow/migration-v1",kind:"WorkflowMigration",id:"fixture-ci",source:control.configRevision,sourceFlow:"development",targetFlow:"development",activationLabel:"agent-flow:development",states:{"awaiting-merge":{target:"development",replay:["planning","development"],retain:[]}}}));
+      await execFile("git",["-C",configRepository,"add","."]);await execFile("git",["-C",configRepository,"commit","-m","Require current-head CI and declare migration"]);
+      state.incidentalReference=true;
+      return run.migrate();
+    },
+    async migrationReceipts(){return state.comments.filter(c=>c.body.includes("<!-- agent-flow-migration:v1")).map(c=>c.body);},
     reconcile,
     async receipts() {
       const latest = currentControl()?.latestReceipt;
@@ -490,6 +519,8 @@ class FixtureState {
   readonly routing: Array<Omit<RoutingEvent, "kind">> = [];
   readonly requestLog: Array<{ method: string; path: string; phase: string; installation: string | null }> = [];
   readonly labelEvents: LabelEvent[] = [];
+  incidentalReference=false;
+  readonly implementationNumber:number;
   labels = ["agent-flow:development"];
   repairCiAfterFailure?: boolean;
   ciAfterReview?: "success" | "pending" | "failure";
@@ -506,10 +537,11 @@ class FixtureState {
   #reviewId = 700;
   #lastTimestamp = Date.now();
 
-  constructor(provider: ProviderKind, firstAttempt?: AttemptMode) {
+  constructor(provider: ProviderKind, firstAttempt?: AttemptMode,migrationCase=false) {
     this.provider = provider;
     this.repository = provider === "github" ? "owner/repo" : "group/project";
-    this.number = provider === "github" ? 17 : 23;
+    this.number = migrationCase?2:provider === "github" ? 17 : 23;
+    this.implementationNumber=migrationCase?8:provider==="github"?31:41;
     this.ref = { provider, repository: this.repository, number: this.number };
     this.#raceParticipants = firstAttempt === "race" ? 2 : 0;
     this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.timestamp() });
@@ -578,6 +610,7 @@ class FixtureState {
       repository: this.repository,
       number: this.change.number,
       url: this.changeUrl(),
+      headRepository:this.repository,headBranch:"fixture-implementation",
       headSha: this.change.headSha,
       state: this.change.state,
       actor: { login: "developer", providerId: "8" },
@@ -755,20 +788,21 @@ class FixtureState {
     }
     if (state === "assessment" || state === "planning") {
       const artifactKind = state === "assessment" ? "assessment" as const : "plan" as const;
-      const existing = context.artifacts.some((artifact) => "body" in artifact
+      const existing = context.artifacts.some((artifact) => !context.migration?.baseline.comments.includes(String(artifact.id)) && "body" in artifact
         && artifact.body.split(/\r?\n/).includes(context.publicationMarker)
         && artifact.body.includes(`Fixture ${artifactKind}.`));
       if (!existing) this.addComment(`${context.publicationMarker}\nFixture ${artifactKind}.`);
       return { event: "agent-succeeded" };
     }
     if (state === "development") {
+      if(context.migration && !this.comments.some(c=>!context.migration!.baseline.comments.includes(c.id) && c.body===context.publicationMarker+"\nFixture development revalidated.")) this.addComment(context.publicationMarker+"\nFixture development revalidated.");
       if (this.repairCiAfterFailure && this.change && this.ciStatus === "failure") {
         this.changeHead();
         this.ciStatus = "success";
       }
       const timestamp = this.touch();
       this.change ??= {
-        number: this.provider === "github" ? 31 : 41,
+        number: this.implementationNumber,
         headSha: HEAD,
         state: "open",
         body: `${context.publicationMarker}\nFixture change request.`,
@@ -858,9 +892,16 @@ class FixtureState {
       return json(response, 200, this.labels.map((name) => ({ name })));
     }
     const pull = new RegExp(`^repos/${this.repository}/pulls/(\\d+)$`).exec(path);
-    if (method === "GET" && pull) return json(response, 200, this.githubPull());
+    if (method === "GET" && pull) {
+      if(this.incidentalReference && pull[1]==="11") {
+        const original=this.githubPull(),marker=parsePublication(this.change!.body);
+        return json(response,200,{...original,number:11,html_url:`${this.origin}/${this.repository}/pull/11`,state:"closed",merged_at:this.change!.createdAt,body:marker.kind==="current"?renderPublication({...marker.metadata,config:"f".repeat(40)})+"\nCloses #9; mentions #2 as context.":"Policy update"});
+      }
+      return json(response, 200, this.githubPull());
+    }
     const reviews = new RegExp(`^repos/${this.repository}/pulls/(\\d+)/reviews$`).exec(path);
     if (method === "GET" && reviews) {
+      if(this.incidentalReference && reviews[1]==="11") return json(response,200,[]);
       if (!this.validChangeNumber(reviews[1]!)) return json(response, 400, { message: "unexpected change number" });
       const page = this.reviewPage(url);
       if (page === null) return json(response, 400, { message: "invalid review pagination" });
@@ -1010,6 +1051,7 @@ class FixtureState {
       actor: this.githubActor({ login: "developer", providerId: "8" }),
       source: { issue: { number: this.change.number, repository_url: `${this.apiUrl}/repos/${this.repository}`, pull_request: {} } },
     });
+    if(this.incidentalReference) events.push({id:911,event:"cross-referenced",created_at:this.change!.createdAt,actor:this.githubActor(CONTROLLER),source:{issue:{number:11,repository_url:`${this.apiUrl}/repos/${this.repository}`,pull_request:{}}}});
     return events;
   }
 
@@ -1029,7 +1071,7 @@ class FixtureState {
       body: this.change.body,
       created_at: this.change.createdAt,
       updated_at: this.change.updatedAt,
-      head: { sha: this.change.headSha },
+      head: { sha: this.change.headSha,ref:"fixture-implementation",repo:{full_name:this.repository} },
       user: this.githubActor({ login: "developer", providerId: "8" }),
     };
   }
@@ -1121,6 +1163,7 @@ class FixtureState {
 }
 
 interface AttemptContext {
+  migration?:import("../../src/provider/migration-receipt.ts").MigrationReceipt;
   ticket: unknown;
   controlState: ControlState;
   artifacts: Array<Record<string, unknown>>;
@@ -1151,6 +1194,7 @@ async function createConfiguration(
   operatorAuthFile = join(dirname(repository), "operator-password"),
   pollingIntervalSeconds = 60,
   timeoutSeconds = 5,
+  oldCiPolicy=false,
 ): Promise<string> {
   await mkdir(join(repository, "config/flows"), { recursive: true });
   await Promise.all([
@@ -1163,6 +1207,9 @@ async function createConfiguration(
   const stackFile = join(repository, "config/stack.yaml");
   await writeFile(stackFile, (await readFile(stackFile, "utf8"))
     .replace("config/flows/development-autonomous.yaml", "config/flows/development.yaml"));
+  if(oldCiPolicy) {
+    const path=join(repository,"config/flows/development.yaml"),flow=parse(await readFile(path,"utf8"));delete flow.spec.requiredChecks;for(const state of Object.values(flow.spec.states) as Array<{on?:Record<string,unknown>}>) if(state.on) delete state.on["ci-failed"];await writeFile(path,stringify(flow));
+  }
   await execFile("git", ["init", repository]);
   await execFile("git", ["-C", repository, "config", "user.email", "fixture@example.test"]);
   await execFile("git", ["-C", repository, "config", "user.name", "Fixture"]);
