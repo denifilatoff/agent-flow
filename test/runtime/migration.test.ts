@@ -827,3 +827,68 @@ test("completed migrated gate revisions do not obscure downstream agent recovery
     }
   }
 });
+
+test("completed migrated development and review rework recovers after SQLite loss", async (t) => {
+  for (const changedHead of [false, true]) {
+    for (const recorded of ["development", "development-with-result", "review", "awaiting-merge"]) {
+      const stage = recorded === "development-with-result" ? "development" : recorded;
+      await t.test(`${recorded}, changed head: ${changedHead}`, async (t) => {
+        const f = await migrationFixture(t);
+        const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+        await reconcileTicket(f.d as never, f.ref);
+        const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+        const oldHead = f.selected.headSha;
+        f.snapshot.comments.push(f.comment("20", marker + "\nInitial development complete."));
+        const review = (id: string, headSha: string, verdict: string) => ({
+          id, headSha, verdict, actor: f.selected.actor,
+          body: `${marker}\n<!-- agent-flow-review:v1 head=${headSha} verdict=${verdict} -->`,
+          submittedAt: f.comment(id, "").createdAt,
+          url: `https://github.com/owner/repo/pull/8#pullrequestreview-${id}`,
+        });
+        f.reviews.push(review("21", oldHead, "changes-requested"));
+        if (changedHead) {
+          f.snapshot.comments.push(f.comment("22", marker + "\nSecond development iteration complete."));
+          f.reviews.push(review("23", oldHead, "changes-requested"));
+          Object.assign(f.selected, { headSha: "2".repeat(40) });
+          f.snapshot.changeRequest = f.selected;
+        }
+        if (recorded !== "development") {
+          f.snapshot.comments.push(f.comment("24", marker + "\nCorrected development complete."));
+        }
+        if (stage === "awaiting-merge") f.reviews.push(review("25", f.selected.headSha, "approved"));
+        f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:" + stage];
+        await f.reset();
+        const result = await reconcileTicket(f.d as never, f.ref);
+        assert.equal(result.stateId, stage);
+        assert.equal(result.configRevision, f.target.revision);
+        const control = f.d.writeControl.load!(f.ref)!.value.control!;
+        assert.equal(control.changeRequest?.number, 8);
+        assert.equal(control.changeRequest?.headSha, f.selected.headSha);
+        assert.equal(f.counts().creates, 1);
+        if (recorded === "development-with-result") {
+          const request = f.starts.at(-1) as import("../../src/runtime/reconcile.ts").AttemptRequest;
+          assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === "24"), false);
+          assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === "20"), true);
+        }
+        if (stage === "awaiting-merge") {
+          for (const invalid of ["head", "verdict", "authorization"]) {
+            const rejection = f.reviews[0]!;
+            const original = structuredClone(rejection);
+            if (invalid === "head") rejection.headSha = "unverified";
+            if (invalid === "verdict") rejection.verdict = "commented";
+            if (invalid === "authorization") {
+              rejection.actor = { login: "outsider", providerId: "2" };
+              f.d.provider.permission = async (...args: unknown[]) =>
+                (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+            }
+            await f.reset();
+            const ambiguous = await reconcileTicket(f.d as never, f.ref);
+            assert.equal(ambiguous.stateId, null, invalid);
+            assert.equal(ambiguous.recoveryDisposition, "ambiguous", invalid);
+            Object.assign(rejection, original);
+          }
+        }
+      });
+    }
+  }
+});

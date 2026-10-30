@@ -134,3 +134,36 @@ test("agent-only migration at a replayed human gate retains its plan across empt
   assert.equal((await run.changeRequest())!.number, change!.number);
   assert.equal((await run.migrationReceipts()).length, 2);
 });
+
+
+test("development replay rework survives SQLite loss at development, review, and merge wait", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.changeRequest();
+  await run.requestChangesOnNextReview();
+  const target = await run.migrate("development", true);
+  await run.reconcile();
+  await run.untilState("review");
+  await run.blockNextAttempt("development");
+  await run.untilState("development");
+  await run.untilAttempt("started");
+  await run.changeHead();
+  await run.blockNextAttempt("review");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("review");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal((await run.changeRequest())!.body, before!.body);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  assert.equal(await run.maximumConcurrentAttempts(), 1);
+});

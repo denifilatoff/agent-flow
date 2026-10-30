@@ -796,10 +796,7 @@ async function recoveryIteration(
     .filter((publication) => {
       if (publication.ownershipEligible === false
         && publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) === "review") return false;
-      if (bundle.flow.spec.states[stage]?.resultContract !== "review"
-        || publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) !== "review") return true;
-      return evidence.reviews.some((review) => hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", review.id)
-        && review.headSha === evidence.snapshot.changeRequest?.headSha);
+      return true;
     })
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
@@ -827,6 +824,43 @@ async function recoveryIteration(
       if (!answered) break;
       active = active.slice(1);
     }
+  }
+  if (migration) {
+    for (const [developmentId, development] of Object.entries(bundle.flow.spec.states)) {
+      if (development.resultContract !== "development") continue;
+      const review = bundle.flow.spec.states[development.on?.["agent-succeeded"]?.target ?? ""];
+      if (review?.resultContract !== "review"
+        || review.on?.["review-changes-requested"]?.target !== developmentId) continue;
+      const prefix = successfulPublicationPath(bundle.flow, developmentId,
+        evidence.snapshot.activation.label, migration.receipt.start);
+      if (!prefix || !prefix.every((kind, index) => active[index]
+        && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === kind)) continue;
+      const index = prefix.length;
+      // A verified rejection closes that completion/review iteration, even if
+      // a later correction has moved the PR head. Keep both objects as context.
+      while (active[index] && active[index + 1]
+        && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === "comment"
+        && publicationObjectKind(active[index + 1]!.key, evidence.snapshot.ref, bundle) === "review") {
+        const completion = evidence.snapshot.comments.find((comment) =>
+          hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "comment", comment.id));
+        const rejection = evidence.reviews.find((candidate) =>
+          hasPublicationIdentity(active[index + 1]!.key, evidence.snapshot.ref, "review", candidate.id));
+        if (!completion || rejection?.verdict !== "changes-requested"
+          || !/^[0-9a-f]{40}$/.test(rejection.headSha)) break;
+        const permissions = await Promise.all([completion.actor, rejection.actor].map((actor) =>
+          providerCall("provider permission read failed", () =>
+            provider.permission(evidence.snapshot.ref.repository, actor))));
+        if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
+        active.splice(index, 2);
+      }
+    }
+  }
+  if (bundle.flow.spec.states[stage]?.resultContract === "review") {
+    active = active.filter((publication) =>
+      publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) !== "review"
+      || evidence.reviews.some((review) =>
+        hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", review.id)
+        && review.headSha === linked?.headSha));
   }
   const kinds = active.map((publication) => publicationObjectKind(publication.key, evidence.snapshot.ref, bundle));
   if (kinds.some((kind) => kind === null) || !active.every(({ key }) => baselineKeys.includes(key))) {

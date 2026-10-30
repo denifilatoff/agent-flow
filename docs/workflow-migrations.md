@@ -46,7 +46,10 @@ revised predecessor publications, empty-store recovery revalidates the newest pu
 pending human answer. Completed gate revisions remain history when reconstructing downstream development, review
 and merge-wait paths.
 Recovery uses authorized human input between publications to separate completed gate revisions from downstream
-results; a current agent result remains available for revalidation.
+results; a current agent result remains available for revalidation. Completed development/review rework pairs are also
+history when a marked, authorized changes-requested review closes a development completion. Recovery checks the
+review head and verdict evidence before isolating the corrected completion and current-head approval; earlier
+rejections can refer to an older head. This does not discard the current completion candidate or accept stale approval.
 Other preceding publications remain context rather than being automatically accepted again. Rules that change
 contracts cannot retain those changed result contracts.
 

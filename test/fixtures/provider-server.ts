@@ -98,6 +98,7 @@ export interface FixtureRun {
   activeProcesses(): Promise<number>;
   answer(body: string): Promise<void>;
   blockNextAttempt(state: string): Promise<void>;
+  requestChangesOnNextReview(): Promise<void>;
   changeHead(): Promise<void>;
   setCi(status: "success" | "pending" | "failure" | "missing"): Promise<void>;
   changeRequest(): Promise<NormalizedChangeRequest | null>;
@@ -302,6 +303,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     async activeProcesses() { return state.activeAttempts.size; },
     async answer(body) { state.addComment(body, MAINTAINER); },
     async blockNextAttempt(stateId) { state.nextModes.set(stateId, ["block"]); },
+    async requestChangesOnNextReview() { state.nextReviewVerdict = "changes-requested"; },
     async changeHead() { state.changeHead(); },
     async setCi(status) { state.ciStatus = status; },
     async changeRequest() { return state.normalizedChange(); },
@@ -524,6 +526,7 @@ class FixtureState {
   labels = ["agent-flow:development"];
   repairCiAfterFailure?: boolean;
   ciAfterReview?: "success" | "pending" | "failure";
+  nextReviewVerdict: "approved" | "changes-requested" = "approved";
   ciStatus: "success" | "pending" | "failure" | "missing" = "success";
   open = true;
   change: StoredChange | null = null;
@@ -795,7 +798,14 @@ class FixtureState {
       return { event: "agent-succeeded" };
     }
     if (state === "development") {
-      if(context.migration && !this.comments.some(c=>!context.migration!.baseline.comments.includes(c.id) && c.body===context.publicationMarker+"\nFixture development revalidated.")) this.addComment(context.publicationMarker+"\nFixture development revalidated.");
+      if (context.migration) {
+        const completion = this.comments.findLast((comment) =>
+          !context.migration!.baseline.comments.includes(comment.id)
+          && comment.body === context.publicationMarker + "\nFixture development revalidated.");
+        const rejected = completion && [...this.reviews.values()].some((review) =>
+          review.verdict === "changes-requested" && review.createdAt > completion.createdAt);
+        if (!completion || rejected) this.addComment(context.publicationMarker + "\nFixture development revalidated.");
+      }
       if (this.repairCiAfterFailure && this.change && this.ciStatus === "failure") {
         this.changeHead();
         this.ciStatus = "success";
@@ -813,12 +823,14 @@ class FixtureState {
     }
     if (state === "review") {
       if (!this.change) throw new Error("review change request is missing");
-      this.addReview(context.publicationMarker, "approved");
+      const verdict = this.nextReviewVerdict;
+      this.nextReviewVerdict = "approved";
+      this.addReview(context.publicationMarker, verdict);
       if (this.ciAfterReview) {
         this.ciStatus = this.ciAfterReview;
         this.ciAfterReview = undefined;
       }
-      return { event: "review-approved" };
+      return { event: verdict === "approved" ? "review-approved" : "review-changes-requested" };
     }
     if (state === "needs-human" && this.change?.state === "closed") {
       this.addComment(`${context.publicationMarker}\nReopen the existing change request or cancel the flow?`);
