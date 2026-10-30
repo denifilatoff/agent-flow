@@ -397,7 +397,9 @@ export async function runHarnessProcess(
       stopLifecycle();
       log.end();
       await logFinished;
-      if (logFailed) failure = new HarnessProcessError(target, false);
+      if (logFailed && !(failure instanceof HarnessTerminationError)) {
+        failure = new HarnessProcessError(target, false);
+      }
       guardLateErrors();
       if (failure) rejectResult(failure);
       else resolveResult({ exitCode, signal, timedOut });
@@ -456,6 +458,7 @@ export async function runHarnessProcess(
     }
 
     function processError(error: Error): void {
+      if (failure instanceof HarnessTerminationError) return;
       failure = new HarnessProcessError(target, processStarted ? false : !isMissingBinary(error));
       if (!processStarted) {
         void complete(null, null);
