@@ -678,53 +678,67 @@ for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
 
 }
 
-test("verification replay CI correction survives SQLite loss through subsequent stages", async (t) => {
-  for (const stage of ["bug-development", "development-without-result", "bug-review", "review-new-head", "bug-verification", "awaiting-merge", "unauthorized", "incomplete"]) {
-    await t.test(stage, async (t) => {
-      const f = await migrationFixture(t);
-      const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
-      f.snapshot.activation.label = "bugfix";
-      f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:awaiting-merge"];
-      f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest --resume-from bug-verification";
-      approveSourceHead(f);
-      assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, "bug-verification");
-      const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
-      f.snapshot.comments.push(f.comment("20", "# Bug receipt\nBUG RECEIPT · VERIFIED\n" + marker));
-      if (stage === "unauthorized") {
-        f.snapshot.comments.at(-1)!.actor = { login: "outsider", providerId: "2" };
-        f.d.provider.permission = async (...args: unknown[]) =>
-          (args[1] as { login: string }).login === "outsider" ? "read" : "write";
-      }
-      if (stage === "incomplete") f.snapshot.comments.at(-1)!.body = marker + "\nVerification pending";
-      if (stage !== "development-without-result") f.snapshot.comments.push(f.comment("21", marker + "\nCI correction complete"));
-      if (stage === "review-new-head") Object.assign(f.selected, { headSha: "2".repeat(40) });
-      if (["bug-verification", "awaiting-merge"].includes(stage)) f.reviews.push({
-        id: "22", headSha: f.selected.headSha, verdict: "approved", actor: f.selected.actor,
-        body: marker + `\n<!-- agent-flow-review:v1 head=${f.selected.headSha} verdict=approved -->`,
-        submittedAt: f.comment("22", "").createdAt,
-        url: "https://github.com/owner/repo/pull/8#pullrequestreview-22",
+for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
+  test(`${replay} replay CI correction survives SQLite loss through subsequent stages`, async (t) => {
+    for (const stage of ["bug-development", "development-without-result", "bug-review", "review-new-head", "bug-verification", "awaiting-merge", "unauthorized", "incomplete", ...(replay !== "bug-verification" ? ["unauthorized-approval"] : [])]) {
+      await t.test(stage, async (t) => {
+        const f = await migrationFixture(t);
+        const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+        f.snapshot.activation.label = "bugfix";
+        f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:awaiting-merge"];
+        f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest --resume-from " + replay;
+        approveSourceHead(f);
+        assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, replay);
+        const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+        if (replay === "bug-development") f.snapshot.comments.push(f.comment("18", marker + "\nDevelopment completed"));
+        if (replay !== "bug-verification") f.reviews.push({
+          id: "19", headSha: f.selected.headSha, verdict: "approved", actor: f.selected.actor,
+          body: marker + `\n<!-- agent-flow-review:v1 head=${f.selected.headSha} verdict=approved -->`,
+          submittedAt: f.comment("19", "").createdAt,
+          url: "https://github.com/owner/repo/pull/8#pullrequestreview-19",
+        });
+        if (stage === "unauthorized-approval") {
+          f.reviews.at(-1)!.actor = { login: "outsider", providerId: "2" };
+          f.d.provider.permission = async (...args: unknown[]) =>
+            (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+        }
+        f.snapshot.comments.push(f.comment("20", "# Bug receipt\nBUG RECEIPT · VERIFIED\n" + marker));
+        if (stage === "unauthorized") {
+          f.snapshot.comments.at(-1)!.actor = { login: "outsider", providerId: "2" };
+          f.d.provider.permission = async (...args: unknown[]) =>
+            (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+        }
+        if (stage === "incomplete") f.snapshot.comments.at(-1)!.body = marker + "\nVerification pending";
+        if (stage !== "development-without-result") f.snapshot.comments.push(f.comment("21", marker + "\nCI correction complete"));
+        if (stage === "review-new-head") Object.assign(f.selected, { headSha: "2".repeat(40) });
+        if (["bug-verification", "awaiting-merge"].includes(stage)) f.reviews.push({
+          id: "22", headSha: f.selected.headSha, verdict: "approved", actor: f.selected.actor,
+          body: marker + `\n<!-- agent-flow-review:v1 head=${f.selected.headSha} verdict=approved -->`,
+          submittedAt: f.comment("22", "").createdAt,
+          url: "https://github.com/owner/repo/pull/8#pullrequestreview-22",
+        });
+        if (stage === "awaiting-merge") f.snapshot.comments.push(
+          f.comment("23", "# Bug receipt\nBUG RECEIPT · VERIFIED\n" + marker));
+        const recorded = ["unauthorized", "incomplete", "unauthorized-approval", "development-without-result"].includes(stage)
+          ? "bug-development" : stage === "review-new-head" ? "bug-review" : stage;
+        f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:" + recorded];
+        await f.reset();
+        const result = await reconcileTicket(f.d as never, f.ref);
+        if (["unauthorized", "incomplete", "unauthorized-approval"].includes(stage)) {
+          assert.equal(result.recoveryDisposition, "ambiguous");
+          return;
+        }
+        assert.equal(result.stateId, stage === "awaiting-merge" ? "bug-verification" : recorded, result.recoveryReason);
+        assert.equal(result.configRevision, f.target.revision);
+        assert.equal(f.counts().creates, 1);
+        const request = f.starts.at(-1) as import("../../src/runtime/reconcile.ts").AttemptRequest;
+        assert.ok(request.publicationKeys.some((key) => JSON.parse(key)[4] === "20"));
+        if (stage === "bug-development") assert.ok(!request.publicationKeys.some((key) => JSON.parse(key)[4] === "21"));
+        if (stage === "awaiting-merge") assert.ok(!request.publicationKeys.some((key) => JSON.parse(key)[4] === "23"));
       });
-      if (stage === "awaiting-merge") f.snapshot.comments.push(
-        f.comment("23", "# Bug receipt\nBUG RECEIPT · VERIFIED\n" + marker));
-      const recorded = ["unauthorized", "incomplete", "development-without-result"].includes(stage)
-        ? "bug-development" : stage === "review-new-head" ? "bug-review" : stage;
-      f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:" + recorded];
-      await f.reset();
-      const result = await reconcileTicket(f.d as never, f.ref);
-      if (["unauthorized", "incomplete"].includes(stage)) {
-        assert.equal(result.recoveryDisposition, "ambiguous");
-        return;
-      }
-      assert.equal(result.stateId, stage === "awaiting-merge" ? "bug-verification" : recorded, result.recoveryReason);
-      assert.equal(result.configRevision, f.target.revision);
-      assert.equal(f.counts().creates, 1);
-      const request = f.starts.at(-1) as import("../../src/runtime/reconcile.ts").AttemptRequest;
-      assert.ok(request.publicationKeys.some((key) => JSON.parse(key)[4] === "20"));
-      if (stage === "bug-development") assert.ok(!request.publicationKeys.some((key) => JSON.parse(key)[4] === "21"));
-      if (stage === "awaiting-merge") assert.ok(!request.publicationKeys.some((key) => JSON.parse(key)[4] === "23"));
-    });
-  }
-});
+    }
+  });
+}
 
 test("verification replay cannot recover an unexplained review label at the receipt head", async (t) => {
   const f = await migrationFixture(t);

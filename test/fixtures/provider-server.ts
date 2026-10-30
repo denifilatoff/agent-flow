@@ -808,7 +808,10 @@ class FixtureState {
           && comment.body === context.publicationMarker + "\nFixture development revalidated.");
         const rejected = completion && [...this.reviews.values()].some((review) =>
           review.verdict === "changes-requested" && review.createdAt > completion.createdAt);
-        if (!completion || rejected) this.addComment(context.publicationMarker + "\nFixture development revalidated.");
+        const verified = completion && this.comments.some((comment) =>
+          comment.createdAt > completion.createdAt
+          && comment.body === context.publicationMarker + "\nBUG RECEIPT · VERIFIED");
+        if (!completion || rejected || verified) this.addComment(context.publicationMarker + "\nFixture development revalidated.");
       }
       if (this.repairCiAfterFailure && this.change && this.ciStatus === "failure") {
         this.changeHead();

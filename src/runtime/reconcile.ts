@@ -807,23 +807,41 @@ async function recoveryIteration(
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
   let recoveryStart = migration?.receipt.start;
-  const replayState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
-  const ciTarget = replayState?.on?.["ci-failed"]?.target;
-  if (migration && replayState?.resultContract === "verification"
-    && bundle.flow.spec.requiredChecks?.length && ciTarget
-    && bundle.flow.spec.states[ciTarget]?.resultContract === "development"
-    && (stage === ciTarget || (active[1]
-      && publicationObjectKind(active[1].key, evidence.snapshot.ref, bundle) === "comment"))) {
-    // Required CI can reject a published verification result and return before
-    // the replay boundary. Retire that authorized diagnostic, then reconstruct
-    // correction from the declared CI target without consuming its new result.
-    const completion = active[0] && evidence.snapshot.comments.find((comment) =>
-      hasPublicationIdentity(active[0]!.key, evidence.snapshot.ref, "comment", comment.id));
-    if (completion?.body.split(/\r?\n/)[1] === "BUG RECEIPT · VERIFIED") {
-      const permission = await providerCall("provider permission read failed", () =>
-        provider.permission(evidence.snapshot.ref.repository, completion.actor));
-      if (AUTHORIZED.has(permission)) {
-        active = active.slice(1);
+  if (migration && bundle.flow.spec.requiredChecks?.length) {
+    for (const [verificationId, verification] of Object.entries(bundle.flow.spec.states)) {
+      const ciTarget = verification.on?.["ci-failed"]?.target;
+      if (verification.resultContract !== "verification" || !ciTarget
+        || bundle.flow.spec.states[ciTarget]?.resultContract !== "development") continue;
+      // A verification failure can follow any earlier replay stage. Match the
+      // complete successful prefix before retiring that failed CI iteration.
+      while (true) {
+        const prefix = successfulPublicationPath(bundle.flow, verificationId,
+          evidence.snapshot.activation.label, recoveryStart);
+        if (!prefix || !prefix.every((kind, index) => active[index]
+          && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === kind)) break;
+        const diagnostic = active[prefix.length];
+        const next = active[prefix.length + 1];
+        if (!diagnostic || (stage !== ciTarget && (!next
+          || publicationObjectKind(next.key, evidence.snapshot.ref, bundle) !== "comment"))) break;
+        const completion = evidence.snapshot.comments.find((comment) =>
+          hasPublicationIdentity(diagnostic.key, evidence.snapshot.ref, "comment", comment.id));
+        if (completion?.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
+        const results = active.slice(0, prefix.length).map((publication, index) => {
+          if (prefix[index] === "review") {
+            const review = evidence.reviews.find((candidate) =>
+              hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", candidate.id));
+            return review?.verdict === "approved" && /^[0-9a-f]{40}$/.test(review.headSha) ? review : undefined;
+          }
+          return evidence.snapshot.comments.find((comment) =>
+            hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
+        });
+        if (results.some((result) => !result)) break;
+        const permissions = await Promise.all([...results, completion].map((result) =>
+          providerCall("provider permission read failed", () =>
+            provider.permission(evidence.snapshot.ref.repository, result!.actor))));
+        if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
+        // Keep the correction result available for ordinary contract validation.
+        active = active.slice(prefix.length + 1);
         recoveryStart = ciTarget;
       }
     }
