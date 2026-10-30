@@ -776,7 +776,10 @@ async function recoveryIteration(
     }
     return { kind: "ready", baselineKeys, humanCutoff: cutoff };
   }
-  if(evidence.migration?.receipt.start===stage && bundle.flow.spec.states[stage]?.kind==="provider-wait" && evidence.migration.receipt.retained.length) return {kind:"ready",baselineKeys,humanCutoff:null};
+  if (migration?.receipt.start === stage && bundle.flow.spec.states[stage]?.kind === "provider-wait"
+    && migration.receipt.retained.length && linked?.headSha === migration.receipt.change.headSha) {
+    return { kind: "ready", baselineKeys, humanCutoff: null };
+  }
   if (!evidence.migration && bundle.flow.spec.states[stage]?.kind === "provider-wait" && linked?.state === "merged") {
     const linkedPublication = evidence.publications.some((publication) =>
       publication.metadata.controller === ownerController
@@ -797,6 +800,16 @@ async function recoveryIteration(
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
   let recoveryStart = migration?.receipt.start;
+  const retainedWait = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
+  const updatedTarget = retainedWait?.on?.["change-request-updated"]?.target;
+  if (migration && retainedWait?.kind === "provider-wait" && migration.receipt.retained.length
+    && linked && /^[0-9a-f]{40}$/.test(linked.headSha)
+    && linked.headSha !== migration.receipt.change.headSha
+    && updatedTarget && bundle.flow.spec.states[updatedTarget]?.resultContract === "review") {
+    // The receipt's approval covers its observed head. A later head follows
+    // the declared update transition and needs a fresh review publication.
+    recoveryStart = updatedTarget;
+  }
   const startState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
   const reworkTarget = startState?.on?.["review-changes-requested"]?.target;
   if (migration && startState?.resultContract === "review" && reworkTarget

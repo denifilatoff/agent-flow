@@ -53,6 +53,10 @@ rejections can refer to an older head. This does not discard the current complet
 A review-only replay can return to development before its receipt start stage. Recovery first verifies the
 post-migration rejection and its author, then reconstructs correction and fresh approval from the declared
 development target. Missing or invalid rejection evidence cannot justify that backward transition.
+A compatible migration that retains merge wait retains approval only for the receipt's observed PR head.
+If that head changes, recovery follows the flow's declared `change-request-updated` transition to review before
+reconstructing later results. Empty-store recovery can resume that review, but returning to merge wait requires
+an authorized fresh approval of the current head; the retained approval cannot satisfy it.
 When required CI routes back to development, successive authorized development completions can supersede earlier
 completions without a rejection review. Recovery keeps the newest completion available for revalidation and still
 requires current-head CI and approval. Intervening human input remains subject to human-gate recovery checks.

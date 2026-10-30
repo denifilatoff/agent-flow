@@ -453,6 +453,58 @@ test("unchanged-contract migration without replay retains only explicitly refere
   );
 });
 
+test("no-replay merge-wait migration recovers a changed head through fresh review", async (t) => {
+  for (const stage of ["review", "awaiting-merge"]) {
+    await t.test(stage, async (t) => {
+      const f = await migrationFixture(t);
+      const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+      f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest";
+      const review = (id: string, config: string, headSha: string) => ({
+        id, headSha, verdict: "approved", actor: f.selected.actor,
+        body: `<!-- agent-flow:v1 {"config":"${config}","controller":"${f.d.controllerId}"} -->`
+          + `\n<!-- agent-flow-review:v1 head=${headSha} verdict=approved -->`,
+        submittedAt: f.comment(id, "").createdAt,
+        url: `https://github.com/owner/repo/pull/8#pullrequestreview-${id}`,
+      });
+      f.reviews.push(review("2", f.source.revision, f.selected.headSha));
+      assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, "awaiting-merge");
+      Object.assign(f.selected, { headSha: "2".repeat(40) });
+      f.snapshot.changeRequest = f.selected;
+      if (stage === "awaiting-merge") f.reviews.push(review("21", f.target.revision, f.selected.headSha));
+      f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:" + stage];
+      await f.reset();
+      const recovered = await reconcileTicket(f.d as never, f.ref);
+      assert.equal(recovered.stateId, stage);
+      assert.equal(recovered.configRevision, f.target.revision);
+      assert.equal(f.d.writeControl.load!(f.ref)!.value.control!.changeRequest?.headSha, f.selected.headSha);
+      assert.equal(f.counts().creates, 1);
+      if (stage === "review") {
+        assert.equal(f.starts.length, 1);
+      } else {
+        for (const invalid of ["head", "verdict", "authorization", "missing"]) {
+          const original = structuredClone(f.reviews[1]!);
+          if (invalid === "head") f.reviews[1]!.headSha = "3".repeat(40);
+          if (invalid === "verdict") f.reviews[1]!.verdict = "commented";
+          if (invalid === "authorization") {
+            f.reviews[1]!.actor = { login: "outsider", providerId: "2" };
+            f.d.provider.permission = async (...args: unknown[]) =>
+              (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+          }
+          if (invalid === "missing") f.reviews.pop();
+          f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:awaiting-merge"];
+          await f.reset();
+          const rejected = await reconcileTicket(f.d as never, f.ref);
+          assert.notEqual(rejected.stateId, "awaiting-merge", invalid);
+          if (invalid === "authorization") {
+            assert.equal(rejected.recoveryDisposition, "ambiguous", invalid);
+          }
+          f.reviews[1] = original;
+        }
+      }
+    });
+  }
+});
+
 test("duplicate migration reconciliation preserves surviving replay retry consumption and input identity", async (t) => {
   const f = await migrationFixture(t),
     { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
