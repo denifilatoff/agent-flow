@@ -632,3 +632,90 @@ test("committed migrations replace stale paused source labels before repair and 
     }
   }
 });
+
+test("no-replay migrations retain each human gate's predecessor and wait for fresh human input after recovery", async (t) => {
+  for (const [gate, predecessor, label] of [
+    ["assessment-review", "assessment", "agent-flow:development"],
+    ["plan-review", "planning", "agent-flow:development"],
+    ["bug-reproduction-review", "bug-reproduction", "bugfix"],
+  ] as const) {
+    await t.test(gate, async (t) => {
+      const f = await migrationFixture(t);
+      const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+      const { readFile } = await import("node:fs/promises");
+      const { parse } = await import("yaml");
+      f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+      f.target.flow = structuredClone(f.source.flow);
+      f.snapshot.activation.label = label;
+      f.snapshot.labels = ["agent-flow:managed", label, "agent-stage:" + gate];
+      f.snapshot.comments[0]!.body = f.snapshot.comments[0]!.body.replace("Assessment", "Completed " + predecessor);
+      f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest";
+      const committed = await processMigration(f.d as never, f.raw() as never);
+      assert.equal(committed.migration?.receipt.start, gate);
+      assert.equal(committed.migration?.receipt.retained[0]?.stage, predecessor);
+      for (const restart of [false, true]) {
+        if (restart) await f.reset();
+        const result = await reconcileTicket(f.d as never, f.ref);
+        assert.equal(result.stateId, gate);
+        assert.equal(result.configRevision, f.target.revision);
+        assert.equal(f.starts.length, 0);
+        assert.equal(f.counts().creates, 1);
+      }
+    });
+  }
+});
+
+test("no-replay human-gate migration rejects missing predecessor provenance before commitment", async (t) => {
+  const f = await migrationFixture(t);
+  const { readFile } = await import("node:fs/promises");
+  const { parse } = await import("yaml");
+  f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+  f.target.flow = structuredClone(f.source.flow);
+  f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:plan-review"];
+  f.snapshot.comments[0]!.body = "Unmarked context";
+  f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest";
+  await processMigration(f.d as never, f.raw() as never);
+  assert.equal(f.counts().creates, 1);
+  assert.match(f.snapshot.comments.at(-1)!.body, /Cannot retain human gate without a verified predecessor/);
+  assert.ok(f.snapshot.labels.includes("agent-stage:plan-review"));
+  assert.equal(f.d.writeControl.load!(f.ref), null);
+});
+
+test("no-replay human-gate migration preserves consumed input and leaves a pending answer eligible", async (t) => {
+  const f = await migrationFixture(t);
+  const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+  const { readFile } = await import("node:fs/promises");
+  const { parse } = await import("yaml");
+  f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+  f.target.flow = structuredClone(f.source.flow);
+  f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:plan-review"];
+  f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest";
+  await reconcileTicket(f.d as never, f.ref);
+  const current = f.d.writeControl.load!(f.ref)!.value.control!;
+  const question = f.comment("20", "What is the plan's deployment strategy?");
+  f.snapshot.comments.push(question, f.comment("21", "Approved"));
+  await f.d.writeControl(f.ref, current, {
+    ...current, sequence: current.sequence + 1, updatedAt: question.createdAt,
+    humanGate: {
+      sourceCommentId: question.id, actor: question.actor, verdict: "question", notes: [],
+      interpretedByAttemptId: "11111111-1111-4111-8111-111111111111",
+    },
+  });
+  const next = { ...f.target, revision: "c".repeat(40) };
+  f.d.config.loadPinned = async (sha) => sha === f.source.revision ? f.source : sha === f.target.revision ? f.target : next;
+  f.d.config.resolveTarget = async () => next.revision;
+  f.snapshot.comments.push(f.comment("22", "/agent-flow migrate --pr 8 --to latest"));
+  for (const restart of [false, true]) {
+    if (restart) await f.reset();
+    const result = await reconcileTicket(f.d as never, f.ref);
+    assert.equal(result.stateId, "plan-review");
+    assert.equal(result.configRevision, next.revision);
+    assert.equal((f.starts.at(-1) as import("../../src/runtime/reconcile.ts").AttemptRequest).sourceComment?.id, "21");
+  }
+  question.body += " (edited after acceptance)";
+  const { recoverMigration } = await import("../../src/runtime/migration-recovery.ts");
+  await assert.rejects(
+    recoverMigration(f.raw() as never, f.d.config.loadPinned, f.d.provider as never),
+    /Retained human gate input is unavailable or changed/,
+  );
+});

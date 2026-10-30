@@ -36,8 +36,14 @@ A failed latest revision never falls back to another cached revision.
 
 `retain` permits retention; it does not require every historical publication to remain eligible. Historical results
 and owner answers always remain context. The current implementation explicitly references an unchanged-contract,
-current-head review when retaining merge wait without replay. Other preceding publications remain context rather than
-being automatically accepted again. Rules that change contracts cannot retain those changed result contracts.
+current-head review when retaining merge wait without replay. A no-replay migration at a human gate explicitly
+retains its verified predecessor comment (assessment, plan, or reproduction), including its content digest. Recovery
+keeps that gate waiting from the retained result rather than repeating the predecessor; later justified progress
+is reconstructed from the gate onward. Optional receipt `source.humanInput` records the ID and body digest of the
+last interpreted human comment so recovery can skip consumed input while leaving a pending answer eligible.
+Missing predecessor evidence rejects the migration and requests an explicit replay. Other preceding publications
+remain context rather than being automatically accepted again. Rules that change contracts cannot retain those
+changed result contracts.
 
 ## Complete examples
 

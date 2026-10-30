@@ -232,6 +232,51 @@ export async function processMigration(
           continue;
         }
         const retained: MigrationReceipt["retained"] = [];
+        let humanInput: MigrationReceipt["source"]["humanInput"];
+        if (
+          !command.resume &&
+          target.flow.spec.states[selection.stage]?.kind === "human-gate"
+        ) {
+          const predecessors = selection.retain.filter(
+            (stage) =>
+              source.flow.spec.states[stage]?.kind === "agent" &&
+              source.flow.spec.states[stage]?.on?.["agent-succeeded"]?.target === selection.stage,
+          );
+          const publication = e.publications
+            .filter((p) =>
+              publicationIdentity(p.key)[0] === "comment" &&
+              p.metadata.controller === d.controllerId &&
+              p.metadata.config === sourcePin && p.ownershipEligible !== false)
+            .toSorted((a, b) => a.createdAt.localeCompare(b.createdAt) || a.key.localeCompare(b.key))
+            .at(-1);
+          const result = publication && e.snapshot.comments.find(
+            (c) => c.id === publicationIdentity(publication.key)[1],
+          );
+          if (predecessors.length !== 1 || !publication || !result)
+            throw new Error(
+              "Cannot retain human gate without a verified predecessor result; request an explicit replay",
+            );
+          retained.push({
+            key: publication.key,
+            stage: predecessors[0]!,
+            digest: digest(result.body),
+          });
+          const consumedId = cached?.humanGate?.sourceCommentId ??
+            (e.migration?.receipt.start === sourceStage
+              ? e.migration.receipt.source.humanInput?.id : undefined);
+          const consumed = e.snapshot.comments.find((c) => c.id === consumedId);
+          if (consumed && consumed.createdAt > result.createdAt) {
+            if (
+              parsePublication(consumed.body).kind !== "unmarked" ||
+              isMigrationCommand(consumed.body) ||
+              !authorized.has(await d.provider.permission(e.snapshot.ref.repository, consumed.actor))
+            )
+              throw new Error("Consumed human gate input cannot be verified");
+            humanInput = { id: consumed.id, digest: digest(consumed.body) };
+          } else if (consumedId && !consumed) {
+            throw new Error("Consumed human gate input is unavailable");
+          }
+        }
         if (
           !command.resume &&
           target.flow.spec.states[selection.stage]?.kind === "provider-wait"
@@ -305,7 +350,10 @@ export async function processMigration(
             createdAt: request.createdAt,
             updatedAt: request.updatedAt,
           },
-          source: { config: sourcePin, stage: sourceStage, resume },
+          source: {
+            config: sourcePin, stage: sourceStage, resume,
+            ...humanInput ? { humanInput } : {},
+          },
           target: {
             config: sha,
             flow: target.flow.metadata.id,

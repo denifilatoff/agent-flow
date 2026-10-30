@@ -85,3 +85,38 @@ test("changed-CI migration of fixture issue 2 preserves PR 8 despite incidental 
   assert.equal((await run.changeRequest())!.number, 8);
   assert.equal((await run.migrationReceipts()).length, 1);
 });
+
+test("agent-only migration at a replayed human gate retains its plan across empty-store recovery", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const change = await run.changeRequest();
+  await run.migrate("planning");
+  await run.reconcile();
+  await run.untilState("plan-review");
+  const comments = await run.agentCommentIds();
+  const target = await run.migrate(undefined, true);
+  await run.reconcile();
+  assert.equal((await run.control()).stateId, "plan-review");
+  assert.equal((await run.control()).configRevision, target);
+  const receipt = parseMigrationReceipt((await run.migrationReceipts())[1]!)!.receipt;
+  assert.equal(receipt.start, "plan-review");
+  assert.equal(receipt.retained.at(-1)?.stage, "planning");
+  const migratedComments = await run.agentCommentIds();
+  assert.equal(migratedComments.length, comments.length + 1);
+  await run.resetDatabaseAndRestart();
+  await run.reconcile();
+  assert.equal((await run.control()).stateId, "plan-review");
+  assert.equal((await run.control()).configRevision, target);
+  assert.deepEqual(await run.agentCommentIds(), migratedComments);
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.changeRequest())!.number, change!.number);
+  assert.equal((await run.migrationReceipts()).length, 2);
+});

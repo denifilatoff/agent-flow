@@ -192,6 +192,20 @@ export async function recoverMigration(
       selection.noop
     )
       throw new Error("Migration compatibility decision conflicts");
+    if (r.source.humanInput) {
+      const input = evidence.snapshot.comments.find((c) => c.id === r.source.humanInput!.id);
+      if (
+        command.resume || r.start !== r.source.stage ||
+        target.flow.spec.states[r.start]?.kind !== "human-gate" ||
+        !input || !r.baseline.comments.includes(input.id) ||
+        digest(input.body) !== r.source.humanInput.digest ||
+        parsePublication(input.body).kind !== "unmarked" ||
+        input.createdAt > r.request.createdAt ||
+        (provider && !["admin", "write", "maintain"].includes(
+          await provider.permission(r.ticket.repository, input.actor)))
+      )
+        throw new Error("Retained human gate input is unavailable or changed");
+    }
     for (const retained of r.retained) {
       if (!selection.retain.includes(retained.stage))
         throw new Error("Migration retains forbidden stage result");

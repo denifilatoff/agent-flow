@@ -744,6 +744,19 @@ function recoveryIteration(
 ): RecoveryIteration {
   const baselineKeys = markedObjectKeys(bundle, evidence, apiUrl);
   const linked = evidence.snapshot.changeRequest;
+  const migration = evidence.migration;
+  if (migration?.receipt.start === stage && bundle.flow.spec.states[stage]?.kind === "human-gate") {
+    const predecessor = migration.receipt.retained.filter((retained) =>
+      bundle.flow.spec.states[retained.stage]?.on?.["agent-succeeded"]?.target === stage);
+    const result = predecessor.length === 1 && evidence.snapshot.comments.find((comment) =>
+      hasPublicationIdentity(predecessor[0]!.key, evidence.snapshot.ref, "comment", comment.id));
+    if (!result) return { kind: "ambiguous", baselineKeys, reason: "Migrated human gate predecessor is unavailable" };
+    const input = evidence.snapshot.comments.find((comment) => comment.id === migration.receipt.source.humanInput?.id);
+    return {
+      kind: "ready", baselineKeys,
+      humanCutoff: input && input.createdAt > result.createdAt ? input.createdAt : result.createdAt,
+    };
+  }
   if(evidence.migration?.receipt.start===stage && bundle.flow.spec.states[stage]?.kind==="provider-wait" && evidence.migration.receipt.retained.length) return {kind:"ready",baselineKeys,humanCutoff:null};
   if (!evidence.migration && bundle.flow.spec.states[stage]?.kind === "provider-wait" && linked?.state === "merged") {
     const linkedPublication = evidence.publications.some((publication) =>
@@ -759,6 +772,7 @@ function recoveryIteration(
     return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
   }
   const active = evidence.publications
+    .filter((publication) => !migration?.receipt.retained.some((retained) => retained.key === publication.key))
     .filter(({ metadata }) => ownerController === null || metadata.controller === ownerController)
     .filter((publication) => {
       if (publication.ownershipEligible === false

@@ -22,7 +22,12 @@ export interface MigrationReceipt {
     createdAt: string;
     updatedAt: string;
   };
-  source: { config: string; stage: string; resume: string | null };
+  source: {
+    config: string;
+    stage: string;
+    resume: string | null;
+    humanInput?: { id: string; digest: string };
+  };
   target: { config: string; flow: string; label: string; basis: string };
   change: {
     provider: "github" | "gitlab";
