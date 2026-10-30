@@ -436,7 +436,7 @@ export async function loadPinnedConfig(
 export async function resolveMigrationTarget(
  prepared:PreparedConfigurationRepository, selector:string, authentication?:GitAuthentication,
 ):Promise<string> {
- if(selector!=='latest' && !SHA.test(selector) && (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(selector) || selector==='HEAD' || selector.includes('..'))) {
+ if(selector!=='latest' && !SHA.test(selector) && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(selector) || selector==='HEAD' || selector.includes('..') || selector.startsWith('refs/') || selector.split('/').some(part=>!part || part==='.'))) {
   throw new Error('Invalid migration selector: use latest, a tag, or a full SHA');
  }
  const configured=configurationSource(prepared.source);

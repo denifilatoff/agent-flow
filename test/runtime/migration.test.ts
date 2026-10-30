@@ -20,12 +20,13 @@ async function migrationFixture(t:import('node:test').TestContext) {
  const selected={provider:'github',repository:ref.repository,number:8,url:'https://github.com/owner/repo/pull/8',headRepository:ref.repository,headBranch:'feature',headSha:'1'.repeat(40),state:'open',body:marker,actor,createdAt:'2026-10-30T00:01:02Z',updatedAt:'2026-10-30T00:01:02Z'} as const;
  const snapshot={ref,repository:{provider:'github',name:ref.repository,host:'github.com',cloneRoot:'https://github.com/',cloneUrl:'https://github.com/owner/repo.git'},title:'migration',description:'ticket',open:true,labels:['agent-flow:managed','agent-flow:development','agent-stage:awaiting-merge'],updatedAt:'2026-10-30T00:02:00Z',activation:{present:true,label:'agent-flow:development',eventId:'activation',actor,occurredAt:'2026-10-30T00:00:00Z'},comments:[comment('1',marker+'\nAssessment'),comment('3','/agent-flow migrate --pr 8 --to latest --resume-from development')],changeRequest:selected};
  const key=(kind:string,id:string)=>JSON.stringify(['github','https://api.github.com/',ref.repository,kind,id]);
- const raw=()=>({snapshot:structuredClone(snapshot),complete:true,activeBoundary:'known',legacyActive:false,ambiguities:[],changes:[structuredClone(selected)],reviews:[],publications:[...snapshot.comments.flatMap(c=>{const p=parsePublication(c.body);return p.kind==='current'?[{key:key('comment',c.id),createdAt:c.createdAt,metadata:p.metadata}]:[];}),{key:key('change-request','8'),createdAt:selected.createdAt,metadata:{config:sourceSha,controller}}]});
+ const reviews:Array<{id:string;body:string;headSha:string;verdict:string;submittedAt:string;actor:typeof actor;url:string}>=[];
+ const raw=()=>({snapshot:structuredClone(snapshot),complete:true,activeBoundary:'known',legacyActive:false,ambiguities:[],changes:[structuredClone(selected)],reviews:structuredClone(reviews),publications:[...reviews.map(r=>({key:key("review",r.id),createdAt:r.submittedAt,metadata:{config:targetSha,controller}})),...snapshot.comments.flatMap(c=>{const p=parsePublication(c.body);return p.kind==='current'?[{key:key('comment',c.id),createdAt:c.createdAt,metadata:p.metadata}]:[];}),{key:key('change-request','8'),createdAt:selected.createdAt,metadata:{config:sourceSha,controller}}]});
  let next=4,resolves=0,creates=0,cancels=0;const starts:unknown[]=[];
  const provider={kind:'github',permission:async()=> 'write',readRecoveryEvidence:async()=>raw(),readTicket:async()=>structuredClone(snapshot),readChangeRequest:async()=>structuredClone(selected),readComment:async(_ref:unknown,id:string)=>snapshot.comments.find(c=>c.id===id)!,createComment:async(_ref:unknown,body:string)=>{creates++;const c=comment(String(next++),body);snapshot.comments.push(c);return c;},setControllerLabels:async(_ref:unknown,remove:string[],add:string[])=>{snapshot.labels=snapshot.labels.filter(l=>!remove.includes(l));snapshot.labels.push(...add);return snapshot.labels;}};
  const writeControl=createControlWriter(store,providerScope('github','https://api.github.com'),controller);
  const d={provider,controllerId:controller,writeControl,config:{loadPinned:async(sha:string)=>sha===sourceSha?source:target,loadCurrent:async()=>target,resolveTarget:async()=>{resolves++;return targetSha;}},launcher:{start:async(request:unknown)=>{starts.push(request);},cancel:async()=>{cancels++;},isRunning:()=>false}};
- return {d,raw,snapshot,selected,source,target,starts,writeControl,ref,counts:()=>({resolves,creates,cancels})};
+ return {d,raw,snapshot,selected,source,target,starts,writeControl,ref,reviews,comment,async reset(){const empty=await openLocalStore(join(root,"empty-"+next+++".sqlite"));t.after(()=>empty.close());d.writeControl=createControlWriter(empty,providerScope("github","https://api.github.com"),controller);},counts:()=>({resolves,creates,cancels})};
 }
 
 test('receipt commit/readback carries PR 8 and duplicate reconciliation preserves one replay boundary',async(t)=>{
@@ -66,4 +67,17 @@ test('incomplete receipt readback retries only from a complete provider snapshot
  f.d.provider.readRecoveryEvidence=async()=>{const result=await read();reads++;if(reads===3)result.complete=false;return result;};
  await reconcileTicket(f.d as never,f.ref);assert.equal(f.starts.length,0);
  await reconcileTicket(f.d as never,f.ref);assert.equal(f.starts.length,1);assert.equal(f.counts().creates,1);
+});
+
+test('empty SQLite recovers the committed replay and later justified progress without rewinding',async(t)=>{
+ const f=await migrationFixture(t),{reconcileTicket}=await import('../../src/runtime/reconcile.ts'),{renderPublication}=await import('../../src/provider/publication.ts');
+ await reconcileTicket(f.d as never,f.ref);await f.reset();
+ assert.equal((await reconcileTicket(f.d as never,f.ref)).stateId,'development');
+ const marker=renderPublication({config:f.target.revision,controller:f.d.controllerId});
+ f.snapshot.comments.push(f.comment('20',marker+'\nDevelopment revalidated'));f.snapshot.labels=f.snapshot.labels.filter(l=>!l.startsWith('agent-stage:')).concat('agent-stage:review');
+ await f.reset();assert.equal((await reconcileTicket(f.d as never,f.ref)).stateId,'review');
+ f.reviews.push({id:'701',body:marker+'\n<!-- agent-flow-review:v1 head='+f.selected.headSha+' verdict=approved -->',headSha:f.selected.headSha,verdict:'approved',submittedAt:'2026-10-30T00:02:00Z',actor:f.snapshot.activation.actor,url:'https://github.com/owner/repo/pull/8#pullrequestreview-701'});
+ f.snapshot.labels=f.snapshot.labels.filter(l=>!l.startsWith('agent-stage:')).concat('agent-stage:awaiting-merge');
+ await f.reset();assert.equal((await reconcileTicket(f.d as never,f.ref)).stateId,'awaiting-merge');
+ assert.equal(f.counts().creates,1);
 });

@@ -12,7 +12,7 @@ export function parseMigrationRequest(body:string):MigrationRequest|null {
  }
  const pr=options.get('--pr'),to=options.get('--to'),resume=options.get('--resume-from');
  if(!pr || !/^[1-9][0-9]*$/.test(pr) || !Number.isSafeInteger(Number(pr)) || !to) throw new Error('Migration requires --pr and --to');
- if(to!=='latest' && (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(to) || to==='HEAD' || to.includes('..'))) throw new Error('Invalid migration selector');
+ if(to!=='latest' && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(to) || to==='HEAD' || to.includes('..') || to.startsWith('refs/') || to.split('/').some(part=>!part || part==='.'))) throw new Error('Invalid migration selector');
  if(resume && !/^[a-z][a-z0-9-]*$/.test(resume)) throw new Error('Invalid replay stage');
  return {pr:Number(pr),to,...resume?{resume}:{}};
 }

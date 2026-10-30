@@ -346,7 +346,7 @@ async function reconcileLocal(
     let stage = freshStart ? entry : providerStage(snapshot, bundle.flow);
     if(boundary) {
       const sourceLabel=boundary.receipt.source.stage==="bug-awaiting-merge"?"awaiting-merge":boundary.receipt.source.stage;
-      if(snapshot.labels.includes("agent-stage:"+sourceLabel)) stage=boundary.receipt.start;
+      if(snapshot.labels.includes("agent-stage:"+sourceLabel) && recoveryIteration(bundle,evidence,stage,decision.owner?.metadata.controller??null,dependencies.providerApiUrl).kind==="ambiguous") stage=boundary.receipt.start;
     }
     stage = freshReviewTarget(bundle.flow, stage, evidence, controllerId) ?? stage;
     if (decision.kind === "resume" && evidence.activeBoundary !== "fresh" && stage !== entryStage(bundle.flow, snapshot.activation.label)) {
@@ -766,7 +766,7 @@ function recoveryIteration(
   const recorded = bundle.flow.spec.states[stage];
   const predecessors = Object.entries(bundle.flow.spec.states).filter(([, state]) =>
     state.kind === "agent" && state.on?.["agent-succeeded"]?.target === stage
-    && resultPublicationKind(state.resultContract) === "comment");
+    && resultPublicationKind(state.resultContract,Boolean(evidence.migration)) === "comment");
   if ((recorded?.kind === "human-gate" || recorded?.kind === "provider-wait") && predecessors.length === 1) {
     const predecessor = predecessors[0]![0];
     const prefix = committed.slice(0, -1);
@@ -796,7 +796,7 @@ function recoveryIteration(
     return { kind: "ambiguous", baselineKeys, reason: "published review does not approve the linked change request head" };
   }
   const state = bundle.flow.spec.states[stage];
-  const candidateKind = state?.kind === "agent" ? resultPublicationKind(state.resultContract) : null;
+  const candidateKind = state?.kind === "agent" ? resultPublicationKind(state.resultContract,Boolean(evidence.migration)) : null;
   let candidateKey: string | null = null;
   if (active.length === committed.length + 1 && candidateKind && kinds.at(-1) === candidateKind) {
     candidateKey = active.at(-1)!.key;
@@ -831,7 +831,7 @@ function successfulPublicationPath(flow: FlowDefinition, target: string, activat
       const transition = state.on?.[event];
       if (!transition || transition.target === "$resume") continue;
       const publication = event === "agent-succeeded"
-        ? resultPublicationKind(state.resultContract)
+        ? resultPublicationKind(state.resultContract,Boolean(start))
         : event === "review-approved" ? "review" : null;
       queue.push({
         stateId: transition.target,
@@ -844,7 +844,8 @@ function successfulPublicationPath(flow: FlowDefinition, target: string, activat
   return matches[0]!;
 }
 
-function resultPublicationKind(result: ResultContract | undefined): PublicationObjectKind | null {
+function resultPublicationKind(result: ResultContract | undefined,migrated=false): PublicationObjectKind | null {
+  if(migrated && result==="development") return "comment";
   if (result === "assessment" || result === "plan" || result === "diagnostic" || result === "verification") return "comment";
   if (result === "development") return "change-request";
   if (result === "review") return "review";
