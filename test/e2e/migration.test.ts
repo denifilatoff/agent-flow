@@ -199,3 +199,32 @@ test("migrated required-CI correction survives SQLite loss through approval", as
   assert.equal((await run.changeRequest())!.body, before!.body);
   assert.equal((await run.migrationReceipts()).length, 1);
 });
+
+test("migrated head-change approval survives SQLite loss at review and merge wait", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.changeRequest();
+  const target = await run.migrate("development", true);
+  await run.reconcile();
+  await run.untilState("awaiting-merge");
+  const approvedHead = (await run.changeRequest())!.headSha;
+  await run.blockNextAttempt("review");
+  await run.changeHead();
+  await run.untilState("review");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.notEqual((await run.changeRequest())!.headSha, approvedHead);
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal((await run.changeRequest())!.body, before!.body);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  assert.equal(await run.maximumConcurrentAttempts(), 1);
+});

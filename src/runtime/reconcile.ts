@@ -887,6 +887,21 @@ async function recoveryIteration(
         hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", review.id)
         && review.headSha === linked?.headSha));
   }
+  if (migration && committed.includes("review") && linked) {
+    // A head update repeats review without repeating development. Completed
+    // approvals for older heads remain history at downstream stages too.
+    const superseded = new Set<string>();
+    for (const publication of active) {
+      const review = evidence.reviews.find((candidate) =>
+        hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", candidate.id));
+      if (!review || review.verdict !== "approved" || review.headSha === linked.headSha
+        || !/^[0-9a-f]{40}$/.test(review.headSha)) continue;
+      const permission = await providerCall("provider permission read failed", () =>
+        provider.permission(evidence.snapshot.ref.repository, review.actor));
+      if (AUTHORIZED.has(permission)) superseded.add(publication.key);
+    }
+    active = active.filter((publication) => !superseded.has(publication.key));
+  }
   const kinds = active.map((publication) => publicationObjectKind(publication.key, evidence.snapshot.ref, bundle));
   if (kinds.some((kind) => kind === null) || !active.every(({ key }) => baselineKeys.includes(key))) {
     return { kind: "ambiguous", baselineKeys, reason: "publication identity cannot be verified for the active work" };
@@ -915,13 +930,17 @@ async function recoveryIteration(
     return { kind: "ambiguous", baselineKeys, reason: "published results do not justify the provider stage" };
   }
   const change = evidence.snapshot.changeRequest;
-  const invalidReview = committed.findIndex((kind, index) => {
-    if (kind !== "review") return false;
+  for (const [index, kind] of committed.entries()) {
+    if (kind !== "review") continue;
     const review = evidence.reviews.find(({ id }) => hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "review", id));
-    return !review || review.verdict !== "approved" || !change || review.headSha !== change.headSha;
-  });
-  if (invalidReview !== -1) {
-    return { kind: "ambiguous", baselineKeys, reason: "published review does not approve the linked change request head" };
+    if (!review || review.verdict !== "approved" || !change || review.headSha !== change.headSha) {
+      return { kind: "ambiguous", baselineKeys, reason: "published review does not approve the linked change request head" };
+    }
+    const permission = await providerCall("provider permission read failed", () =>
+      provider.permission(evidence.snapshot.ref.repository, review.actor));
+    if (!AUTHORIZED.has(permission)) {
+      return { kind: "ambiguous", baselineKeys, reason: "published review author is not authorized" };
+    }
   }
   const state = bundle.flow.spec.states[stage];
   const candidateKind = state?.kind === "agent" ? resultPublicationKind(state.resultContract,Boolean(evidence.migration)) : null;

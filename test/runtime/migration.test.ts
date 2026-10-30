@@ -933,3 +933,53 @@ test("migrated CI retries recover the latest development completion after SQLite
     });
   }
 });
+
+test("migrated approvals superseded by a head change recover through merge wait", async (t) => {
+  for (const stage of ["review", "awaiting-merge"]) {
+    await t.test(stage, async (t) => {
+      const f = await migrationFixture(t);
+      const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+      await reconcileTicket(f.d as never, f.ref);
+      const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+      f.snapshot.comments.push(f.comment("20", marker + "\nDevelopment complete."));
+      const approval = (id: string, headSha: string) => ({
+        id, headSha, verdict: "approved", actor: f.selected.actor,
+        body: `${marker}\n<!-- agent-flow-review:v1 head=${headSha} verdict=approved -->`,
+        submittedAt: f.comment(id, "").createdAt,
+        url: `https://github.com/owner/repo/pull/8#pullrequestreview-${id}`,
+      });
+      f.reviews.push(approval("21", f.selected.headSha));
+      Object.assign(f.selected, { headSha: "2".repeat(40) });
+      f.snapshot.changeRequest = f.selected;
+      f.reviews.push(approval("22", f.selected.headSha));
+      f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:" + stage];
+      await f.reset();
+      const recovered = await reconcileTicket(f.d as never, f.ref);
+      assert.equal(recovered.stateId, stage);
+      assert.equal(recovered.configRevision, f.target.revision);
+      assert.equal(f.d.writeControl.load!(f.ref)!.value.control!.changeRequest?.headSha, f.selected.headSha);
+      assert.equal(f.counts().creates, 1);
+      if (stage === "review") {
+        const request = f.starts.at(-1) as import("../../src/runtime/reconcile.ts").AttemptRequest;
+        assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === "22"), false);
+      } else {
+        for (const invalid of ["head", "verdict", "authorization", "missing"]) {
+          const original = structuredClone(f.reviews[1]!);
+          if (invalid === "head") f.reviews[1]!.headSha = "3".repeat(40);
+          if (invalid === "verdict") f.reviews[1]!.verdict = "changes-requested";
+          if (invalid === "authorization") {
+            f.reviews[1]!.actor = { login: "outsider", providerId: "2" };
+            f.d.provider.permission = async (...args: unknown[]) =>
+              (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+          }
+          if (invalid === "missing") f.reviews.pop();
+          await f.reset();
+          const rejected = await reconcileTicket(f.d as never, f.ref);
+          assert.equal(rejected.stateId, null, invalid);
+          assert.equal(rejected.recoveryDisposition, "ambiguous", invalid);
+          f.reviews[1] = original;
+        }
+      }
+    });
+  }
+});

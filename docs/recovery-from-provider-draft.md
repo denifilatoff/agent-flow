@@ -112,7 +112,10 @@ the existence of a marked comment or a PR with successful completion of a stage.
 The pinned flow's result contract must distinguish a completed result from a question, progress note, or partial
 implementation. After local data loss, a human gate returns through its unique preceding result-producing agent for
 reassessment. An open bugfix merge wait similarly reassesses the preceding verification result. Native reviews are
-checked against their logical verdict and current head; stale or missing approval returns through review. The
+checked against their logical verdict, author permission and current head; stale or missing approval returns through
+review. After migration, authorized approvals for superseded heads remain historical evidence when reconstructing
+downstream stages, so a head-change review cycle does not count both approvals as current results. Recovery still
+requires an authorized current-head approval before restoring merge wait. The
 reassessment uses existing agent decisions and provider readback, preserves the original publication identity, and
 keeps an authorized answer after that publication eligible. It adds no common metadata fields. Recovery can rerun an
 agent to interpret published content and inspect code. An interpretation that
