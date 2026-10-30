@@ -356,7 +356,7 @@ async function reconcileLocal(
     let stage = freshStart ? entry : providerStage(snapshot, bundle.flow);
     if(boundary) {
       const sourceLabel=boundary.receipt.source.stage==="bug-awaiting-merge"?"awaiting-merge":boundary.receipt.source.stage;
-      if(snapshot.labels.includes("agent-stage:"+sourceLabel) && recoveryIteration(bundle,evidence,stage,decision.owner?.metadata.controller??null,dependencies.providerApiUrl).kind==="ambiguous") stage=boundary.receipt.start;
+      if(snapshot.labels.includes("agent-stage:"+sourceLabel) && (await recoveryIteration(bundle,evidence,stage,decision.owner?.metadata.controller??null,dependencies.provider,dependencies.providerApiUrl)).kind==="ambiguous") stage=boundary.receipt.start;
     }
     stage = freshReviewTarget(bundle.flow, stage, evidence, controllerId) ?? stage;
     if (decision.kind === "resume" && evidence.activeBoundary !== "fresh" && stage !== entryStage(bundle.flow, snapshot.activation.label)) {
@@ -382,7 +382,7 @@ async function reconcileLocal(
       }, null);
       return outcome(null, null, snapshot, false, false, false);
     }
-    const iteration = recoveryIteration(bundle, evidence, stage, decision.owner?.metadata.controller ?? null, dependencies.providerApiUrl);
+    const iteration = await recoveryIteration(bundle, evidence, stage, decision.owner?.metadata.controller ?? null, dependencies.provider, dependencies.providerApiUrl);
     if (iteration.kind === "ambiguous") {
       stored = await writer.recordRecovery!(ref, evidence, {
         kind: "ambiguous", owner: decision.owner, reason: iteration.reason,
@@ -735,13 +735,14 @@ type RecoveryIteration =
   | { kind: "ready"; baselineKeys: string[]; humanCutoff: string | null; reassessState?: string }
   | { kind: "ambiguous"; baselineKeys: string[]; reason: string };
 
-function recoveryIteration(
+async function recoveryIteration(
   bundle: ConfigBundle,
   evidence: RecoveryEvidence,
   stage: string,
   ownerController: string | null,
+  provider: ProviderAdapter,
   apiUrl?: string,
-): RecoveryIteration {
+): Promise<RecoveryIteration> {
   const baselineKeys = markedObjectKeys(bundle, evidence, apiUrl);
   const linked = evidence.snapshot.changeRequest;
   const migration = evidence.migration;
@@ -804,13 +805,27 @@ function recoveryIteration(
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
   if (migration && migration.receipt.start !== stage
     && bundle.flow.spec.states[migration.receipt.start]?.kind === "human-gate"
-    && bundle.flow.spec.states[stage]?.kind === "provider-wait"
     && active.length > committed.length) {
-    const iterations = active.slice(0, active.length - committed.length);
-    if (iterations.every((publication) =>
-      publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) === "comment")) {
-      // Completed gate revisions precede the downstream successful publication path.
-      active = active.slice(iterations.length);
+    // A revised gate result is followed by human input before downstream work.
+    // Keep a current agent result without that input available for revalidation.
+    while (active.length > committed.length
+      && publicationObjectKind(active[0]!.key, evidence.snapshot.ref, bundle) === "comment") {
+      const resultAt = active[0]!.createdAt;
+      const nextAt = active[1]?.createdAt;
+      let answered = false;
+      for (const comment of evidence.snapshot.comments) {
+        if (comment.createdAt <= resultAt || (nextAt && comment.createdAt >= nextAt)
+          || isMarked(comment.body) || isMigrationCommand(comment.body)
+          || comment.body.includes("<!-- agent-flow-migration-diagnostic:")) continue;
+        const permission = await providerCall("provider permission read failed", () =>
+          provider.permission(evidence.snapshot.ref.repository, comment.actor));
+        if (AUTHORIZED.has(permission)) {
+          answered = true;
+          break;
+        }
+      }
+      if (!answered) break;
+      active = active.slice(1);
     }
   }
   const kinds = active.map((publication) => publicationObjectKind(publication.key, evidence.snapshot.ref, bundle));

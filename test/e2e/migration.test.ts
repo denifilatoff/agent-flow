@@ -118,7 +118,15 @@ test("agent-only migration at a replayed human gate retains its plan across empt
   await run.untilState("plan-review");
   const revisedComments = await run.agentCommentIds();
   assert.ok(revisedComments.length > migratedComments.length);
+  await run.blockNextAttempt("development");
+  await run.blockNextAttempt("review");
   await run.answer("approved");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("development");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("review");
+  await run.untilAttempt("started");
   await run.resetDatabaseAndRestart();
   await run.untilState("awaiting-merge");
   await run.resetDatabaseAndRestart();
