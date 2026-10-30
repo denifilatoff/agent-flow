@@ -540,3 +540,37 @@ test("successive direct migrations recover one predecessor chain and preserve th
   assert.equal(f.counts().creates, 2);
   assert.equal(f.counts().resolves, 2);
 });
+
+test("merged carried PR completes after empty-store recovery only with target results and fresh review", async (t) => {
+  const f = await migrationFixture(t),
+    { reconcileTicket } = await import("../../src/runtime/reconcile.ts"),
+    { renderPublication } = await import("../../src/provider/publication.ts");
+  await reconcileTicket(f.d as never, f.ref);
+  const marker = renderPublication({
+    config: f.target.revision,
+    controller: f.d.controllerId,
+  });
+  f.snapshot.comments.push(
+    f.comment("20", marker + "\nDevelopment revalidated"),
+  );
+  f.reviews.push({
+    id: "701",
+    body:
+      marker +
+      "\n<!-- agent-flow-review:v1 head=" +
+      f.selected.headSha +
+      " verdict=approved -->",
+    headSha: f.selected.headSha,
+    verdict: "approved",
+    submittedAt: "2026-10-30T00:02:00Z",
+    actor: f.snapshot.activation.actor,
+    url: "https://github.com/owner/repo/pull/8#pullrequestreview-701",
+  });
+  f.snapshot.labels = f.snapshot.labels
+    .filter((l) => !l.startsWith("agent-stage:"))
+    .concat("agent-stage:awaiting-merge");
+  Object.assign(f.selected, { state: "merged" });
+  f.snapshot.open = false;
+  await f.reset();
+  assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, "done");
+});

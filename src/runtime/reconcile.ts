@@ -735,7 +735,7 @@ function recoveryIteration(
   const baselineKeys = markedObjectKeys(bundle, evidence, apiUrl);
   const linked = evidence.snapshot.changeRequest;
   if(evidence.migration?.receipt.start===stage && bundle.flow.spec.states[stage]?.kind==="provider-wait" && evidence.migration.receipt.retained.length) return {kind:"ready",baselineKeys,humanCutoff:null};
-  if (bundle.flow.spec.states[stage]?.kind === "provider-wait" && linked?.state === "merged") {
+  if (!evidence.migration && bundle.flow.spec.states[stage]?.kind === "provider-wait" && linked?.state === "merged") {
     const linkedPublication = evidence.publications.some((publication) =>
       publication.metadata.controller === ownerController
       && hasPublicationIdentity(publication.key, evidence.snapshot.ref, "change-request", String(linked.number)));

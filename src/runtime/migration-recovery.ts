@@ -196,7 +196,12 @@ export async function recoverMigration(
       if (!selection.retain.includes(retained.stage))
         throw new Error("Migration retains forbidden stage result");
       const p = ordinary.find((p) => p.key === retained.key);
-      if (!p || p.ownershipEligible===false || p.metadata.controller!==row.controller) throw new Error("Retained publication provenance is unavailable");
+      if (
+        !p ||
+        p.ownershipEligible === false ||
+        p.metadata.controller !== row.controller
+      )
+        throw new Error("Retained publication provenance is unavailable");
       const [kind, id] = publicationIdentity(p.key),
         result =
           kind === "comment"
@@ -222,6 +227,21 @@ export async function recoverMigration(
   if (!selected)
     throw new Error("Selected carried PR is unavailable or unlinked");
   assertCarriedChange(selected, last.receipt);
+  if (
+    selected.state === "merged" &&
+    !evidence.reviews.some(
+      (review) =>
+        review.verdict === "approved" &&
+        review.headSha === selected.headSha &&
+        (eligibleAfterMigration(last!.receipt, "review", review.id) ||
+          last!.receipt.retained.some(
+            (r) => publicationIdentity(r.key)[1] === review.id,
+          )),
+    )
+  )
+    throw new Error(
+      "Selected PR merged before target validation; follow-up work requires a separate decision",
+    );
   const competing = evidence.changes.filter(
     (c) => c.number !== selected.number && c.state === "open",
   );
