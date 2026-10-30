@@ -49,3 +49,9 @@ ghcr.io/denifilatoff/agent-flow:edge
 ```
 
 `edge` is an unstable prototype tag. Production releases will use versioned tags.
+
+## Workflow migrations
+
+Operators can explicitly migrate an active GitHub ticket or replay an earlier agent stage while retaining its
+existing PR. See [the operator procedure](docs/operating-workflow-migrations.md) and [the rule-authoring
+guide](docs/workflow-migrations.md). Controller-only updates do not change pinned configurations.

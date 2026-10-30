@@ -297,3 +297,18 @@ The runtime and provider fixture suites cover the recovery, ownership, ambiguity
 A subsequent independent review covered the two-field block, ownership cases C18-C20, updated architecture, data model,
 and implementation plan. Its findings were corrected and rechecked. Runtime support is implemented with provider
 fixture and unit coverage; full live-provider restart and collision acceptance remains separate end-to-end validation.
+
+## Migration receipt boundaries
+
+Before ordinary mixed-pin/result classification, validate immutable migration receipts against their original
+activation/owner anchor, accepted request content and unique predecessor chain. Validate the exact source/target
+bundles and declared compatibility decision, selected PR repository/branch/original marker, workspace identity,
+explicit retained-result references and comment/review baseline. Only a verified receipt establishes a new
+pin/replay boundary. A carried old PR marker binds only that PR; it grants no target ownership or approval. Same-pin
+replay excludes prior selected/downstream results. Receipts and migration commands are not stage results or human
+answers. After a receipt-before-label/cache crash, repair the same committed decision; after later work advances,
+use justified provider evidence rather than resetting to the receipt’s initial stage. Uncertain writes require
+complete readback before retry. Edited requests/receipts, forks, incomplete evidence, unavailable pins or
+contradictory stages stop with diagnostics. Activation removal, closure and foreign ownership still stop work.
+Surviving SQLite retains retry counts; complete loss may reset them or repeat unpublished work. The receipt is not
+an attempt ledger. See [the migration authoring guide](workflow-migrations.md).

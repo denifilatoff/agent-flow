@@ -31,3 +31,10 @@ controller unready; it does not migrate the affected instance.
 If new-format instances have already started, do not roll the old controller back over them. Stop new activations and
 complete those instances with the new controller before a format downgrade. If that cannot be done, keep the service
 stopped and plan an explicit migration; do not rewrite provider state or run two controllers against the same tickets.
+
+## Explicit active-workflow migration
+
+After deploying the migration-capable controller and publishing a compatible target bundle, use [the operator
+procedure](operating-workflow-migrations.md) to retain an active ticket’s existing PR while changing its pin or
+replaying a stage. This does not relax the pre-Stack restrictions above, transfer ownership, or authorize migration
+of a live ticket automatically.
