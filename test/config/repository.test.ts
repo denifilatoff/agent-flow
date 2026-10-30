@@ -408,3 +408,54 @@ test('strict migration selectors refresh remote latest and freeze exact tag/SHA 
  await assert.rejects(resolveMigrationTarget(prepared,'latest'),/refresh/);
  await rename(repo.path+'-offline',repo.path);
 });
+
+test("concurrent migration selectors cannot replace latest through shared FETCH_HEAD", async (t) => {
+  const { resolveMigrationTarget } = await import("../../src/config/repository.ts");
+  const repo = await TestRepository.create();
+  const data = await mkdtemp(join(tmpdir(), "migration-concurrent-"));
+  t.after(async () => {
+    await rm(repo.path, { recursive: true, force: true });
+    await rm(data, { recursive: true, force: true });
+  });
+  const old = await repo.head();
+  await exec("git", ["-C", repo.path, "tag", "old-release"]);
+  await repo.commitChangedFlow();
+  const latest = await repo.head();
+  const prepared = await prepareConfigurationRepository(pathToFileURL(repo.path).href, data);
+  const realGit = (await exec("which", ["git"])).stdout.trim();
+  const bin = join(data, "bin");
+  await mkdir(bin);
+  const fetched = join(data, "latest-fetched"), release = join(data, "release");
+  await writeFile(join(bin, "git"), `#!/usr/bin/env node
+const {execFileSync}=require('node:child_process');
+const {writeFileSync,existsSync}=require('node:fs');
+const args=process.argv.slice(2);
+const output=execFileSync(${JSON.stringify(realGit)},args);
+const fetch=args.indexOf('fetch');
+if(fetch>=0 && args.at(-2)==='origin' && args.at(-1)!==${JSON.stringify(old)}) {
+ writeFileSync(${JSON.stringify(fetched)},'');
+ const deadline=Date.now()+10000;
+ while(!existsSync(${JSON.stringify(release)})) {
+  if(Date.now()>deadline) throw new Error('interleaving release timed out');
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
+ }
+}
+process.stdout.write(output);
+`);
+  await chmod(join(bin, "git"), 0o755);
+  const pending = resolveMigrationTarget(prepared, "latest", {
+    arguments: [], environment: { PATH: bin + ":" + process.env.PATH },
+  });
+  // Hold latest after its fetch while another ticket resolves an older tag.
+  const deadline = Date.now() + 10000;
+  while (await access(fetched).then(() => false, () => true)) {
+    assert.ok(Date.now() < deadline, "latest fetch did not reach the barrier");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  try {
+    assert.equal(await resolveMigrationTarget(prepared, "old-release"), old);
+  } finally {
+    await writeFile(release, "");
+  }
+  assert.equal(await pending, latest);
+});

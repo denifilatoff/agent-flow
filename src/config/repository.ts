@@ -445,16 +445,18 @@ export async function resolveMigrationTarget(
   const auth=authentication??configurationGitAuthentication(prepared.source);
   const command=async(args:string[])=> (await exec('git',[...auth.arguments,'--no-replace-objects','-C',prepared.repository,...args],{encoding:'utf8',maxBuffer:16*1024*1024,env:{...process.env,...auth.environment}})).stdout;
   try {
-   await command(['fetch','--prune','origin']);
-   if(selector==='latest') {
-    const advertised=await command(['ls-remote','--symref','origin','HEAD']);
-    const match=/^ref: (refs\/heads\/[^\s]+)\tHEAD$/m.exec(advertised);
-    if(!match) throw new Error('default branch is unavailable');
-    ref=match[1]!;
-    await command(['fetch','origin',ref]);
-    ref='FETCH_HEAD';
-   } else if(SHA.test(selector)) { await command(['fetch','origin',selector]);ref=selector; }
-   else { ref='refs/tags/'+selector; await command(['fetch','--force','origin',ref+':'+ref]); }
+   if(SHA.test(selector)) ref=selector.toLowerCase();
+   else {
+    const requested=selector==='latest'?'HEAD':'refs/tags/'+selector;
+    const advertised=await command(['ls-remote','--symref','origin',requested,...(selector==='latest'?[]:[requested+'^{}'])]);
+    const lines=advertised.split('\n').map(line=>line.split('\t'));
+    const resolved=lines.find(([sha,name])=>SHA.test(sha!) && name===requested+'^{}')
+      ?? lines.find(([sha,name])=>SHA.test(sha!) && name===requested);
+    if(!resolved) throw new Error('Migration selector is unavailable');
+    ref=resolved[0]!.toLowerCase();
+   }
+   // Fetch and verify this immutable object; other tickets may fetch into the same mirror.
+   await command(['fetch','--no-write-fetch-head','origin',ref]);
   } catch(error) { throw new Error('Migration configuration refresh or selector resolution failed',{cause:error}); }
  } else if(selector==='latest') {
   const symbolic=(await git(prepared.repository,['symbolic-ref','HEAD'])).toString('utf8').trim();
