@@ -56,7 +56,8 @@ test("same-configuration planning replay requires a fresh plan and downstream hu
   assert.equal((await run.migrationReceipts()).length, 1);
 });
 
-test("planning replay revisions survive SQLite loss at the human gate and downstream stages", async (t) => {
+for (const replay of ["planning", "assessment"]) {
+test(`${replay} replay revisions survive SQLite loss at the human gate and downstream stages`, async (t) => {
   const run = await startFixture("github");
   t.after(() => run.close());
   await run.untilState("assessment-review");
@@ -66,8 +67,12 @@ test("planning replay revisions survive SQLite loss at the human gate and downst
   await run.untilState("awaiting-merge");
   const before = await run.changeRequest();
   const controller = await run.controllerId();
-  const target = await run.migrate("planning", true);
+  const target = await run.migrate(replay, true);
   await run.reconcile();
+  if (replay === "assessment") {
+    await run.untilState("assessment-review");
+    await run.answer("approved");
+  }
   await run.untilState("plan-review");
   await run.answer("Changes requested: include restart validation.");
   await run.untilState("planning");
@@ -93,6 +98,8 @@ test("planning replay revisions survive SQLite loss at the human gate and downst
   assert.equal((await run.migrationReceipts()).length, 1);
   assert.equal(await run.maximumConcurrentAttempts(), 1);
 });
+
+}
 
 test("changed-CI migration of fixture issue 2 preserves PR 8 despite incidental PR 11 and requires target CI", async (t) => {
   const run = await startFixture("github", { oldCiPolicy: true });

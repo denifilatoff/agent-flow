@@ -913,16 +913,35 @@ async function recoveryIteration(
     if (migration && recoveryStart && bundle.flow.spec.states[recoveryStart]?.kind === "agent") {
       const gates = Object.entries(bundle.flow.spec.states).filter(([id, state]) => state.kind === "human-gate"
         && successfulPublicationPath(bundle.flow, id, evidence.snapshot.activation.label, recoveryStart)
-        && successfulPublicationPath(bundle.flow, stage, evidence.snapshot.activation.label, id));
-      // Identical comment contracts across multiple gates cannot locate revisions
-      // unambiguously. Leave those sequences to the ordinary ambiguity checks.
-      for (const [gateId] of gates.length === 1 ? gates : []) {
+        && successfulPublicationPath(bundle.flow, stage, evidence.snapshot.activation.label, id))
+        .sort(([left], [right]) =>
+          successfulPublicationPath(bundle.flow, left, evidence.snapshot.activation.label, recoveryStart)!.length
+          - successfulPublicationPath(bundle.flow, right, evidence.snapshot.activation.label, recoveryStart)!.length);
+      // Comment kinds alone cannot distinguish assessment revisions from plan
+      // revisions. Multiple reached gates require explicit stage provenance.
+      const resultStage = (key: string) => {
+        const comment = evidence.snapshot.comments.find((candidate) =>
+          hasPublicationIdentity(key, evidence.snapshot.ref, "comment", candidate.id));
+        const markers = comment?.body.split(/\r?\n/).filter((line) => line.includes("<!-- agent-flow-result:"));
+        return markers?.length === 1
+          ? /^<!-- agent-flow-result:v1 state=([a-z][a-z0-9-]*) -->$/.exec(markers[0]!)?.[1]
+          : undefined;
+      };
+      for (const [gateId] of gates) {
         const path = successfulPublicationPath(bundle.flow, gateId, evidence.snapshot.activation.label, recoveryStart);
         if (!path?.length || path.at(-1) !== "comment" || path.length > committed.length
           || !path.every((kind, index) => committed![index] === kind)) continue;
         const index = path.length - 1;
+        const predecessors = Object.entries(bundle.flow.spec.states).filter(([, state]) =>
+          state.kind === "agent" && state.on?.["agent-succeeded"]?.target === gateId);
+        // Without identities, leave the sequence intact for ordinary validation
+        // (unambiguous legacy paths) or the final ambiguity diagnostic.
+        if (gates.length > 1 && (predecessors.length !== 1
+          || resultStage(active[index]?.key ?? "") !== predecessors[0]![0])) break;
         const answered: number[] = [];
+        let verifiedGate = false;
         for (let offset = index; active[offset]; offset++) {
+          if (gates.length > 1 && resultStage(active[offset]!.key) !== predecessors[0]![0]) break;
           const next = active[offset + 1];
           if ((!next && stage === gateId)
             || publicationObjectKind(active[offset]!.key, evidence.snapshot.ref, bundle) !== "comment"
@@ -946,7 +965,9 @@ async function recoveryIteration(
               provider.permission(evidence.snapshot.ref.repository, result!.actor))));
           if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
           answered.push(offset);
+          verifiedGate = true;
         }
+        if (gates.length > 1 && !verifiedGate) break;
         // At the gate, every answered predecessor before a newer result is a revision.
         // Downstream, the final answer advances the gate: preserve its result and
         // the following development candidate for ordinary contract validation.

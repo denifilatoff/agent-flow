@@ -8,6 +8,13 @@ SQLite-local execution, `config`/`controller` publication metadata, and ownershi
 No second ownership read is added before publication. Agent attempts write a minimal local `AgentDecision`; the
 controller reads provider evidence and stores the verified `AgentReceipt` in local SQLite.
 
+New successful assessment, plan and diagnostic comments also append a separate
+`<!-- agent-flow-result:v1 state=planning -->` line with the actual agent state. It identifies comment results during
+recovery across multiple human gates; it does not extend the common `config`/`controller` object, establish ownership,
+or replace result validation and author authorization. Questions and progress notes do not carry it. Existing
+publications need no rewrite; ambiguous legacy multi-gate histories require clarification. See
+[workflow migration recovery](workflow-migrations.md) for the eligibility rules.
+
 ## Scope
 
 The prototype runs one polling controller in one Docker container. It supports GitHub and GitLab through separate REST

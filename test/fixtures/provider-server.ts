@@ -800,7 +800,7 @@ class FixtureState {
         && !context.migration?.baseline.comments.includes(String(artifact.id)) && "body" in artifact
         && artifact.body.split(/\r?\n/).includes(context.publicationMarker)
         && artifact.body.includes(`Fixture ${artifactKind}.`));
-      if (!existing) this.addComment(`${context.publicationMarker}\n${state === "bug-verification" ? "BUG RECEIPT · VERIFIED" : `Fixture ${artifactKind}.`}`);
+      if (!existing) this.addComment(`${context.publicationMarker}\n${state === "bug-verification" ? "BUG RECEIPT · VERIFIED" : `Fixture ${artifactKind}.`}${state === "bug-verification" ? "" : `\n<!-- agent-flow-result:v1 state=${state} -->`}`);
       return { event: "agent-succeeded" };
     }
     if (state === "development" || state === "bug-development") {

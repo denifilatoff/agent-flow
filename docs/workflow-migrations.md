@@ -49,6 +49,16 @@ pending human answer. Completed gate revisions remain history when reconstructin
 and merge-wait paths. This also applies when planning replay reaches plan review: authorized human feedback
 separates revised plans, the newest plan is revalidated at the gate, and its pending answer stays eligible.
 Downstream recovery preserves that plan and the current development completion for ordinary validation.
+Assessment replay can cross assessment review and plan review, including revisions at either gate. New successful
+assessment, plan and diagnostic comments append `<!-- agent-flow-result:v1 state=planning -->` on its own line,
+using their actual agent state instead of `planning`. This separate annotation leaves the common two-field marker
+unchanged. Recovery processes reached gates in workflow order, checks result stage identity and author permission,
+and retires only completed revisions of that gate's predecessor. It retains the newest plan for ordinary reassessment
+and the pending human answer. Missing, duplicate, unsupported or contradictory annotations cannot disambiguate
+multiple gates; recovery pauses with a diagnostic rather than guessing which comment is an assessment or plan.
+Legacy single-gate recovery and unambiguous paths remain supported; historical comments are never rewritten.
+The annotation is additive controller publication guidance, not a change to the pinned workflow or Stack contracts,
+so this controller correction requires no direct migration rule.
 Recovery uses authorized human input between publications to separate completed gate revisions from downstream
 results; a current agent result remains available for revalidation. Completed development/review rework pairs are also
 history when a marked, authorized changes-requested review closes a development completion. Recovery checks the

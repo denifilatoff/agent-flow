@@ -1304,7 +1304,8 @@ test("migrated approvals superseded by a head change recover through merge wait"
   }
 });
 
-test("planning replay recovers revised plans at the gate and downstream stages", async (t) => {
+for (const replay of ["planning", "assessment", "assessment-with-revision"]) {
+test(`${replay} replay recovers revised plans at the gate and downstream stages`, async (t) => {
   for (const stage of ["plan-review", "development", "development-with-result", "review"] as const) {
     await t.test(stage, async (t) => {
       const f = await migrationFixture(t);
@@ -1313,15 +1314,23 @@ test("planning replay recovers revised plans at the gate and downstream stages",
       const { parse } = await import("yaml");
       f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
       f.target.flow = structuredClone(f.source.flow);
-      f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest --resume-from planning";
+      f.snapshot.comments[1]!.body = `/agent-flow migrate --pr 8 --to latest --resume-from ${replay === "planning" ? replay : "assessment"}`;
       await reconcileTicket(f.d as never, f.ref);
       const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+      if (replay === "assessment-with-revision") f.snapshot.comments.push(
+        f.comment("16", marker + '\n<!-- agent-flow-result:v1 state=assessment -->\nOriginal assessment.'),
+        f.comment("17", "Changes requested: revise the assessment."),
+      );
+      if (replay !== "planning") f.snapshot.comments.push(
+        f.comment("18", marker + '\n<!-- agent-flow-result:v1 state=assessment -->\nAssessment.'),
+        f.comment("19", "Approved"),
+      );
       f.snapshot.comments.push(
-        f.comment("20", marker + "\nPlan."),
+        f.comment("20", marker + '\n<!-- agent-flow-result:v1 state=planning -->\nPlan.'),
         f.comment("21", "Changes requested: include restart validation."),
-        f.comment("22", marker + "\nRevised plan."),
+        f.comment("22", marker + '\n<!-- agent-flow-result:v1 state=planning -->\nRevised plan.'),
         f.comment("23", "Changes requested: include recovery details."),
-        f.comment("24", marker + "\nFinal revised plan."),
+        f.comment("24", marker + '\n<!-- agent-flow-result:v1 state=planning -->\nFinal revised plan.'),
         f.comment("25", "Approved"),
       );
       const recorded = stage === "development-with-result" ? "development" : stage;
@@ -1339,11 +1348,36 @@ test("planning replay recovers revised plans at the gate and downstream stages",
       assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === "24"), stage !== "plan-review");
       assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === "26"), stage === "review");
       assert.equal(f.counts().creates, 1);
+      if (replay !== "planning") {
+        const assessment = f.snapshot.comments.find((comment) =>
+          comment.id === (replay === "assessment-with-revision" ? "16" : "18"))!;
+        const original = assessment.body;
+        for (const annotation of ["", "<!-- agent-flow-result:v2 state=assessment -->",
+          "<!-- agent-flow-result:v1 state=planning -->",
+          "<!-- agent-flow-result:v1 state=assessment -->\n<!-- agent-flow-result:v1 state=assessment -->"]) {
+          assessment.body = original.replace("<!-- agent-flow-result:v1 state=assessment -->", annotation);
+          f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:" + recorded];
+          await f.reset();
+          assert.equal((await reconcileTicket(f.d as never, f.ref)).recoveryDisposition, "ambiguous", annotation);
+        }
+        assessment.body = original;
+        const actor = assessment.actor;
+        assessment.actor = { login: "outsider", providerId: "2" };
+        f.d.provider.permission = async (...args: unknown[]) =>
+          (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+        f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:" + recorded];
+        await f.reset();
+        assert.equal((await reconcileTicket(f.d as never, f.ref)).recoveryDisposition, "ambiguous");
+        assessment.actor = actor;
+      }
       f.snapshot.comments.find((comment) => comment.id === "21")!.actor = { login: "outsider", providerId: "2" };
       f.d.provider.permission = async (...args: unknown[]) =>
         (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+      f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:" + recorded];
       await f.reset();
       assert.equal((await reconcileTicket(f.d as never, f.ref)).recoveryDisposition, "ambiguous");
     });
   }
 });
+
+}
