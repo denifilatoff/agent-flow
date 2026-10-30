@@ -1,5 +1,6 @@
 import type { ProviderConfig } from "../config/types.js";
 import { ProviderHttpError } from "./http.ts";
+import { parseMigrationReceipt } from "./migration-receipt.ts";
 import { parsePublication, unanchoredPublicationKeys, type Publication } from "./publication.ts";
 import type {
   Actor,
@@ -313,7 +314,8 @@ export function createGitHubAdapter(
     async readTicket(ref: TicketRef, pinnedActivationLabel?: string): Promise<ProviderTicketSnapshot> {
       const data = await readSnapshotData(ref, pinnedActivationLabel);
       const { changes } = await readActiveChanges(ref, data, []);
-      const change = uniqueChange(changes, "GitHub issue has multiple related pull requests");
+      const carried = data.snapshot.comments.flatMap(comment => { const parsed = parseMigrationReceipt(comment.body); return parsed ? [parsed.receipt.change.number] : []; }).at(-1);
+      const change = carried ? changes.find(change => change.number === carried) ?? null : uniqueChange(changes, "GitHub issue has multiple related pull requests");
       return {
         ...data.snapshot,
         changeRequest: change,
@@ -612,6 +614,9 @@ function normalizePull(value: unknown, repository: string): NormalizedChangeRequ
     repository,
     number: integer(pull, "number"),
     url: string(pull, "html_url"),
+    objectId: String(pull.node_id ?? pull.id ?? pull.number),
+    ...typeof (pull.head as Record<string,unknown>).ref === "string" ? { headBranch: (pull.head as Record<string,unknown>).ref as string } : {},
+    ...((pull.head as Record<string,unknown>).repo as Record<string,unknown> | null)?.full_name ? { headRepository: ((pull.head as Record<string,unknown>).repo as Record<string,unknown>).full_name as string } : {},
     headSha: string(object(pull.head, "GitHub pull request head"), "sha"),
     state,
     actor: normalizeActor(pull.user, "GitHub pull request actor"),

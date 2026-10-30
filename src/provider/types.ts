@@ -35,6 +35,9 @@ export interface NormalizedChangeRequest {
   repository: string;
   number: number;
   url: string;
+  objectId?: string;
+  headRepository?: string;
+  headBranch?: string;
   headSha: string;
   state: "open" | "closed" | "merged";
   actor: Actor;
@@ -83,6 +86,7 @@ export interface RecoveryEvidence {
   complete: boolean;
   activeBoundary: "known" | "fresh" | "ambiguous";
   legacyActive: boolean;
+  migration?: import("../runtime/migration-recovery.ts").RecoveredMigration;
 }
 
 export interface DiscoveryWindow {
