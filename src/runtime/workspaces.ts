@@ -89,20 +89,21 @@ export class WorkspaceManager {
       flowInstanceId,
       async () => {
         const workspace=await this.#prepareWorkspace(repository,ticket,flowInstanceId,identity,credential);
-        if(selected) await this.#restoreBranch(workspace,selected);
+        if(selected) await this.#restoreBranch(workspace,selected,identity.cloneUrl,credential);
         return workspace;
       },
     );
   }
 
-  async #restoreBranch(workspace:Workspace,selected:SelectedBranch):Promise<void> {
+  async #restoreBranch(workspace:Workspace,selected:SelectedBranch,cloneUrl:string,credential?:ProviderCredential):Promise<void> {
     if(selected.repository!==workspace.repository || selected.headRepository!==workspace.repository) throw new Error("Carried PR head repository is unsupported or mismatched");
     await this.#run("git",["check-ref-format","--branch",selected.headBranch],{cwd:workspace.worktree});
     const current=(await this.#run("git",["branch","--show-current"],{cwd:workspace.worktree})).stdout.trim();
     if(current===selected.headBranch) return;
     const dirty=(await this.#run("git",["status","--porcelain"],{cwd:workspace.worktree})).stdout.trim();
     if(dirty || current) throw new Error("Carried PR branch mismatch or dirty workspace; preserve work and resolve manually");
-    await this.#run("git",["fetch","origin","refs/heads/"+selected.headBranch],{cwd:workspace.worktree});
+    const authentication = gitAuthentication(new URL(cloneUrl), credential);
+    await this.#run("git",[...authentication.arguments,"fetch","origin","refs/heads/"+selected.headBranch],{cwd:workspace.worktree,env:authentication.environment});
     const fetched=(await this.#run("git",["rev-parse","FETCH_HEAD"],{cwd:workspace.worktree})).stdout.trim();
     if(fetched!==selected.headSha) throw new Error("Carried PR head moved during workspace restoration");
     let exists=false;
