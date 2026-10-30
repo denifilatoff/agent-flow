@@ -63,10 +63,11 @@ export async function recoverMigration(evidence:RecoveryEvidence,load:(sha:strin
  const selected=evidence.changes.find(c=>c.number===last!.receipt.change.number);
  if(!selected) throw new Error('Selected carried PR is unavailable or unlinked');
  assertCarriedChange(selected,last.receipt);
- const competing=evidence.changes.filter(c=>c.number!==selected.number && parsePublication(c.body).kind!=='unmarked');
+ const competing=evidence.changes.filter(c=>c.number!==selected.number && c.state==='open');
  if(competing.length) throw new Error('Competing implementation PR evidence');
  const active=ordinary.filter(p=>{
   const [kind,id]=publicationIdentity(p.key);
+  if(kind==='change-request' && id!==String(selected.number)) return false;
   if(p.metadata.controller!==owner.metadata.controller) return true;
   return eligibleAfterMigration(last!.receipt,kind,id);
  });

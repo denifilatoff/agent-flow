@@ -37,7 +37,7 @@ export async function processMigration(d:ReconcileDependencies,e:RecoveryEvidenc
    if(selected.state==='closed') throw new Error('Selected PR is closed; reopen the same PR before migrating');
    if(selected.state==='merged') throw new Error('Selected PR is merged; follow-up work requires a separate decision');
    if(selected.repository!==e.snapshot.ref.repository || selected.headRepository!==selected.repository || !selected.headBranch) throw new Error('Selected PR repository or head branch is unavailable or unsupported');
-   if(e.changes.some(c=>c.number!==command.pr && parsePublication(c.body).kind!=='unmarked')) throw new Error('Competing implementation PR evidence must be resolved');
+   if(e.changes.some(c=>c.number!==command.pr && c.state==='open')) throw new Error('Competing implementation PR evidence must be resolved');
    const parsed=parsePublication(selected.body);
    const carried=e.migration?.receipt.change;
    if(parsed.kind!=='current' || parsed.metadata.controller!==d.controllerId || (parsed.metadata.config!==sourcePin && carried?.number!==selected.number)) throw new Error('Selected PR has conflicting source provenance');
@@ -63,12 +63,17 @@ export async function processMigration(d:ReconcileDependencies,e:RecoveryEvidenc
      owner:{key:owner.key,config:owner.metadata.config,createdAt:owner.createdAt},request:{id:request.id,actor:request.actor,bodyHash:digest(request.body)},
      source:{config:sourcePin,stage:sourceStage,resume},target:{config:sha,flow:target.flow.metadata.id,label:activation.label,basis:selection.basis},
      change:{provider:selected.provider,repository:selected.repository,number:selected.number,url:selected.url,headRepository:selected.headRepository,headBranch:selected.headBranch,headSha:selected.headSha,marker:renderPublication(parsed.metadata)},
-     start:selection.stage,retained:[],baseline:{comments:e.snapshot.comments.map(c=>c.id),reviews:e.reviews.map(r=>r.id)},predecessor:e.migration?.id??null};
+     start:selection.stage,retained:[],baseline:{comments:e.snapshot.comments.map(c=>c.id),reviews:[...new Set([...(e.migration?.receipt.baseline.reviews??[]),...e.reviews.map(r=>r.id)])]},predecessor:e.migration?.id??null};
     proposal={receipt,body:renderMigrationReceipt(receipt,d.controllerId!)};proposals.set(proposalKey,proposal);
    }
    if(cached) await d.launcher.cancel(cached.flowInstanceId);
    if(cached && d.launcher.isRunning(cached.flowInstanceId)) throw new Error('Old agent termination could not be confirmed');
    const fresh=await d.provider.readRecoveryEvidence(e.snapshot.ref,activation.label);
+   const freshEffective=await recoverMigration(fresh,sha=>d.config.loadPinned(sha));
+   if(freshEffective.migration?.comment.body===proposal.body) {proposals.delete(proposalKey);return freshEffective;}
+   const freshOwner=freshEffective.migration?.owner??electOwner(freshEffective.publications);
+   if(freshEffective.migration?.id!==e.migration?.id || freshOwner?.key!==owner.key || freshOwner?.metadata.controller!==d.controllerId
+    || fresh.ambiguities.some(a=>a!=="multiple linked pull requests")) throw new Error("Source ownership or migration boundary changed while draining work");
    const freshRequest=fresh.snapshot.comments.find(c=>c.id===request.id),freshSelected=await d.provider.readChangeRequest(e.snapshot.ref,command.pr);
    if(!fresh.complete || !fresh.snapshot.open || !fresh.snapshot.activation.present || !isDeepStrictEqual(fresh.snapshot.activation,activation)
     || !freshRequest || digest(freshRequest.body)!==digest(request.body) || !isDeepStrictEqual(freshRequest.actor,request.actor)
@@ -76,8 +81,8 @@ export async function processMigration(d:ReconcileDependencies,e:RecoveryEvidenc
    if(!isDeepStrictEqual(freshSelected,selected) || !isDeepStrictEqual(fresh.snapshot.labels,e.snapshot.labels)) throw new Error('Source stage or selected PR changed while draining work');
    const committed=fresh.snapshot.comments.filter(c=>c.body===proposal!.body);
    if(committed.length>1) throw new Error('Conflicting duplicate migration receipts');
-   const newPublications=fresh.publications.filter(p=>!e.publications.some(old=>old.key===p.key) && !committed.some(c=>publicationIdentity(p.key)[1]===c.id));
-   if(newPublications.length && !e.migration) throw new Error('Source publications changed while draining work; reassess before migrating');
+   const newPublications=freshEffective.publications.filter(p=>!e.publications.some(old=>old.key===p.key) && !committed.some(c=>publicationIdentity(p.key)[1]===c.id));
+   if(newPublications.length) throw new Error('Source publications changed while draining work; reassess before migrating');
    delivery=true;
    const created=committed[0]??await d.provider.createComment(e.snapshot.ref,proposal.body);
    const readback=await d.provider.readComment(e.snapshot.ref,created.id);

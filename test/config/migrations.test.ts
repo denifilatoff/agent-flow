@@ -31,3 +31,14 @@ test('rule validation rejects extensions, invalid targets, versions and source i
  assert.ok(validateMigrationRule(valid,target));
  for(const value of [{...valid,script:'echo hi'},{...valid,apiVersion:'v2'},{...valid,source:'latest'},{...valid,states:{'awaiting-merge':{target:'done',replay:[],retain:[]}}}]) assert.throws(()=>validateMigrationRule(value,target));
 });
+
+test('shipped old-CI rules validate against the actual source configuration on both activation routes',async(t)=>{
+ const {mkdtemp,rm}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),{join}=await import('node:path');
+ const {loadPinnedConfig}=await import('../../src/config/repository.ts');
+ const root=await mkdtemp(join(tmpdir(),'old-ci-migration-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const source=await loadPinnedConfig(process.cwd(),root,'896c0003dd5c42350ee0628a4dc30b680409fefa'),target=await bundle();
+ assert.equal((await selectMigration(source,target,'agent-flow:development','awaiting-merge')).stage,'development');
+ assert.equal((await selectMigration(source,target,'bugfix','bug-awaiting-merge')).stage,'bug-development');
+ await assert.rejects(selectMigration(source,target,'agent-flow:development','review'),/no mapping/);
+ await assert.rejects(selectMigration(source,target,'agent-flow:development','awaiting-merge','review'),/forbidden/);
+});

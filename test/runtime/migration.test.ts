@@ -39,3 +39,31 @@ test('receipt commit/readback carries PR 8 and duplicate reconciliation preserve
  assert.equal(f.counts().creates,1);assert.equal(f.counts().resolves,1);
  assert.equal(f.writeControl.load!(f.ref)!.value.migrationId,saved.value.migrationId);
 });
+
+test('uncertain receipt creation recovers the published decision without another resolution or write',async(t)=>{
+ const f=await migrationFixture(t),{reconcileTicket}=await import('../../src/runtime/reconcile.ts');
+ const create=f.d.provider.createComment;let fail=true;
+ f.d.provider.createComment=async(ref,body)=>{const result=await create(ref,body);if(body.includes('agent-flow-migration:v1')&&fail){fail=false;throw new Error('connection lost after create');}return result;};
+ const first=await reconcileTicket(f.d as never,f.ref);assert.equal(first.started,false);assert.equal(f.starts.length,0);
+ const second=await reconcileTicket(f.d as never,f.ref);assert.equal(second.stateId,'development');
+ assert.equal(f.counts().creates,1);assert.equal(f.counts().resolves,1);
+});
+
+test('failed kill and activation loss while draining never commit a migration',async(t)=>{
+ for(const mode of ['kill','activation']) {
+  const f=await migrationFixture(t),{reconcileTicket}=await import('../../src/runtime/reconcile.ts');
+  // Establish source local state so cancellation is required before commitment.
+  await f.writeControl(f.ref,null,{apiVersion:'agent-flow/v1alpha1',kind:'ControlState',flowInstanceId:'11111111-1111-4111-8111-111111111111',flowId:f.source.flow.metadata.id,configRevision:f.source.revision,sequence:0,stateId:'awaiting-merge',resumeStateId:null,activatedBy:f.snapshot.activation.actor,activatedAt:f.snapshot.activation.occurredAt,activationEventId:f.snapshot.activation.eventId,activationLabel:f.snapshot.activation.label,updatedAt:f.snapshot.updatedAt,attemptSeries:null,latestReceipt:null,humanGate:null,changeRequest:{provider:f.selected.provider,repository:f.selected.repository,number:f.selected.number,url:f.selected.url,headSha:f.selected.headSha,state:f.selected.state}});
+  f.d.launcher.cancel=async()=>{if(mode==='kill') throw new Error('cannot confirm termination');f.snapshot.activation.present=false;f.snapshot.labels=f.snapshot.labels.filter(l=>l!=='agent-flow:development');};
+  await reconcileTicket(f.d as never,f.ref);
+  assert.equal(f.snapshot.comments.filter(c=>c.body.includes('<!-- agent-flow-migration:v1')).length,0);
+ }
+});
+
+test('incomplete receipt readback retries only from a complete provider snapshot',async(t)=>{
+ const f=await migrationFixture(t),{reconcileTicket}=await import('../../src/runtime/reconcile.ts');
+ const read=f.d.provider.readRecoveryEvidence;let reads=0;
+ f.d.provider.readRecoveryEvidence=async()=>{const result=await read();reads++;if(reads===3)result.complete=false;return result;};
+ await reconcileTicket(f.d as never,f.ref);assert.equal(f.starts.length,0);
+ await reconcileTicket(f.d as never,f.ref);assert.equal(f.starts.length,1);assert.equal(f.counts().creates,1);
+});
