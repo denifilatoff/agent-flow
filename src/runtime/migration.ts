@@ -278,8 +278,8 @@ export async function processMigration(
           }
         }
         if (
-          !command.resume &&
-          target.flow.spec.states[selection.stage]?.kind === "provider-wait"
+          (!command.resume && target.flow.spec.states[selection.stage]?.kind === "provider-wait")
+          || target.flow.spec.states[selection.stage]?.resultContract === "verification"
         ) {
           const reviewStage = routeStages(source.flow, activation.label)
             .slice(0, -1)
@@ -307,10 +307,11 @@ export async function processMigration(
             !reviewStage ||
             !review ||
             !publication ||
-            !selection.retain.includes(reviewStage)
+            !selection.retain.includes(reviewStage) ||
+            !authorized.has(await d.provider.permission(e.snapshot.ref.repository, review.actor))
           )
             throw new Error(
-              "Cannot retain merge wait without a verified current-head approval; request an explicit replay",
+              "Cannot retain merge wait or resume verification without a verified current-head approval; request an explicit review replay",
             );
           retained.push({
             key: publication.key,

@@ -356,7 +356,14 @@ async function reconcileLocal(
     let stage = freshStart ? entry : providerStage(snapshot, bundle.flow);
     if(boundary) {
       const sourceLabel=boundary.receipt.source.stage==="bug-awaiting-merge"?"awaiting-merge":boundary.receipt.source.stage;
-      if(snapshot.labels.includes("agent-stage:"+sourceLabel) && (await recoveryIteration(bundle,evidence,stage,decision.owner?.metadata.controller??null,dependencies.provider,dependencies.providerApiUrl)).kind==="ambiguous") stage=boundary.receipt.start;
+      if (snapshot.labels.includes("agent-stage:" + sourceLabel)) {
+        const sourceIteration = await recoveryIteration(bundle, evidence, stage,
+          decision.owner?.metadata.controller ?? null, dependencies.provider, dependencies.providerApiUrl);
+        // A stale source label can already identify the replay predecessor for
+        // reassessment. Apply that destination before merge-wait review routing.
+        if (sourceIteration.kind === "ambiguous"
+          || sourceIteration.reassessState === boundary.receipt.start) stage = boundary.receipt.start;
+      }
     }
     stage = freshReviewTarget(bundle.flow, stage, evidence, controllerId) ?? stage;
     if (decision.kind === "resume" && evidence.activeBoundary !== "fresh" && stage !== entryStage(bundle.flow, snapshot.activation.label)) {

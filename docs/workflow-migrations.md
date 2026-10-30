@@ -36,9 +36,11 @@ A failed latest revision never falls back to another cached revision.
 
 `retain` permits retention; it does not require every historical publication to remain eligible. Historical results
 and owner answers always remain context. The current implementation explicitly references an unchanged-contract,
-current-head review when retaining merge wait without replay. A no-replay migration at a human gate explicitly
-retains its verified predecessor comment (assessment, plan, or reproduction), including its content digest. Recovery
-keeps that gate waiting from the retained result rather than repeating the predecessor; later justified progress
+current-head review when retaining merge wait without replay or replaying verification. Verification replay requires
+that permitted preceding approval; missing, stale-head or unauthorized approval is rejected before receipt commitment
+with a request to replay review instead. The retained approval cannot cover a later PR head.
+A no-replay migration at a human gate explicitly retains its verified predecessor comment (assessment, plan, or
+reproduction), including its content digest. Recovery keeps that gate waiting from the retained result rather than repeating the predecessor; later justified progress
 is reconstructed from the gate onward. Optional receipt `source.humanInput` records the ID and body digest of the
 last interpreted human comment so recovery can skip consumed input while leaving a pending answer eligible.
 Missing predecessor evidence rejects the migration and requests an explicit replay. If later feedback produces
@@ -57,6 +59,9 @@ A compatible migration that retains merge wait retains approval only for the rec
 If that head changes, recovery follows the flow's declared `change-request-updated` transition to review before
 reconstructing later results. Empty-store recovery can resume that review, but returning to merge wait requires
 an authorized fresh approval of the current head; the retained approval cannot satisfy it.
+A verification replay requested from merge wait first applies its verified receipt destination, even if the source
+merge-wait label survives receipt commitment. Recovery revalidates the verification result before returning to merge
+wait; a stale label cannot select review before the replay starts.
 A verification-stage replay follows its declared head-change transition to review as well. After SQLite loss,
 recovery reconstructs that review from the receipt head change and requires a fresh current-head approval
 before verification resumes. An unexplained review label at the unchanged receipt head remains ambiguous.

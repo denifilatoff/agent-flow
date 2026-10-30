@@ -505,12 +505,89 @@ test("no-replay merge-wait migration recovers a changed head through fresh revie
   }
 });
 
+function approveSourceHead(f: Awaited<ReturnType<typeof migrationFixture>>) {
+  f.reviews.push({
+    id: "2", headSha: f.selected.headSha, verdict: "approved", actor: f.selected.actor,
+    body: f.selected.body + `\n<!-- agent-flow-review:v1 head=${f.selected.headSha} verdict=approved -->`,
+    submittedAt: f.comment("2", "").createdAt,
+    url: "https://github.com/owner/repo/pull/8#pullrequestreview-2",
+  });
+}
+
+test("merge-wait verification replay applies its destination before stale-label review recovery", async (t) => {
+  for (const interrupted of [false, true]) {
+    await t.test(interrupted ? "receipt before label write" : "ordinary commit", async (t) => {
+      const f = await migrationFixture(t);
+      const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+      f.snapshot.activation.label = "bugfix";
+      f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:awaiting-merge"];
+      f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest --resume-from bug-verification";
+      approveSourceHead(f);
+      const originalBody = f.selected.body;
+      const writeLabels = f.d.provider.setControllerLabels;
+      if (interrupted) f.d.provider.setControllerLabels = async () => { throw new Error("interrupted label write"); };
+      if (interrupted) {
+        await assert.rejects(reconcileTicket(f.d as never, f.ref), /controller label update failed/);
+        assert.equal(f.counts().creates, 1);
+        assert.equal(f.starts.length, 0);
+        await f.reset();
+        f.d.provider.setControllerLabels = writeLabels;
+      }
+      const migrated = await reconcileTicket(f.d as never, f.ref);
+      assert.equal(migrated.stateId, "bug-verification");
+      assert.equal(migrated.configRevision, f.target.revision);
+      assert.equal(f.counts().creates, 1);
+      const { parseMigrationReceipt } = await import("../../src/provider/migration-receipt.ts");
+      const receipt = f.snapshot.comments.map((c) => parseMigrationReceipt(c.body)).find(Boolean)!.receipt;
+      assert.equal(receipt.retained[0]?.stage, "bug-review");
+      assert.equal(f.starts.length, 1);
+      assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, "bug-verification");
+      await f.reset();
+      assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, "bug-verification");
+      assert.equal(f.counts().creates, 1);
+      assert.equal(f.selected.body, originalBody);
+      // A completed replay is reassessed on restart rather than starting another migration.
+      const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+      f.snapshot.comments.push(f.comment("22", marker + "\nVerification complete"));
+      f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:awaiting-merge"];
+      await f.reset();
+      assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, "bug-verification");
+      assert.equal(f.counts().creates, 1);
+    });
+  }
+});
+
+test("verification replay rejects unavailable or unauthorized preceding approval before committing", async (t) => {
+  for (const invalid of ["missing", "head", "authorization"]) {
+    await t.test(invalid, async (t) => {
+      const f = await migrationFixture(t);
+      const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+      const { parseMigrationReceipt } = await import("../../src/provider/migration-receipt.ts");
+      f.snapshot.activation.label = "bugfix";
+      f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:awaiting-merge"];
+      f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest --resume-from bug-verification";
+      if (invalid !== "missing") approveSourceHead(f);
+      if (invalid === "head") f.reviews[0]!.headSha = "2".repeat(40);
+      if (invalid === "authorization") {
+        f.reviews[0]!.actor = { login: "outsider", providerId: "2" };
+        f.d.provider.permission = async (...args: unknown[]) =>
+          (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+      }
+      await reconcileTicket(f.d as never, f.ref);
+      assert.equal(f.snapshot.comments.some((c) => parseMigrationReceipt(c.body)), false);
+      assert.ok(f.snapshot.comments.some((c) => c.body.includes("request an explicit review replay")));
+      assert.equal(f.counts().cancels, 0);
+    });
+  }
+});
+
 test("verification replay follows a changed head to review across SQLite loss", async (t) => {
   const f = await migrationFixture(t);
   const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
   f.snapshot.activation.label = "bugfix";
   f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:bug-verification"];
   f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest --resume-from bug-verification";
+  approveSourceHead(f);
   const migrated = await reconcileTicket(f.d as never, f.ref);
   assert.equal(migrated.stateId, "bug-verification");
   assert.equal(f.counts().creates, 1);
@@ -552,6 +629,7 @@ test("verification replay cannot recover an unexplained review label at the rece
   f.snapshot.activation.label = "bugfix";
   f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:bug-verification"];
   f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest --resume-from bug-verification";
+  approveSourceHead(f);
   assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, "bug-verification");
   f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:bug-review"];
   await f.reset();
