@@ -115,7 +115,10 @@ reassessment. An open bugfix merge wait similarly reassesses the preceding verif
 checked against their logical verdict, author permission and current head; stale or missing approval returns through
 review. After migration, authorized approvals for superseded heads remain historical evidence when reconstructing
 downstream stages, so a head-change review cycle does not count both approvals as current results. Recovery still
-requires an authorized current-head approval before restoring merge wait. The
+requires an authorized current-head approval before restoring merge wait. For a verification replay followed by a
+head change, completed authorized `BUG RECEIPT · VERIFIED` diagnostics preceding the new review belong to the old
+iteration. Retire them when reconstructing the declared head-change transition; keep the diagnostic following the
+current-head approval available for ordinary verification reassessment. The
 reassessment uses existing agent decisions and provider readback, preserves the original publication identity, and
 keeps an authorized answer after that publication eligible. It adds no common metadata fields. Recovery can rerun an
 agent to interpret published content and inspect code. An interpretation that

@@ -818,6 +818,31 @@ async function recoveryIteration(
     // Verification and retained merge approval cover the receipt's observed
     // head. A later head follows the declared update transition to fresh review.
     recoveryStart = updatedTarget;
+    if (boundaryState?.resultContract === "verification") {
+      // Completed verification belongs to the preceding head iteration. Retire
+      // its authorized diagnostic before matching fresh review/verification;
+      // the diagnostic after the current-head review must remain revalidatable.
+      while (active[0]) {
+        const publication = active[0];
+        const kind = publicationObjectKind(publication.key, evidence.snapshot.ref, bundle);
+        if (kind !== "comment") break;
+        const completion = evidence.snapshot.comments.find((comment) =>
+          hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
+        if (!completion || completion.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
+        const permission = await providerCall("provider permission read failed", () =>
+          provider.permission(evidence.snapshot.ref.repository, completion.actor));
+        if (!AUTHORIZED.has(permission)) break;
+        active = active.slice(1);
+        const approval = active[0] && evidence.reviews.find((review) =>
+          hasPublicationIdentity(active[0]!.key, evidence.snapshot.ref, "review", review.id));
+        if (!approval || approval.verdict !== "approved" || approval.headSha === linked.headSha
+          || !/^[0-9a-f]{40}$/.test(approval.headSha)) break;
+        const reviewerPermission = await providerCall("provider permission read failed", () =>
+          provider.permission(evidence.snapshot.ref.repository, approval.actor));
+        if (!AUTHORIZED.has(reviewerPermission)) break;
+        active = active.slice(1);
+      }
+    }
   }
   const startState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
   const reworkTarget = startState?.on?.["review-changes-requested"]?.target;
