@@ -945,6 +945,36 @@ async function recoveryIteration(
       }
     }
   }
+  if (migration && linked) {
+    for (const [verificationId, verification] of Object.entries(bundle.flow.spec.states)) {
+      const reviewTarget = verification.on?.["change-request-updated"]?.target;
+      if (verification.resultContract !== "verification" || !reviewTarget
+        || bundle.flow.spec.states[reviewTarget]?.resultContract !== "review") continue;
+      const prefix = successfulPublicationPath(bundle.flow, verificationId,
+        evidence.snapshot.activation.label, recoveryStart);
+      if (!prefix?.length || prefix.at(-1) !== "review") continue;
+      const index = prefix.length - 1;
+      // Earlier replays can complete verification before the head changes too.
+      // Retire only the authorized old-head approval/verification pair, keeping
+      // the preceding work and the current-head verification candidate intact.
+      while (prefix.every((kind, offset) => active[offset]
+        && publicationObjectKind(active[offset]!.key, evidence.snapshot.ref, bundle) === kind)) {
+        const approval = evidence.reviews.find((review) =>
+          hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "review", review.id));
+        const publication = active[index + 1];
+        const completion = publication && evidence.snapshot.comments.find((comment) =>
+          hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
+        if (!approval || approval.verdict !== "approved" || approval.headSha === linked.headSha
+          || !/^[0-9a-f]{40}$/.test(approval.headSha)
+          || completion?.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
+        const permissions = await Promise.all([approval.actor, completion.actor].map((actor) =>
+          providerCall("provider permission read failed", () =>
+            provider.permission(evidence.snapshot.ref.repository, actor))));
+        if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
+        active.splice(index, 2);
+      }
+    }
+  }
   if (bundle.flow.spec.states[stage]?.resultContract === "review") {
     active = active.filter((publication) =>
       publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) !== "review"

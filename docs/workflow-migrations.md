@@ -65,6 +65,10 @@ wait; a stale label cannot select review before the replay starts.
 A verification-stage replay follows its declared head-change transition to review as well. After SQLite loss,
 recovery reconstructs that review from the receipt head change and requires a fresh current-head approval
 before verification resumes. An unexplained review label at the unchanged receipt head remains ambiguous.
+After an earlier bugfix replay completes verification, recovery retires authorized old-head approval/verification
+pairs before reconstructing fresh review and verification for the current head. Preceding replay results remain
+available, and the current-head verification result still requires ordinary revalidation. Missing or unauthorized
+completion evidence remains ambiguous rather than being discarded.
 When required CI routes back to development, successive authorized development completions can supersede earlier
 completions without a rejection review. Recovery keeps the newest completion available for revalidation and still
 requires current-head CI and approval. Intervening human input remains subject to human-gate recovery checks.
