@@ -1,3 +1,5 @@
+import {mkdtemp,mkdir,rm} from "node:fs/promises";
+import {compileAgentContext} from "./harness/apm.ts";
 import type { Server } from "node:http";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,6 +11,7 @@ import {
   prepareConfigurationRepository,
   configurationGitAuthentication,
   stagePinnedPackage,
+  resolveMigrationTarget,
 } from "./config/repository.ts";
 import { validateSemantics } from "./config/semantic.ts";
 import { providerTokenEnvironment } from "./config/provider-credentials.ts";
@@ -239,7 +242,10 @@ export function createProductionDependencies(
     },
     createController(bundle: ConfigBundle, providers: Providers, harnesses: Harnesses, local: StartupRuntime): Controller {
       if (!loadedCredential) throw new Error("provider credential is not loaded");
-      return composeController(bundle, providers, harnesses, load, runtime, loadedCredential, overrides, local);
+      return composeController(bundle, providers, harnesses, load, runtime, loadedCredential, overrides, local, async(selector)=>{
+        prepared ??= prepareConfigurationRepository(configSource,dataDirectory,configurationGitAuthentication(configSource,loadedCredential));
+        return resolveMigrationTarget(await prepared,selector,configurationGitAuthentication(configSource,loadedCredential));
+      });
     },
     redactSessionContent: startupRedactor.redact,
     registerStartupSecret: startupRedactor.register,
@@ -256,6 +262,7 @@ function composeController(
   credential: import("./harness/types.ts").ProviderCredential,
   overrides: ProductionOverrides,
   local: StartupRuntime,
+  resolveTarget:(selector:string)=>Promise<string>,
 ): Controller {
   const configured = runtime.effective();
   const dataDirectory = configured.runtime.dataDirectory;
@@ -335,6 +342,21 @@ function composeController(
         launcher: requiredRunner(runners, ref.provider),
         writeControl,
         config: {
+          resolveTarget,
+          async validateTarget(target) {
+            const catalog=await validateSemantics(target);
+            const validationRoot=await mkdtemp(resolve(dataDirectory,"migration-validation-"));
+            try {
+              for(const [agentId,targets] of Object.entries(catalog)) {
+                const binding=runtime.effective().execution.agents[agentId];
+                if(!binding || !targets.includes(binding.harness) || !harnesses[binding.harness]) throw new Error("Target runtime agent/harness binding is unavailable: "+agentId);
+                await harnesses[binding.harness]!.preflight();
+                const packageDirectory=await stagePinnedPackage(target.root,target.revision,target.catalog.agents[agentId]!.package,resolve(validationRoot,agentId+"-package"));
+                const output=resolve(validationRoot,agentId+"-compiled");await mkdir(output);
+                await (attemptRunnerOverrides.compileAgent??compileAgentContext)(agentId,packageDirectory,binding.harness,output);
+              }
+            } finally {await rm(validationRoot,{recursive:true,force:true});}
+          },
           loadCurrent: async () => bundle,
           loadPinned: async (revision) => {
             if (revision === bundle.revision) return bundle;

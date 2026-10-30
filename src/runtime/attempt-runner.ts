@@ -232,6 +232,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           request.ref,
           control.flowInstanceId,
           dependencies.providerCredential,
+          request.migration ? {...request.migration.receipt.change,headSha:request.snapshot.changeRequest!.headSha} : undefined,
         );
         assertCurrent(running, series, attempt);
         const context = attemptContext(request, control);
@@ -278,6 +279,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           decisionPath: session.decisionPath,
           changeRequest: request.snapshot.changeRequest,
           sourceComment: request.sourceComment,
+          migration:request.migration?.receipt,
           excludedReviewIds: request.publicationKeys.flatMap((key) => {
             const value = JSON.parse(key);
             return value[3] === "review" ? [value[4]] : [];
@@ -325,6 +327,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
             ticket: request.ref,
             sourceComment: request.sourceComment,
             pinnedChangeRequest: request.snapshot.changeRequest,
+            migration:request.migration?.receipt,
           },
           dependencies.provider,
           running.cancelled,
@@ -533,7 +536,7 @@ async function persist(
 function attemptContext(request: AttemptRequest, controlState: ControlState): AttemptContext {
   const artifacts: ProviderArtifact[] = [...request.snapshot.comments];
   if (request.snapshot.changeRequest) artifacts.push(request.snapshot.changeRequest);
-  return { ticket: request.snapshot, controlState, artifacts, mode: request.mode };
+  return { ticket: request.snapshot, controlState, artifacts, mode: request.mode, ...request.migration ? {migration:request.migration.receipt} : {} };
 }
 
 function assertCompiled(compiled: CompiledAgent, agentId: string, target: "claude" | "codex"): void {

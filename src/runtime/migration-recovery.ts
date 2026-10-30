@@ -21,7 +21,7 @@ export function assertCarriedChange(change:NormalizedChangeRequest,receipt:Migra
  if(marker.kind!=='current' || source.kind!=='current' || !isDeepStrictEqual(marker.metadata,source.metadata)) throw new Error('Selected PR source marker changed');
 }
 export async function recoverMigration(evidence:RecoveryEvidence,load:(sha:string)=>Promise<ConfigBundle>):Promise<RecoveryEvidence> {
- const rows=evidence.snapshot.comments.flatMap(comment=>{const parsed=parseMigrationReceipt(comment.body);return parsed?[{comment,...parsed}]:[];});
+ const rows=evidence.snapshot.comments.filter(comment=>!evidence.snapshot.activation.occurredAt || Date.parse(comment.createdAt)>=Date.parse(evidence.snapshot.activation.occurredAt)).flatMap(comment=>{const parsed=parseMigrationReceipt(comment.body);return parsed?[{comment,...parsed}]:[];});
  if(!rows.length) return evidence;
  if(!evidence.complete) throw new Error('Migration recovery requires complete provider evidence');
  const ids=new Set(rows.map(r=>r.comment.id));

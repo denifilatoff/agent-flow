@@ -29,6 +29,9 @@ import type {
   RequiredChecks,
   TicketRef,
 } from "../provider/types.js";
+import { recoverMigration, type RecoveredMigration } from "./migration-recovery.ts";
+import { isMigrationCommand } from "./migration-request.ts";
+import { processMigration } from "./migration.ts";
 import { deriveEvent } from "./derive-event.ts";
 import { writeControlCas, type ControlWriter } from "./control-state.ts";
 import { classifyRecovery, type RecoveryDecision } from "./recovery.ts";
@@ -36,6 +39,7 @@ import { classifyRecovery, type RecoveryDecision } from "./recovery.ts";
 const AUTHORIZED = new Set<Permission>(["write", "maintain", "admin"]);
 
 export interface AttemptRequest {
+  migration?: RecoveredMigration;
   ref: TicketRef;
   snapshot: ProviderTicketSnapshot;
   control: ControlState;
@@ -59,11 +63,14 @@ export interface AttemptLauncher {
 }
 
 export interface ReconcileConfigSource {
+  resolveTarget?(selector:string):Promise<string>;
+  validateTarget?(bundle:ConfigBundle):Promise<void>;
   loadCurrent(): Promise<ConfigBundle>;
   loadPinned(revision: string): Promise<ConfigBundle>;
 }
 
 export interface ReconcileDependencies {
+  migration?: RecoveredMigration;
   provider: ProviderAdapter;
   config: ReconcileConfigSource;
   launcher: AttemptLauncher;
@@ -122,10 +129,17 @@ export async function reconcileTicket(
         eventId: pinned.activationEventId, actor: pinned.activatedBy, occurredAt: pinned.activatedAt,
       };
     }
-    const evidence = currentActivationEvidence(observedEvidence);
+    let evidence = currentActivationEvidence(observedEvidence);
+    try {
+      evidence=await recoverMigration(evidence,revision=>dependencies.config.loadPinned(revision));
+      evidence=await processMigration(dependencies,evidence);
+    } catch(error) {
+      evidence={...evidence,ambiguities:[...evidence.ambiguities,error instanceof Error?error.message:"Migration evidence conflicts"]};
+    }
+    dependencies={...dependencies,migration:evidence.migration};
     snapshot = evidence.snapshot;
     assertSnapshot(snapshot, ref);
-    let decision = classifyRecovery(evidence, dependencies.controllerId);
+    let decision = classifyRecovery(evidence, dependencies.controllerId!);
     if (dependencies.writeControl.load && dependencies.writeControl.recordRecovery) {
       const result = await reconcileLocal(dependencies, evidence, decision);
       const observed = dependencies.writeControl.load(ref)?.value;
@@ -231,6 +245,11 @@ async function reconcileLocal(
     throw new Error("local execution belongs to another controller identity");
   }
   let control = stored?.value.control ?? null;
+  const boundary=evidence.migration;
+  if(boundary && stored?.value.migrationId!==boundary.id && decision.kind!=="foreign" && decision.kind!=="ambiguous" && snapshot.open && snapshot.activation.present) {
+    if(control) await dependencies.launcher.cancel(control.flowInstanceId);
+    control=null;
+  }
   if (control
     && evidence.activeBoundary === "fresh"
     && snapshot.activation.eventId !== null
@@ -322,9 +341,13 @@ async function reconcileLocal(
   }
 
   if (!control) {
-    const freshStart = evidence.activeBoundary === "fresh" && evidence.publications.length === 0;
+    const freshStart = !evidence.migration && evidence.activeBoundary === "fresh" && evidence.publications.length === 0;
     const entry = entryStage(bundle.flow, snapshot.activation.label);
     let stage = freshStart ? entry : providerStage(snapshot, bundle.flow);
+    if(boundary) {
+      const sourceLabel=boundary.receipt.source.stage==="bug-awaiting-merge"?"awaiting-merge":boundary.receipt.source.stage;
+      if(snapshot.labels.includes("agent-stage:"+sourceLabel)) stage=boundary.receipt.start;
+    }
     stage = freshReviewTarget(bundle.flow, stage, evidence, controllerId) ?? stage;
     if (decision.kind === "resume" && evidence.activeBoundary !== "fresh" && stage !== entryStage(bundle.flow, snapshot.activation.label)) {
       await writer.recordRecovery!(ref, evidence, decision, null);
@@ -445,10 +468,11 @@ function clearUncommittedReceipt(
     const id = artifact.kind === "change-request" ? String(artifact.number) : artifact.id;
     const publication = evidence.publications.find((candidate) =>
       hasPublicationIdentity(candidate.key, evidence.snapshot.ref, artifact.kind, id));
-    if (!publication
-      || (artifact.kind === "review" && publication.ownershipEligible === false)
-      || publication.metadata.config !== control.configRevision
-      || publication.metadata.controller !== controllerId) return false;
+    const carried=artifact.kind==="change-request" && evidence.migration?.receipt.change.number===artifact.number;
+    if ((!publication && !carried)
+      || (artifact.kind === "review" && publication?.ownershipEligible === false)
+      || !carried && publication?.metadata.config !== control.configRevision
+      || !carried && publication?.metadata.controller !== controllerId) return false;
     if (artifact.kind === "change-request") {
       return evidence.changes.some((change) => change.number === artifact.number
         && change.headSha === artifact.headSha);
@@ -719,7 +743,7 @@ function recoveryIteration(
     }
     return { kind: "ready", baselineKeys, humanCutoff: null };
   }
-  const committed = successfulPublicationPath(bundle.flow, stage, evidence.snapshot.activation.label);
+  const committed = successfulPublicationPath(bundle.flow, stage, evidence.snapshot.activation.label,evidence.migration?.receipt.start);
   if (!committed) {
     return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
   }
@@ -786,9 +810,9 @@ function recoveryIteration(
   };
 }
 
-function successfulPublicationPath(flow: FlowDefinition, target: string, activationLabel: string | null): PublicationObjectKind[] | null {
+function successfulPublicationPath(flow: FlowDefinition, target: string, activationLabel: string | null,start?:string): PublicationObjectKind[] | null {
   const queue: Array<{ stateId: string; kinds: PublicationObjectKind[]; visited: Set<string> }> = [{
-    stateId: entryStage(flow, activationLabel),
+    stateId: start ?? entryStage(flow, activationLabel),
     kinds: [],
     visited: new Set(),
   }];
@@ -1187,7 +1211,7 @@ async function startIfNeeded(
   }
 
   if (!agentId || !resultContract) throw new Error("launchable flow state is missing its agent contract");
-  const inputRevision = attemptInputRevision(control, snapshot, sourceComment);
+  const inputRevision = attemptInputRevision(control, snapshot, sourceComment,dependencies.migration?.id);
   if (hasAcceptedAttempt(control, agentId, inputRevision)) return false;
 
   await dependencies.launcher.start({
@@ -1204,6 +1228,7 @@ async function startIfNeeded(
     inputRevision,
     controllerId: dependencies.controllerId ?? control.flowInstanceId,
     publicationKeys,
+    migration:dependencies.migration,
   });
   return true;
 }
@@ -1224,9 +1249,11 @@ function attemptInputRevision(
   control: ControlState,
   snapshot: ProviderTicketSnapshot,
   sourceComment: ProviderComment | null,
+  migrationId?:string,
 ): string {
   const parts: unknown[] = [
     ["config", control.configRevision],
+    ...migrationId ? [["migration",migrationId]] : [],
     ["ticket", snapshot.title, snapshot.description],
   ];
   if (sourceComment) {
@@ -1270,7 +1297,7 @@ async function firstAuthorizedComment(
 ): Promise<ProviderComment | null> {
   const cutoff = humanCutoff(snapshot.comments, control);
   const candidates = snapshot.comments
-    .filter((candidate) => candidate.createdAt > cutoff && !isMarked(candidate.body))
+    .filter((candidate) => candidate.createdAt > cutoff && !isMarked(candidate.body) && !isMigrationCommand(candidate.body) && !candidate.body.includes("<!-- agent-flow-migration-diagnostic:"))
     .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
   for (const candidate of candidates) {
     const permission = await providerCall(
