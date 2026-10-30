@@ -113,7 +113,13 @@ test("agent-only migration at a replayed human gate retains its plan across empt
   assert.equal((await run.control()).stateId, "plan-review");
   assert.equal((await run.control()).configRevision, target);
   assert.deepEqual(await run.agentCommentIds(), migratedComments);
+  await run.answer("Changes requested: include restart validation.");
+  await run.untilState("planning");
+  await run.untilState("plan-review");
+  const revisedComments = await run.agentCommentIds();
+  assert.ok(revisedComments.length > migratedComments.length);
   await run.answer("approved");
+  await run.resetDatabaseAndRestart();
   await run.untilState("awaiting-merge");
   await run.resetDatabaseAndRestart();
   await run.untilState("awaiting-merge");

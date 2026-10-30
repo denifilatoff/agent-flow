@@ -719,3 +719,60 @@ test("no-replay human-gate migration preserves consumed input and leaves a pendi
     /Retained human gate input is unavailable or changed/,
   );
 });
+
+test("empty-store recovery reassesses the latest migrated gate iteration before selecting fresh approval", async (t) => {
+  const f = await migrationFixture(t);
+  const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+  const { readDecisionAndBuildReceipt } = await import("../../src/runtime/receipts.ts");
+  const { readFile, writeFile, mkdtemp, rm } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { parse } = await import("yaml");
+  f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+  f.target.flow = structuredClone(f.source.flow);
+  f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:plan-review"];
+  f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest";
+  await reconcileTicket(f.d as never, f.ref);
+  const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+  f.snapshot.comments.push(
+    f.comment("20", "Changes requested: add recovery details."),
+    f.comment("21", marker + "\nRevised plan with recovery details."),
+    f.comment("22", "Changes requested: cover restart validation too."),
+    f.comment("23", marker + "\nRevised plan covering recovery and restart validation."),
+    f.comment("24", "Approved"),
+  );
+  await f.reset();
+  const recovered = await reconcileTicket(f.d as never, f.ref);
+  assert.equal(recovered.stateId, "planning");
+  const request = f.starts.at(-1) as import("../../src/runtime/reconcile.ts").AttemptRequest;
+  assert.equal(request.mode, "stage");
+  assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === "21"), true);
+  assert.equal(request.publicationKeys.some((key) => JSON.parse(key)[4] === "23"), false);
+  const root = await mkdtemp(join(tmpdir(), "migration-gate-decision-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "decision.json");
+  await writeFile(path, JSON.stringify({ event: "agent-succeeded" }));
+  const attemptId = "11111111-1111-4111-8111-111111111111";
+  const receipt = await readDecisionAndBuildReceipt(path, {
+    flow: request.bundle.flow, stateId: request.stateId, mode: request.mode,
+    resultContract: request.resultContract, flowInstanceId: request.control.flowInstanceId,
+    attemptId, configRevision: f.target.revision, controllerId: f.d.controllerId,
+    publicationKeys: request.publicationKeys, ticket: f.ref,
+    pinnedChangeRequest: request.control.changeRequest, sourceComment: null,
+  }, f.d.provider as never, false);
+  assert.equal(receipt.artifacts[0]?.kind === "comment" && receipt.artifacts[0].id, "23");
+  const before = f.d.writeControl.load!(f.ref)!.value.control!;
+  await f.d.writeControl(f.ref, before, {
+    ...before, sequence: before.sequence + 1, latestReceipt: receipt,
+    attemptSeries: {
+      seriesId: attemptId, agentId: "planner", stateId: "planning", inputRevision: "recovered-plan",
+      maxAttempts: 3, consumed: 1,
+      current: { attemptId, status: "succeeded", startedAt: before.updatedAt },
+    },
+  });
+  assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, "plan-review");
+  const gateRequest = f.starts.at(-1) as import("../../src/runtime/reconcile.ts").AttemptRequest;
+  assert.equal(gateRequest.mode, "human-input");
+  assert.equal(gateRequest.sourceComment?.id, "24");
+  assert.equal(f.counts().creates, 1);
+});

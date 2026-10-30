@@ -752,10 +752,28 @@ function recoveryIteration(
       hasPublicationIdentity(predecessor[0]!.key, evidence.snapshot.ref, "comment", comment.id));
     if (!result) return { kind: "ambiguous", baselineKeys, reason: "Migrated human gate predecessor is unavailable" };
     const input = evidence.snapshot.comments.find((comment) => comment.id === migration.receipt.source.humanInput?.id);
-    return {
-      kind: "ready", baselineKeys,
-      humanCutoff: input && input.createdAt > result.createdAt ? input.createdAt : result.createdAt,
-    };
+    const cutoff = input && input.createdAt > result.createdAt ? input.createdAt : result.createdAt;
+    const later = evidence.publications.filter((publication) =>
+      publication.metadata.controller === ownerController
+      && !migration.receipt.retained.some((retained) => retained.key === publication.key)
+      && publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) !== "change-request")
+      .toSorted((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
+        || left.key.localeCompare(right.key));
+    if (later.length > 0) {
+      if (later.some((publication) =>
+        publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) !== "comment"
+        || !baselineKeys.includes(publication.key))) {
+        return { kind: "ambiguous", baselineKeys, reason: "Migrated human gate iteration cannot be isolated" };
+      }
+      // Revalidate the newest predecessor result before accepting answers to that iteration.
+      const candidate = later.at(-1)!;
+      return {
+        kind: "ready", reassessState: predecessor[0]!.stage,
+        baselineKeys: baselineKeys.filter((key) => key !== candidate.key),
+        humanCutoff: later.length > 1 ? later.at(-2)!.createdAt : cutoff,
+      };
+    }
+    return { kind: "ready", baselineKeys, humanCutoff: cutoff };
   }
   if(evidence.migration?.receipt.start===stage && bundle.flow.spec.states[stage]?.kind==="provider-wait" && evidence.migration.receipt.retained.length) return {kind:"ready",baselineKeys,humanCutoff:null};
   if (!evidence.migration && bundle.flow.spec.states[stage]?.kind === "provider-wait" && linked?.state === "merged") {
@@ -771,7 +789,7 @@ function recoveryIteration(
   if (!committed) {
     return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
   }
-  const active = evidence.publications
+  let active = evidence.publications
     .filter((publication) => !migration?.receipt.retained.some((retained) => retained.key === publication.key))
     .filter(({ metadata }) => ownerController === null || metadata.controller === ownerController)
     .filter((publication) => {
@@ -784,6 +802,17 @@ function recoveryIteration(
     })
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
+  if (migration && migration.receipt.start !== stage
+    && bundle.flow.spec.states[migration.receipt.start]?.kind === "human-gate"
+    && bundle.flow.spec.states[stage]?.kind === "provider-wait"
+    && active.length > committed.length) {
+    const iterations = active.slice(0, active.length - committed.length);
+    if (iterations.every((publication) =>
+      publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) === "comment")) {
+      // Completed gate revisions precede the downstream successful publication path.
+      active = active.slice(iterations.length);
+    }
+  }
   const kinds = active.map((publication) => publicationObjectKind(publication.key, evidence.snapshot.ref, bundle));
   if (kinds.some((kind) => kind === null) || !active.every(({ key }) => baselineKeys.includes(key))) {
     return { kind: "ambiguous", baselineKeys, reason: "publication identity cannot be verified for the active work" };

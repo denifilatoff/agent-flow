@@ -41,9 +41,11 @@ retains its verified predecessor comment (assessment, plan, or reproduction), in
 keeps that gate waiting from the retained result rather than repeating the predecessor; later justified progress
 is reconstructed from the gate onward. Optional receipt `source.humanInput` records the ID and body digest of the
 last interpreted human comment so recovery can skip consumed input while leaving a pending answer eligible.
-Missing predecessor evidence rejects the migration and requests an explicit replay. Other preceding publications
-remain context rather than being automatically accepted again. Rules that change contracts cannot retain those
-changed result contracts.
+Missing predecessor evidence rejects the migration and requests an explicit replay. If later feedback produces
+revised predecessor publications, empty-store recovery revalidates the newest publication before selecting its
+pending human answer. Completed gate revisions remain history when reconstructing the downstream merge-wait path.
+Other preceding publications remain context rather than being automatically accepted again. Rules that change
+contracts cannot retain those changed result contracts.
 
 ## Complete examples
 
