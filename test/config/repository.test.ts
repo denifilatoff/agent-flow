@@ -392,3 +392,19 @@ test("rejects a symlinked materialization root without writing through it", asyn
   await assert.rejects(loadPinnedConfig(repo.path, data), /config/i);
   assert.deepEqual(await readdir(outside), []);
 });
+
+test('strict migration selectors refresh remote latest and freeze exact tag/SHA choices',async(t)=>{
+ const {resolveMigrationTarget}=await import('../../src/config/repository.ts');
+ const repo=await TestRepository.create(),data=await mkdtemp(join(tmpdir(),'migration-target-'));
+ t.after(async()=>{await rm(repo.path,{recursive:true,force:true});await rm(data,{recursive:true,force:true});});
+ const source=pathToFileURL(repo.path).href, prepared=await prepareConfigurationRepository(source,data), first=await repo.head();
+ await exec('git',['-C',repo.path,'tag','-a','release-1','-m','release']);
+ await repo.commitChangedFlow();
+ assert.equal(await resolveMigrationTarget(prepared,'latest'),await repo.head());
+ assert.equal(await resolveMigrationTarget(prepared,'release-1'),first);
+ assert.equal(await resolveMigrationTarget(prepared,first),first);
+ for(const selector of ['HEAD','main~1','--all','refs/heads/main','bad tag']) await assert.rejects(resolveMigrationTarget(prepared,selector));
+ await rename(repo.path,repo.path+'-offline');
+ await assert.rejects(resolveMigrationTarget(prepared,'latest'),/refresh/);
+ await rename(repo.path+'-offline',repo.path);
+});
