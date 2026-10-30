@@ -909,3 +909,16 @@ test("preserves an existing destination when exclusive auth copy collides", asyn
 
   assert.equal(await readFile(destination, "utf8"), "existing credential\n");
 });
+
+test('unconfirmed kill exposes termination proof that resolves only on eventual exit',async(t)=>{
+ const {HarnessTerminationError}=await import('../../src/harness/process.ts');
+ const fixture=await runFixture('codex');t.after(()=>rm(fixture.root,{recursive:true,force:true}));
+ const processes=processFixture(),adapter=createCodexAdapter({authFile:fixture.authFile},processes.dependencies);
+ fixture.input.timeoutSeconds=3;const pending=adapter.run(fixture.input);await waitForSpawn(processes.calls);
+ const child=processes.children[0]!;child.exitOnTerm=false;child.killBehavior.set('SIGKILL','false');
+ processes.clock.fire(3000);processes.clock.fire(10000);processes.clock.fire(1000);
+ let failure:unknown;try{await pending;}catch(error){failure=error;}
+ assert.ok(failure instanceof HarnessTerminationError);
+ let confirmed=false;void failure.termination.then(()=>{confirmed=true;});await Promise.resolve();assert.equal(confirmed,false);
+ child.finish(null,'SIGKILL');await failure.termination;assert.equal(confirmed,true);
+});

@@ -120,6 +120,11 @@ export class HarnessProcessError extends Error {
   }
 }
 
+export class HarnessTerminationError extends HarnessProcessError {
+  readonly termination:Promise<void>;
+  constructor(target:HarnessTarget, termination:Promise<void>) { super(target,false);this.termination=termination; }
+}
+
 const execFile = promisify(execFileCallback);
 
 const DEFAULT_DEPENDENCIES: ProcessDependencies = {
@@ -355,6 +360,10 @@ export async function runHarnessProcess(
     let timedOut = false;
     let terminating = false;
     let exited = false;
+    let confirmTermination!:()=>void;
+    const termination=new Promise<void>(resolve=>{confirmTermination=resolve;});
+    child.once("exit",()=>confirmTermination());
+    child.once("close",()=>confirmTermination());
     let failure: HarnessProcessError | undefined;
     let graceTimer: TimerHandle | undefined;
     let drainTimer: TimerHandle | undefined;
@@ -414,7 +423,7 @@ export async function runHarnessProcess(
         return;
       }
       terminalTimer = dependencies.setTimeout(() => {
-        failure ??= new HarnessProcessError(target, false);
+        failure = new HarnessTerminationError(target, termination);
         void complete(child.exitCode, child.signalCode);
       }, SIGNAL_FAILURE_SETTLE_MS);
       signalChild("SIGKILL");

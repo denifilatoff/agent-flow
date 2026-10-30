@@ -13,6 +13,7 @@ import type {
   ExecutionSnapshot,
 } from "../config/types.js";
 import { validateDocument } from "../config/schema-validator.ts";
+import { HarnessTerminationError } from "../harness/process.ts";
 import { compileAgentContext, type CompiledAgent } from "../harness/apm.ts";
 import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../harness/types.ts";
 import { advanceControlState, type ControlStatePatch } from "../provider/control-comment.ts";
@@ -57,6 +58,7 @@ interface ActiveAttempt {
   completion: Promise<void>;
   control: ControlState;
   launched: boolean;
+  terminationFailure?: HarnessTerminationError;
   ready: Promise<void>;
   resolveReady(): void;
   rejectReady(error: unknown): void;
@@ -110,7 +112,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       }).finally(() => {
         dependencies.attemptFinished?.();
         if (!running.launched) running.resolveReady();
-        if (active.get(flowId) === running) active.delete(flowId);
+        if (!running.terminationFailure && active.get(flowId) === running) active.delete(flowId);
         if (running.launched && !running.cancelled) onSettled?.(request.ref);
       });
       await running.ready;
@@ -122,6 +124,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       running.cancelled = true;
       running.abort.abort();
       await running.completion;
+      if(running.terminationFailure) throw new Error("Cannot confirm old agent termination; migration is blocked");
     },
 
     isRunning(flowInstanceId): boolean {
@@ -342,6 +345,14 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         );
         return;
       } catch (error) {
+        if(error instanceof HarnessTerminationError) {
+          running.terminationFailure=error;
+          void error.termination.then(()=>{
+            running.terminationFailure=undefined;
+            if(active.get(request.control.flowInstanceId)===running) active.delete(request.control.flowInstanceId);
+          });
+          return;
+        }
         if (running.cancelled || running.abort.signal.aborted) return;
         const classified = classifyAttemptError(error);
         const failedSeries: AttemptSeries = {
