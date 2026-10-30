@@ -8,6 +8,13 @@ SQLite-local execution, `config`/`controller` publication metadata, and ownershi
 No second ownership read is added before publication. Agent attempts write a minimal local `AgentDecision`; the
 controller reads provider evidence and stores the verified `AgentReceipt` in local SQLite.
 
+New successful assessment, plan and diagnostic comments also append a separate
+`<!-- agent-flow-result:v1 state=planning -->` line with the actual agent state. It identifies comment results during
+recovery across multiple human gates; it does not extend the common `config`/`controller` object, establish ownership,
+or replace result validation and author authorization. Questions and progress notes do not carry it. Existing
+publications need no rewrite; ambiguous legacy multi-gate histories require clarification. See
+[workflow migration recovery](workflow-migrations.md) for the eligibility rules.
+
 ## Scope
 
 The prototype runs one polling controller in one Docker container. It supports GitHub and GitLab through separate REST
@@ -296,3 +303,17 @@ liveness. `/health/ready` returns success after configuration validation, identi
 authentication, filesystem checks, harness preflight, and startup reconciliation complete. `/api/status` exposes safe
 runtime and restart status. The read-only dashboard includes recovery disposition and reason for paused tickets,
 including tickets whose local flow identity could not be reconstructed. Secret values and paths remain excluded.
+
+## Workflow migration contracts
+
+Migration rules live in target-pinned `config/migrations/` and use `schemas/v1/workflow-migration.schema.json`.
+Their format is independent of required Stack agent contracts so old Stack bundles remain loadable. Separately
+versioned immutable receipt metadata uses `schemas/v1/migration-receipt.schema.json`, preserving the common
+publication marker’s exact two-field contract. The controller resolves latest/tag/full-SHA selectors strictly only
+for explicit migration acceptance, validates and freezes compatibility, confirms old process termination, and
+verifies provider readback before target work. A verified carried PR exception applies only to that exact
+repository/number/URL/head repository/branch/original marker. Replayed development additionally requires a fresh
+marked completion comment, allowing explicit revalidation without rewriting the PR marker. Context retains history;
+baseline identities exclude stale results and human approvals, including same-pin replay. GitHub is supported
+initially; GitLab migration is explicitly rejected. See [workflow-migrations.md](workflow-migrations.md) for the
+canonical rule format, tested examples and validation commands.

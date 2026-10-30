@@ -453,3 +453,67 @@ test("disables Git prompts for a self-managed provider without injecting credent
   assert.equal(cloneCommands[0]?.args.length, 4);
   assert.equal(cloneEnvironments[0]?.GIT_TERMINAL_PROMPT, "0");
 });
+
+test('carried PR restores its selected branch after workspace loss and preserves dirty matching work',async(t)=>{
+ const f=await fixture();t.after(()=>rm(f.root,{recursive:true,force:true}));
+ await git(f.source,'switch','-c','feature');await writeFile(join(f.source,'feature.txt'),'selected\n');await git(f.source,'add','.');await git(f.source,'commit','-m','selected branch');
+ const sha=await git(f.source,'rev-parse','HEAD');
+ const run:CommandRunner=async(file,args,options)=>{
+  if(file==='git' && args[0]==='fetch') return execFile(file,['fetch',f.source,...args.slice(2)],options);
+  return f.run(file,args,options);
+ };
+ const manager=new WorkspaceManager(f.data,run),selected={repository:REPOSITORY.name,headRepository:REPOSITORY.name,headBranch:'feature',headSha:sha};
+ const workspace=await manager.prepareWorkspace(REPOSITORY,ticket(2),FLOW_1,undefined,selected);
+ assert.equal(await git(workspace.worktree,'branch','--show-current'),'feature');
+ await writeFile(join(workspace.worktree,'unpublished.txt'),'preserve');
+ await manager.prepareWorkspace(REPOSITORY,ticket(2),FLOW_1,undefined,selected);
+ assert.equal(await readFile(join(workspace.worktree,'unpublished.txt'),'utf8'),'preserve');
+ await assert.rejects(manager.prepareWorkspace(REPOSITORY,ticket(2),FLOW_1,undefined,{...selected,headBranch:'other'}),/dirty|branch/);
+});
+
+for (const host of ["github.com", "github.example.test"]) {
+  test(`restores a carried private branch using the configured credential on ${host}`, async (t) => {
+    const f = await fixture();
+    t.after(() => rm(f.root, { recursive: true, force: true }));
+    const repository = {
+      ...REPOSITORY,
+      host,
+      cloneRoot: `https://${host}/`,
+      cloneUrl: `https://${host}/owner/repo.git`,
+    };
+    await git(f.source, "switch", "-c", "feature");
+    await writeFile(join(f.source, "feature.txt"), "private branch\n");
+    await git(f.source, "add", ".");
+    await git(f.source, "commit", "-m", "private branch");
+    const headSha = await git(f.source, "rev-parse", "HEAD");
+    let fetches = 0;
+    const run: CommandRunner = async (file, args, options = {}) => {
+      const fetchIndex = args.indexOf("fetch");
+      if (file === "git" && fetchIndex >= 0) {
+        fetches++;
+        assert.equal(options.env?.GH_TOKEN, "configured-provider-token",
+          "private branch fetch must authenticate without an ambient Git login");
+        assert.equal(options.env?.GIT_TERMINAL_PROMPT, "0");
+        assert.deepEqual(args.slice(0, fetchIndex), [
+          "-c", `credential.https://${host}.helper=`,
+          "-c", `credential.https://${host}.helper=!gh auth git-credential`,
+        ]);
+        assert.equal(args.some((arg) => arg.includes("configured-provider-token")), false);
+        return execFile("git", ["fetch", f.source, ...args.slice(fetchIndex + 2)], { cwd: options.cwd });
+      }
+      return f.run(file, args, options);
+    };
+
+    const workspace = await new WorkspaceManager(f.data, run).prepareWorkspace(
+      repository, ticket(2), FLOW_1,
+      { provider: "github", name: "GH_TOKEN", value: "configured-provider-token", apiUrl: `https://${host}` },
+      { repository: repository.name, headRepository: repository.name, headBranch: "feature", headSha },
+    );
+
+    assert.equal(fetches, 1);
+    assert.equal(f.cloneEnvironments[0]?.GH_TOKEN, "configured-provider-token");
+    assert.equal(await git(workspace.worktree, "branch", "--show-current"), "feature");
+    assert.equal(await git(workspace.worktree, "rev-parse", "HEAD"), headSha);
+    assert.equal(await readFile(join(workspace.worktree, "feature.txt"), "utf8"), "private branch\n");
+  });
+}

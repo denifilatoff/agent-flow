@@ -548,3 +548,18 @@ The following details are outside the working prototype and must not be treated 
 - automatic retention and redaction policy for local session files;
 - the read-only UI scope and whether it reuses an existing XState graph viewer;
 - the conditions and provider rules for enabling automerge.
+
+## Explicit migration commit point
+
+Authorized GitHub ticket commands can change an active pin and/or replay an earlier agent stage while carrying one
+explicitly selected existing PR. The controller validates target-pinned declarative direct rules (or unchanged
+workflow/contracts), drains old work with confirmed process exit, rechecks mutable source evidence, and
+creates/reads back one immutable migration receipt before target execution. The common publication marker remains
+exactly its existing config/controller pair; separately versioned migration metadata identifies the request,
+original activation/owner, source/target pins, workspace, exact PR/branch and result boundary. Recovery validates
+the unique receipt chain before ordinary mixed-pin classification; historical markers remain intact and cannot elect
+ownership for a new configuration. Old selected/downstream results and approvals cannot advance replay. Later
+justified progress supersedes the receipt’s initial destination. Required exact-head CI, fresh review and manual
+merge remain ordinary target-flow behavior. GitLab migration is rejected initially; ordinary GitLab flows continue.
+Migration-only configuration refresh is strict and does not change normal startup/pinned loading. See
+[authoring](workflow-migrations.md) and [operations](operating-workflow-migrations.md).

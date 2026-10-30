@@ -12,6 +12,7 @@ type EventSource = "agent" | "provider" | "controller";
 export type AttemptMode = "stage" | "human-input";
 
 export interface RuntimePromptInput {
+  migration?: import("../provider/migration-receipt.ts").MigrationReceipt;
   flow: FlowDefinition;
   stateId: string;
   mode: AttemptMode;
@@ -103,6 +104,14 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
         + "to reopen the same change request or cancel the flow, then write {\"event\":\"agent-needs-human\"}.",
     );
   }
+  if(input.migration) {
+    lines.push("This execution follows an accepted migration/replay. Historical publications remain context. The selected stage and downstream results/approvals in migration.baseline are ineligible for reuse. Revalidate and publish a fresh eligible result. Keep updating the exact existing PR and branch; never create a replacement. Preserve its original description marker. New comments/reviews use the current marker.");
+  }
+  if (input.mode === "stage" && ["assessment", "plan", "diagnostic"].includes(input.resultContract)) {
+    lines.push(`Append <!-- agent-flow-result:v1 state=${input.stateId} --> on its own line to a new successful final result comment. `
+      + "This identifies its stage across human-gate revisions; keep the common publication marker unchanged. "
+      + "Do not add this result annotation to questions or progress notes, or rewrite historical results.");
+  }
   if (input.mode === "stage") {
     lines.push(
       "Inspect the supplied prior publications and code before deciding that the stage is complete. "
@@ -163,6 +172,7 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
         return `creation of one linked open change request whose description contains exactly ${marker(input)}`;
       }
       const change = input.changeRequest;
+      if(input.migration) return `the existing PR ${change.url} to remain open with its original marker intact, plus a fresh marked development completion comment containing exactly ${marker(input)}. Explain the revalidated work even if no code change was needed. Never create another PR`;
       return `the exact pinned change request ${change.provider} ${change.repository}#${change.number} to remain open `
         + `and be updated during this attempt. Its description must contain exactly ${marker(input)}. `
         + "Do not create another change request";

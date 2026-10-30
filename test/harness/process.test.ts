@@ -25,6 +25,7 @@ import { createCodexAdapter } from "../../src/harness/codex.ts";
 import {
   HarnessPreflightError,
   HarnessProcessError,
+  HarnessTerminationError,
   copyRegularFile,
   harnessEnvironment,
   runHarnessProcess,
@@ -909,3 +910,65 @@ test("preserves an existing destination when exclusive auth copy collides", asyn
 
   assert.equal(await readFile(destination, "utf8"), "existing credential\n");
 });
+
+test('unconfirmed kill exposes termination proof that resolves only on eventual exit',async(t)=>{
+ const {HarnessTerminationError}=await import('../../src/harness/process.ts');
+ const fixture=await runFixture('codex');t.after(()=>rm(fixture.root,{recursive:true,force:true}));
+ const processes=processFixture(),adapter=createCodexAdapter({authFile:fixture.authFile},processes.dependencies);
+ fixture.input.timeoutSeconds=3;const pending=adapter.run(fixture.input);await waitForSpawn(processes.calls);
+ const child=processes.children[0]!;child.exitOnTerm=false;child.killBehavior.set('SIGKILL','false');
+ processes.clock.fire(3000);processes.clock.fire(10000);processes.clock.fire(1000);
+ let failure:unknown;try{await pending;}catch(error){failure=error;}
+ assert.ok(failure instanceof HarnessTerminationError);
+ let confirmed=false;void failure.termination.then(()=>{confirmed=true;});await Promise.resolve();assert.equal(confirmed,false);
+ child.finish(null,'SIGKILL');await failure.termination;assert.equal(confirmed,true);
+});
+
+for (const lateProcessError of [false, true]) {
+  test(`preserves unconfirmed termination after log failure${lateProcessError ? " and a late process error" : ""}`, async (t) => {
+    const fixture = await runFixture("codex");
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const processes = processFixture();
+    const spawn = processes.dependencies.spawn;
+    let log!: Writable;
+    processes.dependencies.spawn = (...args) => {
+      const child = spawn(...args);
+      const pipe = child.stdout.pipe;
+      t.mock.method(child.stdout, "pipe", function (destination: Writable) {
+        log = destination;
+        return pipe.call(child.stdout, destination, { end: false });
+      });
+      return child;
+    };
+    const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+    const pending = adapter.run(fixture.input);
+    await waitForSpawn(processes.calls);
+    const child = processes.children[0]!;
+    child.exitOnTerm = false;
+    child.killBehavior.set("SIGTERM", "false");
+    child.killBehavior.set("SIGKILL", "false");
+
+    const logError = new Promise<void>((resolve) => log.once("error", () => resolve()));
+    log.destroy(Object.assign(new Error("log disk full"), { code: "ENOSPC" }));
+    await logError;
+    assert.deepEqual(child.kills, ["SIGTERM"]);
+    processes.clock.fire(10_000);
+    processes.clock.fire(1_000);
+    if (lateProcessError) child.emit("error", new Error("late process failure"));
+
+    let failure: unknown;
+    try { await pending; } catch (error) { failure = error; }
+    assert.ok(failure instanceof HarnessTerminationError);
+    assert.equal(child.exitCode, null);
+    assert.equal(child.signalCode, null);
+    let confirmed = false;
+    void failure.termination.then(() => { confirmed = true; });
+    await Promise.resolve();
+    assert.equal(confirmed, false);
+    assert.equal(processes.clock.timers.size, 0);
+
+    child.finish(null, "SIGKILL");
+    await failure.termination;
+    assert.equal(confirmed, true);
+  });
+}

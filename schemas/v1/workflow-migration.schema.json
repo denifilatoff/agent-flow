@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-flow.dev/schemas/v1/workflow-migration.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "id",
+    "source",
+    "sourceFlow",
+    "targetFlow",
+    "activationLabel",
+    "states"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "agent-flow/migration-v1"
+    },
+    "kind": {
+      "const": "WorkflowMigration"
+    },
+    "source": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "sourceFlow": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "targetFlow": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "activationLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "states": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target",
+          "replay",
+          "retain"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "replay": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "uniqueItems": true
+          },
+          "retain": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  }
+}
