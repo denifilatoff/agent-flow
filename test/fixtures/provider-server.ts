@@ -33,6 +33,7 @@ type AttemptMode = "success" | "exit-failure" | "block" | "late" | "crash-after-
 
 interface FixtureOptions {
   oldCiPolicy?:boolean;
+  activationLabel?: "agent-flow:development" | "bugfix";
   firstAttempt?: AttemptMode;
   forceStartupFailure?: boolean;
   repairCiAfterFailure?: boolean;
@@ -196,7 +197,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   await createCertificate(certificate, key);
   certificatesChanged = true;
   setDefaultCACertificates([...originalCertificates, await readFile(certificate, "utf8")]);
-  const state = new FixtureState(provider, options.firstAttempt,options.oldCiPolicy);
+  const state = new FixtureState(provider, options.firstAttempt,options.oldCiPolicy, options.activationLabel);
   state.ciAfterReview = options.ciAfterReview;
   state.repairCiAfterFailure = options.repairCiAfterFailure;
   server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
@@ -523,7 +524,8 @@ class FixtureState {
   readonly labelEvents: LabelEvent[] = [];
   incidentalReference=false;
   readonly implementationNumber:number;
-  labels = ["agent-flow:development"];
+  labels: string[];
+  readonly activationLabel: string;
   repairCiAfterFailure?: boolean;
   ciAfterReview?: "success" | "pending" | "failure";
   nextReviewVerdict: "approved" | "changes-requested" = "approved";
@@ -540,7 +542,9 @@ class FixtureState {
   #reviewId = 700;
   #lastTimestamp = Date.now();
 
-  constructor(provider: ProviderKind, firstAttempt?: AttemptMode,migrationCase=false) {
+  constructor(provider: ProviderKind, firstAttempt?: AttemptMode,migrationCase=false, activationLabel = "agent-flow:development") {
+    this.activationLabel = activationLabel;
+    this.labels = [activationLabel];
     this.provider = provider;
     this.repository = provider === "github" ? "owner/repo" : "group/project";
     this.number = migrationCase?2:provider === "github" ? 17 : 23;
@@ -558,13 +562,13 @@ class FixtureState {
   }
 
   activate(): void {
-    if (!this.labels.includes("agent-flow:development")) this.labels.push("agent-flow:development");
+    if (!this.labels.includes(this.activationLabel)) this.labels.push(this.activationLabel);
     this.activationId += 1;
     this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
   }
 
   removeActivation(): void {
-    this.labels = this.labels.filter((label) => label !== "agent-flow:development");
+    this.labels = this.labels.filter((label) => label !== this.activationLabel);
     this.activationId += 1;
     this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
   }
@@ -789,15 +793,15 @@ class FixtureState {
           : verdict === "question" ? "human-question"
             : verdict === "unclear" ? "human-unclear" : "human-approved" };
     }
-    if (state === "assessment" || state === "planning") {
-      const artifactKind = state === "assessment" ? "assessment" as const : "plan" as const;
+    if (state === "assessment" || state === "planning" || state === "bug-reproduction" || state === "bug-verification") {
+      const artifactKind = state === "assessment" ? "assessment" as const : state === "planning" ? "plan" as const : state === "bug-reproduction" ? "diagnostic" as const : "verification" as const;
       const existing = context.artifacts.some((artifact) => !context.migration?.baseline.comments.includes(String(artifact.id)) && "body" in artifact
         && artifact.body.split(/\r?\n/).includes(context.publicationMarker)
         && artifact.body.includes(`Fixture ${artifactKind}.`));
-      if (!existing) this.addComment(`${context.publicationMarker}\nFixture ${artifactKind}.`);
+      if (!existing) this.addComment(`${context.publicationMarker}\n${state === "bug-verification" ? "BUG RECEIPT · VERIFIED" : `Fixture ${artifactKind}.`}`);
       return { event: "agent-succeeded" };
     }
-    if (state === "development") {
+    if (state === "development" || state === "bug-development") {
       if (context.migration) {
         const completion = this.comments.findLast((comment) =>
           !context.migration!.baseline.comments.includes(comment.id)
@@ -821,7 +825,7 @@ class FixtureState {
       };
       return { event: "agent-succeeded" };
     }
-    if (state === "review") {
+    if (state === "review" || state === "bug-review") {
       if (!this.change) throw new Error("review change request is missing");
       const verdict = this.nextReviewVerdict;
       this.nextReviewVerdict = "approved";
@@ -884,7 +888,7 @@ class FixtureState {
       const value = decodeURIComponent(label[1]!);
       const present = this.labels.includes(value);
       this.labels = this.labels.filter((candidate) => candidate !== value);
-      if (present && value === "agent-flow:development") {
+      if (present && value === this.activationLabel) {
         this.activationId += 1;
         this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
       }
@@ -894,7 +898,7 @@ class FixtureState {
       for (const value of (body as { labels: string[] }).labels) {
         if (!this.labels.includes(value)) {
           this.labels.push(value);
-          if (value === "agent-flow:development") {
+          if (value === this.activationLabel) {
             this.activationId += 1;
             this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
           }
@@ -968,7 +972,7 @@ class FixtureState {
       for (const value of update.remove_labels?.split(",").filter(Boolean) ?? []) {
         const present = this.labels.includes(value);
         this.labels = this.labels.filter((candidate) => candidate !== value);
-        if (present && value === "agent-flow:development") {
+        if (present && value === this.activationLabel) {
           this.activationId += 1;
           this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
         }
@@ -976,7 +980,7 @@ class FixtureState {
       for (const value of update.add_labels?.split(",").filter(Boolean) ?? []) {
         if (!this.labels.includes(value)) {
           this.labels.push(value);
-          if (value === "agent-flow:development") {
+          if (value === this.activationLabel) {
             this.activationId += 1;
             this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
           }
@@ -1054,7 +1058,7 @@ class FixtureState {
       event: event.action === "add" ? "labeled" : "unlabeled",
       created_at: event.createdAt,
       actor: this.githubActor(MAINTAINER),
-      label: { name: "agent-flow:development" },
+      label: { name: this.activationLabel },
     }));
     if (this.change) events.push({
       id: 900,
@@ -1104,7 +1108,7 @@ class FixtureState {
     return this.labelEvents.map((event) => ({
       id: event.id,
       action: event.action,
-      label: { name: "agent-flow:development" },
+      label: { name: this.activationLabel },
       user: { id: 7, username: "maintainer" },
       created_at: event.createdAt,
     }));

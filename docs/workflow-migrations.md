@@ -57,6 +57,9 @@ A compatible migration that retains merge wait retains approval only for the rec
 If that head changes, recovery follows the flow's declared `change-request-updated` transition to review before
 reconstructing later results. Empty-store recovery can resume that review, but returning to merge wait requires
 an authorized fresh approval of the current head; the retained approval cannot satisfy it.
+A verification-stage replay follows its declared head-change transition to review as well. After SQLite loss,
+recovery reconstructs that review from the receipt head change and requires a fresh current-head approval
+before verification resumes. An unexplained review label at the unchanged receipt head remains ambiguous.
 When required CI routes back to development, successive authorized development completions can supersede earlier
 completions without a rejection review. Recovery keeps the newest completion available for revalidation and still
 requires current-head CI and approval. Intervening human input remains subject to human-gate recovery checks.

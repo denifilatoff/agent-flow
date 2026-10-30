@@ -232,3 +232,36 @@ for (const replay of [undefined, "development"]) {
     assert.equal(await run.maximumConcurrentAttempts(), 1);
   });
 }
+
+
+test("verification replay head change resumes review after SQLite loss on the bugfix route", async (t) => {
+  const run = await startFixture("github", { activationLabel: "bugfix" });
+  t.after(() => run.close());
+  await run.untilState("bug-reproduction-review");
+  await run.blockNextAttempt("bug-verification");
+  await run.answer("approved");
+  await run.untilState("bug-verification");
+  await run.untilAttempt("started");
+  const before = await run.changeRequest();
+  const controller = await run.controllerId();
+  await run.blockNextAttempt("bug-verification");
+  const target = await run.migrate("bug-verification", true);
+  await run.reconcile();
+  await run.untilState("bug-verification");
+  await run.untilAttempt("started");
+  await run.blockNextAttempt("bug-review");
+  await run.changeHead();
+  await run.untilState("bug-review");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal((await run.changeRequest())!.body, before!.body);
+  assert.notEqual((await run.changeRequest())!.headSha, before!.headSha);
+  assert.equal(await run.controllerId(), controller);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  assert.equal(await run.maximumConcurrentAttempts(), 1);
+});

@@ -800,14 +800,16 @@ async function recoveryIteration(
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
   let recoveryStart = migration?.receipt.start;
-  const retainedWait = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
-  const updatedTarget = retainedWait?.on?.["change-request-updated"]?.target;
-  if (migration && retainedWait?.kind === "provider-wait" && migration.receipt.retained.length
+  const boundaryState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
+  const updatedTarget = boundaryState?.on?.["change-request-updated"]?.target;
+  const repeatsReviewOnUpdate = boundaryState?.resultContract === "verification"
+    || (boundaryState?.kind === "provider-wait" && Boolean(migration?.receipt.retained.length));
+  if (migration && repeatsReviewOnUpdate
     && linked && /^[0-9a-f]{40}$/.test(linked.headSha)
     && linked.headSha !== migration.receipt.change.headSha
     && updatedTarget && bundle.flow.spec.states[updatedTarget]?.resultContract === "review") {
-    // The receipt's approval covers its observed head. A later head follows
-    // the declared update transition and needs a fresh review publication.
+    // Verification and retained merge approval cover the receipt's observed
+    // head. A later head follows the declared update transition to fresh review.
     recoveryStart = updatedTarget;
   }
   const startState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
