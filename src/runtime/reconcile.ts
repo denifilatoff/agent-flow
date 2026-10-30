@@ -246,6 +246,16 @@ async function reconcileLocal(
   }
   let control = stored?.value.control ?? null;
   const boundary=evidence.migration;
+  // A verified receipt supplies the destination when its source's paused label
+  // survived the commit. Apply it once; later target pauses keep their own context.
+  if (boundary && stored?.value.migrationId !== boundary.id
+    && (boundary.receipt.source.stage === "blocked" || boundary.receipt.source.stage === "needs-human")
+    && boundary.receipt.source.resume !== null
+    && decision.kind === "ambiguous"
+    && decision.reason === boundary.receipt.source.stage + " resume target is unavailable"
+    && evidence.publications.every((publication) => boundary.receipt.retained.some((retained) => retained.key === publication.key))) {
+    decision = { kind: "reassess", owner: decision.owner, reason: null };
+  }
   if(boundary && stored?.value.migrationId!==boundary.id && decision.kind!=="foreign" && decision.kind!=="ambiguous" && snapshot.open && snapshot.activation.present) {
     if(control) await dependencies.launcher.cancel(control.flowInstanceId);
     control=null;

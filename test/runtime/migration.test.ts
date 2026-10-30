@@ -574,3 +574,61 @@ test("merged carried PR completes after empty-store recovery only with target re
   await f.reset();
   assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, "done");
 });
+
+test("committed migrations replace stale paused source labels before repair and after restart", async (t) => {
+  for (const paused of ["blocked", "needs-human"]) {
+    for (const restart of [false, true]) {
+      await t.test(`${paused}, ${restart ? "empty-store restart" : "surviving source control"}`, async (t) => {
+        const f = await migrationFixture(t);
+        const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+        f.snapshot.labels = f.snapshot.labels.filter((l) => !l.startsWith("agent-stage:"));
+        f.snapshot.labels.push("agent-stage:" + paused);
+        await f.writeControl(f.ref, null, {
+          apiVersion: "agent-flow/v1alpha1", kind: "ControlState",
+          flowInstanceId: "11111111-1111-4111-8111-111111111111",
+          flowId: f.source.flow.metadata.id, configRevision: f.source.revision,
+          sequence: 0, stateId: paused, resumeStateId: "development",
+          activatedBy: f.snapshot.activation.actor,
+          activatedAt: f.snapshot.activation.occurredAt,
+          activationEventId: f.snapshot.activation.eventId,
+          activationLabel: f.snapshot.activation.label,
+          updatedAt: f.snapshot.updatedAt, attemptSeries: null,
+          latestReceipt: null, humanGate: null, changeRequest: {
+            provider: f.selected.provider, repository: f.selected.repository,
+            number: f.selected.number, url: f.selected.url,
+            headSha: f.selected.headSha, state: f.selected.state,
+          },
+        });
+        // Publish and verify the receipt, then interrupt before any label/cache repair.
+        const committed = await processMigration(f.d as never, f.raw() as never);
+        assert.ok(committed.migration);
+        assert.ok(f.snapshot.labels.includes("agent-stage:" + paused));
+        if (restart) await f.reset();
+        const recovered = await reconcileTicket(f.d as never, f.ref);
+        assert.equal(recovered.stateId, "development");
+        assert.equal(recovered.configRevision, f.target.revision);
+        assert.deepEqual(f.snapshot.labels.filter((l) => l.startsWith("agent-stage:")), ["agent-stage:development"]);
+        assert.equal(f.starts.length, 1);
+        assert.equal(f.counts().creates, 1);
+        const again = await reconcileTicket(f.d as never, f.ref);
+        assert.equal(again.stateId, "development");
+        assert.equal(again.configRevision, f.target.revision);
+        assert.equal(f.counts().creates, 1);
+        if (!restart) {
+          // A later target execution pause is not the receipt-before-label window.
+          const current = f.d.writeControl.load!(f.ref)!.value.control!;
+          await f.d.writeControl(f.ref, current, {
+            ...current, sequence: current.sequence + 1,
+            stateId: paused, resumeStateId: "development",
+          });
+          f.snapshot.labels = f.snapshot.labels.filter((l) => !l.startsWith("agent-stage:"));
+          f.snapshot.labels.push("agent-stage:" + paused);
+          const later = await reconcileTicket(f.d as never, f.ref);
+          assert.equal(later.stateId, paused);
+          assert.equal(later.configRevision, f.target.revision);
+          assert.equal(f.counts().creates, 1);
+        }
+      });
+    }
+  }
+});
