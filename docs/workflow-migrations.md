@@ -71,8 +71,10 @@ available, and the current-head verification result still requires ordinary reva
 completion evidence remains ambiguous rather than being discarded.
 Verification can also return to development through its declared `ci-failed` transition after development, review,
 or verification replay. Recovery validates and retires the completed authorized publication sequence through the
-verification diagnostic before reconstructing correction and its later review/verification. The correction result
-remains available for ordinary validation after SQLite loss; incomplete or unauthorized evidence stops recovery.
+verification diagnostic before reconstructing correction and its later review/verification. Completed review rework
+and CI-failure iterations are retired together in provider order until the current suffix is isolated, including
+when rework precedes verification's CI failure. The correction result remains available for ordinary validation
+after SQLite loss; incomplete or unauthorized evidence stops recovery.
 When required CI routes back to development, successive authorized development completions can supersede earlier
 completions without a rejection review. Recovery keeps the newest completion available for revalidation and still
 requires current-head CI and approval. Intervening human input remains subject to human-gate recovery checks.

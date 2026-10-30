@@ -807,213 +807,220 @@ async function recoveryIteration(
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
   let recoveryStart = migration?.receipt.start;
-  if (migration && bundle.flow.spec.requiredChecks?.length) {
-    for (const [verificationId, verification] of Object.entries(bundle.flow.spec.states)) {
-      const ciTarget = verification.on?.["ci-failed"]?.target;
-      if (verification.resultContract !== "verification" || !ciTarget
-        || bundle.flow.spec.states[ciTarget]?.resultContract !== "development") continue;
-      // A verification failure can follow any earlier replay stage. Match the
-      // complete successful prefix before retiring that failed CI iteration.
-      while (true) {
-        const prefix = successfulPublicationPath(bundle.flow, verificationId,
+  let committed: PublicationObjectKind[] | null;
+  let previousLength: number;
+  // Retiring one completed iteration can expose another kind of iteration.
+  // Repeat in provider order until rework and CI recovery agree on the suffix.
+  do {
+    previousLength = active.length;
+    if (migration && bundle.flow.spec.requiredChecks?.length) {
+      for (const [verificationId, verification] of Object.entries(bundle.flow.spec.states)) {
+        const ciTarget = verification.on?.["ci-failed"]?.target;
+        if (verification.resultContract !== "verification" || !ciTarget
+          || bundle.flow.spec.states[ciTarget]?.resultContract !== "development") continue;
+        // A verification failure can follow any earlier replay stage. Match the
+        // complete successful prefix before retiring that failed CI iteration.
+        while (true) {
+          const prefix = successfulPublicationPath(bundle.flow, verificationId,
+            evidence.snapshot.activation.label, recoveryStart);
+          if (!prefix || !prefix.every((kind, index) => active[index]
+            && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === kind)) break;
+          const diagnostic = active[prefix.length];
+          const next = active[prefix.length + 1];
+          if (!diagnostic || (stage !== ciTarget && (!next
+            || publicationObjectKind(next.key, evidence.snapshot.ref, bundle) !== "comment"))) break;
+          const completion = evidence.snapshot.comments.find((comment) =>
+            hasPublicationIdentity(diagnostic.key, evidence.snapshot.ref, "comment", comment.id));
+          if (completion?.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
+          const results = active.slice(0, prefix.length).map((publication, index) => {
+            if (prefix[index] === "review") {
+              const review = evidence.reviews.find((candidate) =>
+                hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", candidate.id));
+              return review?.verdict === "approved" && /^[0-9a-f]{40}$/.test(review.headSha) ? review : undefined;
+            }
+            return evidence.snapshot.comments.find((comment) =>
+              hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
+          });
+          if (results.some((result) => !result)) break;
+          const permissions = await Promise.all([...results, completion].map((result) =>
+            providerCall("provider permission read failed", () =>
+              provider.permission(evidence.snapshot.ref.repository, result!.actor))));
+          if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
+          // Keep the correction result available for ordinary contract validation.
+          active = active.slice(prefix.length + 1);
+          recoveryStart = ciTarget;
+        }
+      }
+    }
+    const boundaryState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
+    const updatedTarget = boundaryState?.on?.["change-request-updated"]?.target;
+    const repeatsReviewOnUpdate = boundaryState?.resultContract === "verification"
+      || (boundaryState?.kind === "provider-wait" && Boolean(migration?.receipt.retained.length));
+    if (migration && repeatsReviewOnUpdate
+      && linked && /^[0-9a-f]{40}$/.test(linked.headSha)
+      && linked.headSha !== migration.receipt.change.headSha
+      && updatedTarget && bundle.flow.spec.states[updatedTarget]?.resultContract === "review") {
+      // Verification and retained merge approval cover the receipt's observed
+      // head. A later head follows the declared update transition to fresh review.
+      recoveryStart = updatedTarget;
+      if (boundaryState?.resultContract === "verification") {
+        // Completed verification belongs to the preceding head iteration. Retire
+        // its authorized diagnostic before matching fresh review/verification;
+        // the diagnostic after the current-head review must remain revalidatable.
+        while (active[0]) {
+          const publication = active[0];
+          const kind = publicationObjectKind(publication.key, evidence.snapshot.ref, bundle);
+          if (kind !== "comment") break;
+          const completion = evidence.snapshot.comments.find((comment) =>
+            hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
+          if (!completion || completion.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
+          const permission = await providerCall("provider permission read failed", () =>
+            provider.permission(evidence.snapshot.ref.repository, completion.actor));
+          if (!AUTHORIZED.has(permission)) break;
+          active = active.slice(1);
+          const approval = active[0] && evidence.reviews.find((review) =>
+            hasPublicationIdentity(active[0]!.key, evidence.snapshot.ref, "review", review.id));
+          if (!approval || approval.verdict !== "approved" || approval.headSha === linked.headSha
+            || !/^[0-9a-f]{40}$/.test(approval.headSha)) break;
+          const reviewerPermission = await providerCall("provider permission read failed", () =>
+            provider.permission(evidence.snapshot.ref.repository, approval.actor));
+          if (!AUTHORIZED.has(reviewerPermission)) break;
+          active = active.slice(1);
+        }
+      }
+    }
+    const startState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
+    const reworkTarget = startState?.on?.["review-changes-requested"]?.target;
+    if (migration && startState?.resultContract === "review" && reworkTarget
+      && bundle.flow.spec.states[reworkTarget]?.resultContract === "development") {
+      // A replay may return to a stage preceding its receipt boundary. Consume
+      // only a verified rejection before reconstructing that rework's success path.
+      const rejection = active[0] && evidence.reviews.find((review) =>
+        hasPublicationIdentity(active[0]!.key, evidence.snapshot.ref, "review", review.id));
+      if (rejection?.verdict === "changes-requested" && /^[0-9a-f]{40}$/.test(rejection.headSha)) {
+        const permission = await providerCall("provider permission read failed", () =>
+          provider.permission(evidence.snapshot.ref.repository, rejection.actor));
+        if (AUTHORIZED.has(permission)) {
+          active = active.slice(1);
+          recoveryStart = reworkTarget;
+        }
+      }
+    }
+    committed = successfulPublicationPath(bundle.flow, stage, evidence.snapshot.activation.label, recoveryStart);
+    if (!committed) {
+      return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
+    }
+    if (migration && migration.receipt.start !== stage
+      && bundle.flow.spec.states[migration.receipt.start]?.kind === "human-gate"
+      && active.length > committed.length) {
+      // A revised gate result is followed by human input before downstream work.
+      // Keep a current agent result without that input available for revalidation.
+      while (active.length > committed.length
+        && publicationObjectKind(active[0]!.key, evidence.snapshot.ref, bundle) === "comment") {
+        const resultAt = active[0]!.createdAt;
+        const nextAt = active[1]?.createdAt;
+        let answered = false;
+        for (const comment of evidence.snapshot.comments) {
+          if (comment.createdAt <= resultAt || (nextAt && comment.createdAt >= nextAt)
+            || isMarked(comment.body) || isMigrationCommand(comment.body)
+            || comment.body.includes("<!-- agent-flow-migration-diagnostic:")) continue;
+          const permission = await providerCall("provider permission read failed", () =>
+            provider.permission(evidence.snapshot.ref.repository, comment.actor));
+          if (AUTHORIZED.has(permission)) {
+            answered = true;
+            break;
+          }
+        }
+        if (!answered) break;
+        active = active.slice(1);
+      }
+    }
+    if (migration) {
+      for (const [developmentId, development] of Object.entries(bundle.flow.spec.states)) {
+        if (development.resultContract !== "development") continue;
+        const review = bundle.flow.spec.states[development.on?.["agent-succeeded"]?.target ?? ""];
+        if (review?.resultContract !== "review"
+          || review.on?.["review-changes-requested"]?.target !== developmentId) continue;
+        const prefix = successfulPublicationPath(bundle.flow, developmentId,
           evidence.snapshot.activation.label, recoveryStart);
         if (!prefix || !prefix.every((kind, index) => active[index]
-          && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === kind)) break;
-        const diagnostic = active[prefix.length];
-        const next = active[prefix.length + 1];
-        if (!diagnostic || (stage !== ciTarget && (!next
-          || publicationObjectKind(next.key, evidence.snapshot.ref, bundle) !== "comment"))) break;
-        const completion = evidence.snapshot.comments.find((comment) =>
-          hasPublicationIdentity(diagnostic.key, evidence.snapshot.ref, "comment", comment.id));
-        if (completion?.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
-        const results = active.slice(0, prefix.length).map((publication, index) => {
-          if (prefix[index] === "review") {
-            const review = evidence.reviews.find((candidate) =>
-              hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", candidate.id));
-            return review?.verdict === "approved" && /^[0-9a-f]{40}$/.test(review.headSha) ? review : undefined;
+          && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === kind)) continue;
+        const index = prefix.length;
+        // CI retries can publish another completion without a rejection review.
+        // Supersede only authorized completions on a configured CI retry path;
+        // leave the newest result available for ordinary completion validation.
+        const retriesCi = Boolean(bundle.flow.spec.requiredChecks?.length)
+          && (development.on?.["ci-failed"]?.target === developmentId
+            || review.on?.["ci-failed"]?.target === developmentId);
+        while (active[index] && active[index + 1]
+          && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === "comment") {
+          const nextKind = publicationObjectKind(active[index + 1]!.key, evidence.snapshot.ref, bundle);
+          if (nextKind === "comment" && retriesCi) {
+            const completions = active.slice(index, index + 2).map((publication) =>
+              evidence.snapshot.comments.find((comment) =>
+                hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id)));
+            if (completions.some((completion) => !completion)) break;
+            // Intervening human input may belong to a gate revision instead.
+            // That boundary must be resolved by the gate logic above.
+            if (evidence.snapshot.comments.some((comment) =>
+              comment.createdAt > completions[0]!.createdAt
+              && comment.createdAt < completions[1]!.createdAt
+              && !isMarked(comment.body) && !isMigrationCommand(comment.body))) break;
+            const permissions = await Promise.all(completions.map((completion) =>
+              providerCall("provider permission read failed", () =>
+                provider.permission(evidence.snapshot.ref.repository, completion!.actor))));
+            if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
+            active.splice(index, 1);
+            continue;
           }
-          return evidence.snapshot.comments.find((comment) =>
-            hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
-        });
-        if (results.some((result) => !result)) break;
-        const permissions = await Promise.all([...results, completion].map((result) =>
-          providerCall("provider permission read failed", () =>
-            provider.permission(evidence.snapshot.ref.repository, result!.actor))));
-        if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
-        // Keep the correction result available for ordinary contract validation.
-        active = active.slice(prefix.length + 1);
-        recoveryStart = ciTarget;
-      }
-    }
-  }
-  const boundaryState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
-  const updatedTarget = boundaryState?.on?.["change-request-updated"]?.target;
-  const repeatsReviewOnUpdate = boundaryState?.resultContract === "verification"
-    || (boundaryState?.kind === "provider-wait" && Boolean(migration?.receipt.retained.length));
-  if (migration && repeatsReviewOnUpdate
-    && linked && /^[0-9a-f]{40}$/.test(linked.headSha)
-    && linked.headSha !== migration.receipt.change.headSha
-    && updatedTarget && bundle.flow.spec.states[updatedTarget]?.resultContract === "review") {
-    // Verification and retained merge approval cover the receipt's observed
-    // head. A later head follows the declared update transition to fresh review.
-    recoveryStart = updatedTarget;
-    if (boundaryState?.resultContract === "verification") {
-      // Completed verification belongs to the preceding head iteration. Retire
-      // its authorized diagnostic before matching fresh review/verification;
-      // the diagnostic after the current-head review must remain revalidatable.
-      while (active[0]) {
-        const publication = active[0];
-        const kind = publicationObjectKind(publication.key, evidence.snapshot.ref, bundle);
-        if (kind !== "comment") break;
-        const completion = evidence.snapshot.comments.find((comment) =>
-          hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
-        if (!completion || completion.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
-        const permission = await providerCall("provider permission read failed", () =>
-          provider.permission(evidence.snapshot.ref.repository, completion.actor));
-        if (!AUTHORIZED.has(permission)) break;
-        active = active.slice(1);
-        const approval = active[0] && evidence.reviews.find((review) =>
-          hasPublicationIdentity(active[0]!.key, evidence.snapshot.ref, "review", review.id));
-        if (!approval || approval.verdict !== "approved" || approval.headSha === linked.headSha
-          || !/^[0-9a-f]{40}$/.test(approval.headSha)) break;
-        const reviewerPermission = await providerCall("provider permission read failed", () =>
-          provider.permission(evidence.snapshot.ref.repository, approval.actor));
-        if (!AUTHORIZED.has(reviewerPermission)) break;
-        active = active.slice(1);
-      }
-    }
-  }
-  const startState = recoveryStart ? bundle.flow.spec.states[recoveryStart] : undefined;
-  const reworkTarget = startState?.on?.["review-changes-requested"]?.target;
-  if (migration && startState?.resultContract === "review" && reworkTarget
-    && bundle.flow.spec.states[reworkTarget]?.resultContract === "development") {
-    // A replay may return to a stage preceding its receipt boundary. Consume
-    // only a verified rejection before reconstructing that rework's success path.
-    const rejection = active[0] && evidence.reviews.find((review) =>
-      hasPublicationIdentity(active[0]!.key, evidence.snapshot.ref, "review", review.id));
-    if (rejection?.verdict === "changes-requested" && /^[0-9a-f]{40}$/.test(rejection.headSha)) {
-      const permission = await providerCall("provider permission read failed", () =>
-        provider.permission(evidence.snapshot.ref.repository, rejection.actor));
-      if (AUTHORIZED.has(permission)) {
-        active = active.slice(1);
-        recoveryStart = reworkTarget;
-      }
-    }
-  }
-  const committed = successfulPublicationPath(bundle.flow, stage, evidence.snapshot.activation.label, recoveryStart);
-  if (!committed) {
-    return { kind: "ambiguous", baselineKeys, reason: "provider stage cannot be reconstructed from the pinned flow" };
-  }
-  if (migration && migration.receipt.start !== stage
-    && bundle.flow.spec.states[migration.receipt.start]?.kind === "human-gate"
-    && active.length > committed.length) {
-    // A revised gate result is followed by human input before downstream work.
-    // Keep a current agent result without that input available for revalidation.
-    while (active.length > committed.length
-      && publicationObjectKind(active[0]!.key, evidence.snapshot.ref, bundle) === "comment") {
-      const resultAt = active[0]!.createdAt;
-      const nextAt = active[1]?.createdAt;
-      let answered = false;
-      for (const comment of evidence.snapshot.comments) {
-        if (comment.createdAt <= resultAt || (nextAt && comment.createdAt >= nextAt)
-          || isMarked(comment.body) || isMigrationCommand(comment.body)
-          || comment.body.includes("<!-- agent-flow-migration-diagnostic:")) continue;
-        const permission = await providerCall("provider permission read failed", () =>
-          provider.permission(evidence.snapshot.ref.repository, comment.actor));
-        if (AUTHORIZED.has(permission)) {
-          answered = true;
-          break;
-        }
-      }
-      if (!answered) break;
-      active = active.slice(1);
-    }
-  }
-  if (migration) {
-    for (const [developmentId, development] of Object.entries(bundle.flow.spec.states)) {
-      if (development.resultContract !== "development") continue;
-      const review = bundle.flow.spec.states[development.on?.["agent-succeeded"]?.target ?? ""];
-      if (review?.resultContract !== "review"
-        || review.on?.["review-changes-requested"]?.target !== developmentId) continue;
-      const prefix = successfulPublicationPath(bundle.flow, developmentId,
-        evidence.snapshot.activation.label, recoveryStart);
-      if (!prefix || !prefix.every((kind, index) => active[index]
-        && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === kind)) continue;
-      const index = prefix.length;
-      // CI retries can publish another completion without a rejection review.
-      // Supersede only authorized completions on a configured CI retry path;
-      // leave the newest result available for ordinary completion validation.
-      const retriesCi = Boolean(bundle.flow.spec.requiredChecks?.length)
-        && (development.on?.["ci-failed"]?.target === developmentId
-          || review.on?.["ci-failed"]?.target === developmentId);
-      while (active[index] && active[index + 1]
-        && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === "comment") {
-        const nextKind = publicationObjectKind(active[index + 1]!.key, evidence.snapshot.ref, bundle);
-        if (nextKind === "comment" && retriesCi) {
-          const completions = active.slice(index, index + 2).map((publication) =>
-            evidence.snapshot.comments.find((comment) =>
-              hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id)));
-          if (completions.some((completion) => !completion)) break;
-          // Intervening human input may belong to a gate revision instead.
-          // That boundary must be resolved by the gate logic above.
-          if (evidence.snapshot.comments.some((comment) =>
-            comment.createdAt > completions[0]!.createdAt
-            && comment.createdAt < completions[1]!.createdAt
-            && !isMarked(comment.body) && !isMigrationCommand(comment.body))) break;
-          const permissions = await Promise.all(completions.map((completion) =>
+          // A verified rejection closes that completion/review iteration, even
+          // when a later correction has moved the PR head.
+          if (nextKind !== "review") break;
+          const completion = evidence.snapshot.comments.find((comment) =>
+            hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "comment", comment.id));
+          const rejection = evidence.reviews.find((candidate) =>
+            hasPublicationIdentity(active[index + 1]!.key, evidence.snapshot.ref, "review", candidate.id));
+          if (!completion || rejection?.verdict !== "changes-requested"
+            || !/^[0-9a-f]{40}$/.test(rejection.headSha)) break;
+          const permissions = await Promise.all([completion.actor, rejection.actor].map((actor) =>
             providerCall("provider permission read failed", () =>
-              provider.permission(evidence.snapshot.ref.repository, completion!.actor))));
+              provider.permission(evidence.snapshot.ref.repository, actor))));
           if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
-          active.splice(index, 1);
-          continue;
+          active.splice(index, 2);
         }
-        // A verified rejection closes that completion/review iteration, even
-        // when a later correction has moved the PR head.
-        if (nextKind !== "review") break;
-        const completion = evidence.snapshot.comments.find((comment) =>
-          hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "comment", comment.id));
-        const rejection = evidence.reviews.find((candidate) =>
-          hasPublicationIdentity(active[index + 1]!.key, evidence.snapshot.ref, "review", candidate.id));
-        if (!completion || rejection?.verdict !== "changes-requested"
-          || !/^[0-9a-f]{40}$/.test(rejection.headSha)) break;
-        const permissions = await Promise.all([completion.actor, rejection.actor].map((actor) =>
-          providerCall("provider permission read failed", () =>
-            provider.permission(evidence.snapshot.ref.repository, actor))));
-        if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
-        active.splice(index, 2);
       }
     }
-  }
-  if (migration && linked) {
-    for (const [verificationId, verification] of Object.entries(bundle.flow.spec.states)) {
-      const reviewTarget = verification.on?.["change-request-updated"]?.target;
-      if (verification.resultContract !== "verification" || !reviewTarget
-        || bundle.flow.spec.states[reviewTarget]?.resultContract !== "review") continue;
-      const prefix = successfulPublicationPath(bundle.flow, verificationId,
-        evidence.snapshot.activation.label, recoveryStart);
-      if (!prefix?.length || prefix.at(-1) !== "review") continue;
-      const index = prefix.length - 1;
-      // Earlier replays can complete verification before the head changes too.
-      // Retire only the authorized old-head approval/verification pair, keeping
-      // the preceding work and the current-head verification candidate intact.
-      while (prefix.every((kind, offset) => active[offset]
-        && publicationObjectKind(active[offset]!.key, evidence.snapshot.ref, bundle) === kind)) {
-        const approval = evidence.reviews.find((review) =>
-          hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "review", review.id));
-        const publication = active[index + 1];
-        const completion = publication && evidence.snapshot.comments.find((comment) =>
-          hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
-        if (!approval || approval.verdict !== "approved" || approval.headSha === linked.headSha
-          || !/^[0-9a-f]{40}$/.test(approval.headSha)
-          || completion?.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
-        const permissions = await Promise.all([approval.actor, completion.actor].map((actor) =>
-          providerCall("provider permission read failed", () =>
-            provider.permission(evidence.snapshot.ref.repository, actor))));
-        if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
-        active.splice(index, 2);
+    if (migration && linked) {
+      for (const [verificationId, verification] of Object.entries(bundle.flow.spec.states)) {
+        const reviewTarget = verification.on?.["change-request-updated"]?.target;
+        if (verification.resultContract !== "verification" || !reviewTarget
+          || bundle.flow.spec.states[reviewTarget]?.resultContract !== "review") continue;
+        const prefix = successfulPublicationPath(bundle.flow, verificationId,
+          evidence.snapshot.activation.label, recoveryStart);
+        if (!prefix?.length || prefix.at(-1) !== "review") continue;
+        const index = prefix.length - 1;
+        // Earlier replays can complete verification before the head changes too.
+        // Retire only the authorized old-head approval/verification pair, keeping
+        // the preceding work and the current-head verification candidate intact.
+        while (prefix.every((kind, offset) => active[offset]
+          && publicationObjectKind(active[offset]!.key, evidence.snapshot.ref, bundle) === kind)) {
+          const approval = evidence.reviews.find((review) =>
+            hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "review", review.id));
+          const publication = active[index + 1];
+          const completion = publication && evidence.snapshot.comments.find((comment) =>
+            hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
+          if (!approval || approval.verdict !== "approved" || approval.headSha === linked.headSha
+            || !/^[0-9a-f]{40}$/.test(approval.headSha)
+            || completion?.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
+          const permissions = await Promise.all([approval.actor, completion.actor].map((actor) =>
+            providerCall("provider permission read failed", () =>
+              provider.permission(evidence.snapshot.ref.repository, actor))));
+          if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
+          active.splice(index, 2);
+        }
       }
     }
-  }
+  } while (active.length < previousLength);
   if (bundle.flow.spec.states[stage]?.resultContract === "review") {
     active = active.filter((publication) =>
       publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) !== "review"

@@ -678,8 +678,11 @@ for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
 
 }
 
-for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
-  test(`${replay} replay CI correction survives SQLite loss through subsequent stages`, async (t) => {
+for (const { replay, rework } of [
+  ...["bug-development", "bug-review", "bug-verification"].map((replay) => ({ replay, rework: false })),
+  ...["bug-development", "bug-review"].map((replay) => ({ replay, rework: true })),
+]) {
+  test(`${replay} replay CI correction survives SQLite loss through subsequent stages${rework ? " after review rework" : ""}`, async (t) => {
     for (const stage of ["bug-development", "development-without-result", "bug-review", "review-new-head", "bug-verification", "awaiting-merge", "unauthorized", "incomplete", ...(replay !== "bug-verification" ? ["unauthorized-approval"] : [])]) {
       await t.test(stage, async (t) => {
         const f = await migrationFixture(t);
@@ -690,7 +693,16 @@ for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
         approveSourceHead(f);
         assert.equal((await reconcileTicket(f.d as never, f.ref)).stateId, replay);
         const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
-        if (replay === "bug-development") f.snapshot.comments.push(f.comment("18", marker + "\nDevelopment completed"));
+        if (rework) {
+          if (replay === "bug-development") f.snapshot.comments.push(f.comment("16", marker + "\nInitial development completed"));
+          f.reviews.push({
+            id: "17", headSha: f.selected.headSha, verdict: "changes-requested", actor: f.selected.actor,
+            body: marker + `\n<!-- agent-flow-review:v1 head=${f.selected.headSha} verdict=changes-requested -->`,
+            submittedAt: f.comment("17", "").createdAt,
+            url: "https://github.com/owner/repo/pull/8#pullrequestreview-17",
+          });
+        }
+        if (replay === "bug-development" || rework) f.snapshot.comments.push(f.comment("18", marker + "\nDevelopment completed"));
         if (replay !== "bug-verification") f.reviews.push({
           id: "19", headSha: f.selected.headSha, verdict: "approved", actor: f.selected.actor,
           body: marker + `\n<!-- agent-flow-review:v1 head=${f.selected.headSha} verdict=approved -->`,

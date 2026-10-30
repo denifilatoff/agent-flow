@@ -118,7 +118,10 @@ downstream stages, so a head-change review cycle does not count both approvals a
 requires an authorized current-head approval before restoring merge wait. For a verification replay followed by a
 head change, completed authorized `BUG RECEIPT · VERIFIED` diagnostics preceding the new review belong to the old
 iteration. Retire them when reconstructing the declared head-change transition; keep the diagnostic following the
-current-head approval available for ordinary verification reassessment. The
+current-head approval available for ordinary verification reassessment. Completed review rework and verification
+CI-failure iterations can compose: retire verified historical iterations in provider order until no further
+iteration can be removed, then isolate the current result. Keep the correction candidate available for ordinary
+validation, and stop on incomplete or unauthorized transition evidence. The
 reassessment uses existing agent decisions and provider readback, preserves the original publication identity, and
 keeps an authorized answer after that publication eligible. It adds no common metadata fields. Recovery can rerun an
 agent to interpret published content and inspect code. An interpretation that

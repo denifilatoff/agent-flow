@@ -327,8 +327,11 @@ for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
 
 }
 
-for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
-  test(`${replay} replay CI failure recovers correction after SQLite loss`, async (t) => {
+for (const { replay, rework } of [
+  ...["bug-development", "bug-review", "bug-verification"].map((replay) => ({ replay, rework: false })),
+  ...["bug-development", "bug-review"].map((replay) => ({ replay, rework: true })),
+]) {
+  test(`${replay} replay CI failure recovers correction after SQLite loss${rework ? " after review rework" : ""}`, async (t) => {
     const run = await startFixture("github", { activationLabel: "bugfix" });
     t.after(() => run.close());
     await run.untilState("bug-reproduction-review");
@@ -337,8 +340,16 @@ for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
     const before = await run.changeRequest();
     const controller = await run.controllerId();
     await run.blockNextAttempt("bug-verification");
+    if (rework) await run.requestChangesOnNextReview();
     const target = await run.migrate(replay, true);
     await run.reconcile();
+    if (rework) {
+      await run.untilState("bug-review");
+      await run.blockNextAttempt("bug-development");
+      await run.untilState("bug-development");
+      await run.untilAttempt("started");
+      await run.restart();
+    }
     await run.untilState("bug-verification");
     await run.untilAttempt("started");
     await run.setCi("failure");
