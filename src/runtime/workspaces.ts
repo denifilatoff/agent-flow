@@ -17,6 +17,8 @@ import {
   removeSafeFile,
 } from "./filesystem.ts";
 
+export interface SelectedBranch {repository:string;headRepository:string;headBranch:string;headSha:string;}
+
 export interface Workspace {
   baseClone: string;
   worktree: string;
@@ -78,14 +80,44 @@ export class WorkspaceManager {
     ticket: TicketRef,
     flowInstanceId: string,
     credential?: ProviderCredential,
+    selected?: SelectedBranch,
   ): Promise<Workspace> {
     assertCanonicalUuid(flowInstanceId, "flow instance ID");
     const identity = repositoryIdentity(repository);
     assertTicket(identity, ticket);
     return this.#withFlowLock(
       flowInstanceId,
-      () => this.#prepareWorkspace(repository, ticket, flowInstanceId, identity, credential),
+      async () => {
+        const workspace=await this.#prepareWorkspace(repository,ticket,flowInstanceId,identity,credential);
+        if(selected) await this.#restoreBranch(workspace,selected,identity.cloneUrl,credential);
+        return workspace;
+      },
     );
+  }
+
+  async #restoreBranch(workspace:Workspace,selected:SelectedBranch,cloneUrl:string,credential?:ProviderCredential):Promise<void> {
+    if(selected.repository!==workspace.repository || selected.headRepository!==workspace.repository) throw new Error("Carried PR head repository is unsupported or mismatched");
+    await this.#run("git",["check-ref-format","--branch",selected.headBranch],{cwd:workspace.worktree});
+    const current=(await this.#run("git",["branch","--show-current"],{cwd:workspace.worktree})).stdout.trim();
+    if(current===selected.headBranch) return;
+    const dirty=(await this.#run("git",["status","--porcelain"],{cwd:workspace.worktree})).stdout.trim();
+    if(dirty || current) throw new Error("Carried PR branch mismatch or dirty workspace; preserve work and resolve manually");
+    const authentication = gitAuthentication(new URL(cloneUrl), credential);
+    await this.#run("git",[...authentication.arguments,"fetch","origin","refs/heads/"+selected.headBranch],{cwd:workspace.worktree,env:authentication.environment});
+    const fetched=(await this.#run("git",["rev-parse","FETCH_HEAD"],{cwd:workspace.worktree})).stdout.trim();
+    if(fetched!==selected.headSha) throw new Error("Carried PR head moved during workspace restoration");
+    let exists=false;
+    try { await this.#run("git",["show-ref","--verify","refs/heads/"+selected.headBranch],{cwd:workspace.worktree});exists=true; } catch {}
+    if(exists) {
+      const local=(await this.#run("git",["rev-parse","refs/heads/"+selected.headBranch],{cwd:workspace.worktree})).stdout.trim();
+      if(local!==fetched) throw new Error("Existing carried PR branch differs from observed head; preserve unpublished work");
+    }
+    const baseBranch=(await this.#run("git",["branch","--show-current"],{cwd:workspace.baseClone})).stdout.trim();
+    if(baseBranch===selected.headBranch) {
+      if((await this.#run("git",["status","--porcelain"],{cwd:workspace.baseClone})).stdout.trim()) throw new Error("Base clone is dirty");
+      await this.#run("git",["switch","--detach"],{cwd:workspace.baseClone});
+    }
+    await this.#run("git",exists?["switch",selected.headBranch]:["switch","--no-track","-c",selected.headBranch,"FETCH_HEAD"],{cwd:workspace.worktree});
   }
 
   async #prepareWorkspace(

@@ -1,0 +1,431 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { startFixture } from "../fixtures/provider-server.ts";
+import { parseMigrationReceipt } from "../../src/provider/migration-receipt.ts";
+
+test("agent-only update replays development on the same PR and recovers after SQLite loss", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.changeRequest(),
+    controller = await run.controllerId(),
+    comments = await run.agentCommentIds();
+  const target = await run.migrate("development", true);
+  await run.reconcile();
+  await run.untilState("awaiting-merge");
+  const receipt = parseMigrationReceipt((await run.migrationReceipts())[0]!)!;
+  assert.equal(receipt.receipt.target.config, target);
+  assert.equal(receipt.receipt.change.number, before!.number);
+  assert.equal(receipt.receipt.change.headBranch, "fixture-implementation");
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal(await run.controllerId(), controller);
+  assert.ok((await run.agentCommentIds()).length > comments.length);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  await run.restart();
+  await run.untilState("awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  assert.equal(await run.maximumConcurrentAttempts(), 1);
+});
+
+test("same-configuration planning replay requires a fresh plan and downstream human approval", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.control(),
+    ids = await run.agentCommentIds();
+  await run.migrate("planning");
+  await run.reconcile();
+  await run.untilState("plan-review");
+  assert.equal((await run.control()).configRevision, before.configRevision);
+  assert.ok((await run.agentCommentIds()).length > ids.length);
+  await run.reconcile();
+  assert.equal((await run.control()).stateId, "plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.migrationReceipts()).length, 1);
+});
+
+for (const replay of ["planning", "assessment"]) {
+test(`${replay} replay revisions survive SQLite loss at the human gate and downstream stages`, async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.changeRequest();
+  const controller = await run.controllerId();
+  const target = await run.migrate(replay, true);
+  await run.reconcile();
+  if (replay === "assessment") {
+    await run.untilState("assessment-review");
+    await run.answer("approved");
+  }
+  await run.untilState("plan-review");
+  await run.answer("Changes requested: include restart validation.");
+  await run.untilState("planning");
+  await run.untilState("plan-review");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("plan-review");
+  await run.blockNextAttempt("development");
+  await run.blockNextAttempt("review");
+  await run.answer("approved");
+  await run.untilState("development");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("review");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal((await run.changeRequest())!.body, before!.body);
+  assert.equal(await run.controllerId(), controller);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  assert.equal(await run.maximumConcurrentAttempts(), 1);
+});
+
+}
+
+test("changed-CI migration of fixture issue 2 preserves PR 8 despite incidental PR 11 and requires target CI", async (t) => {
+  const run = await startFixture("github", { oldCiPolicy: true });
+  t.after(() => run.close());
+  await run.setCi("missing");
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.changeRequest();
+  assert.equal(before!.number, 8);
+  const target = await run.migrateCiPolicy();
+  await run.reconcile();
+  await run.untilState("development");
+  await run.untilAttempt("succeeded");
+  await run.reconcile();
+  assert.equal((await run.control()).stateId, "development");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, 8);
+  const receipt = parseMigrationReceipt((await run.migrationReceipts())[0]!)!;
+  assert.equal(receipt.receipt.ticket.number, 2);
+  assert.equal(receipt.receipt.change.number, 8);
+  await run.setCi("success");
+  await run.untilState("awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.changeRequest())!.number, 8);
+  assert.equal((await run.migrationReceipts()).length, 1);
+});
+
+test("agent-only migration at a replayed human gate retains its plan across empty-store recovery", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const change = await run.changeRequest();
+  await run.migrate("planning");
+  await run.reconcile();
+  await run.untilState("plan-review");
+  const comments = await run.agentCommentIds();
+  const target = await run.migrate(undefined, true);
+  await run.reconcile();
+  assert.equal((await run.control()).stateId, "plan-review");
+  assert.equal((await run.control()).configRevision, target);
+  const receipt = parseMigrationReceipt((await run.migrationReceipts())[1]!)!.receipt;
+  assert.equal(receipt.start, "plan-review");
+  assert.equal(receipt.retained.at(-1)?.stage, "planning");
+  const migratedComments = await run.agentCommentIds();
+  assert.equal(migratedComments.length, comments.length + 1);
+  await run.resetDatabaseAndRestart();
+  await run.reconcile();
+  assert.equal((await run.control()).stateId, "plan-review");
+  assert.equal((await run.control()).configRevision, target);
+  assert.deepEqual(await run.agentCommentIds(), migratedComments);
+  await run.answer("Changes requested: include restart validation.");
+  await run.untilState("planning");
+  await run.untilState("plan-review");
+  const revisedComments = await run.agentCommentIds();
+  assert.ok(revisedComments.length > migratedComments.length);
+  await run.blockNextAttempt("development");
+  await run.blockNextAttempt("review");
+  await run.answer("approved");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("development");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("review");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.changeRequest())!.number, change!.number);
+  assert.equal((await run.migrationReceipts()).length, 2);
+});
+
+
+for (const replay of ["development", "review"]) {
+  test(`${replay} replay rework survives SQLite loss at development, review, and merge wait`, async (t) => {
+    const run = await startFixture("github");
+    t.after(() => run.close());
+    await run.untilState("assessment-review");
+    await run.answer("approved");
+    await run.untilState("plan-review");
+    await run.answer("approved");
+    await run.untilState("awaiting-merge");
+    const before = await run.changeRequest();
+    await run.requestChangesOnNextReview();
+    const target = await run.migrate(replay, true);
+    await run.reconcile();
+    await run.untilState("review");
+    await run.blockNextAttempt("development");
+    await run.untilState("development");
+    await run.untilAttempt("started");
+    await run.changeHead();
+    await run.blockNextAttempt("review");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("review");
+    await run.untilAttempt("started");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("awaiting-merge");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("awaiting-merge");
+    assert.equal((await run.control()).configRevision, target);
+    assert.equal((await run.changeRequest())!.number, before!.number);
+    assert.equal((await run.changeRequest())!.body, before!.body);
+    assert.equal((await run.migrationReceipts()).length, 1);
+    assert.equal(await run.maximumConcurrentAttempts(), 1);
+  });
+}
+
+test("migrated required-CI correction survives SQLite loss through approval", async (t) => {
+  const run = await startFixture("github");
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  const before = await run.changeRequest();
+  await run.setCi("failure");
+  const target = await run.migrate("development", true);
+  await run.reconcile();
+  await run.untilState("development");
+  await run.untilAttempt("succeeded");
+  await run.blockNextAttempt("development");
+  await run.reconcile();
+  await run.untilAttempt("started");
+  await run.setCi("success");
+  await run.blockNextAttempt("review");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("review");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal((await run.changeRequest())!.body, before!.body);
+  assert.equal((await run.migrationReceipts()).length, 1);
+});
+
+for (const replay of [undefined, "development"]) {
+  test(`${replay ?? "no-replay merge-wait"} migration head-change approval survives SQLite loss at review and merge wait`, async (t) => {
+    const run = await startFixture("github");
+    t.after(() => run.close());
+    await run.untilState("assessment-review");
+    await run.answer("approved");
+    await run.untilState("plan-review");
+    await run.answer("approved");
+    await run.untilState("awaiting-merge");
+    const before = await run.changeRequest();
+    const target = await run.migrate(replay, true);
+    await run.reconcile();
+    await run.untilState("awaiting-merge");
+    const approvedHead = (await run.changeRequest())!.headSha;
+    await run.blockNextAttempt("review");
+    await run.changeHead();
+    await run.untilState("review");
+    await run.untilAttempt("started");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("awaiting-merge");
+    assert.notEqual((await run.changeRequest())!.headSha, approvedHead);
+    await run.resetDatabaseAndRestart();
+    await run.untilState("awaiting-merge");
+    assert.equal((await run.control()).configRevision, target);
+    assert.equal((await run.changeRequest())!.number, before!.number);
+    assert.equal((await run.changeRequest())!.body, before!.body);
+    assert.equal((await run.migrationReceipts()).length, 1);
+    assert.equal(await run.maximumConcurrentAttempts(), 1);
+  });
+}
+
+
+test("verification replay head change resumes review after SQLite loss on the bugfix route", async (t) => {
+  const run = await startFixture("github", { activationLabel: "bugfix" });
+  t.after(() => run.close());
+  await run.untilState("bug-reproduction-review");
+  await run.blockNextAttempt("bug-verification");
+  await run.answer("approved");
+  await run.untilState("bug-verification");
+  await run.untilAttempt("started");
+  const before = await run.changeRequest();
+  const controller = await run.controllerId();
+  await run.blockNextAttempt("bug-verification");
+  const target = await run.migrate("bug-verification", true);
+  await run.reconcile();
+  await run.untilState("bug-verification");
+  await run.untilAttempt("started");
+  await run.blockNextAttempt("bug-review");
+  await run.changeHead();
+  await run.untilState("bug-review");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal((await run.changeRequest())!.body, before!.body);
+  assert.notEqual((await run.changeRequest())!.headSha, before!.headSha);
+  assert.equal(await run.controllerId(), controller);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  assert.equal(await run.maximumConcurrentAttempts(), 1);
+});
+
+test("merge-wait verification replay starts fresh work and survives SQLite loss", async (t) => {
+  const run = await startFixture("github", { activationLabel: "bugfix" });
+  t.after(() => run.close());
+  await run.untilState("bug-reproduction-review");
+  await run.answer("approved");
+  await run.untilState("bug-awaiting-merge");
+  const before = await run.changeRequest();
+  const controller = await run.controllerId();
+  await run.blockNextAttempt("bug-verification");
+  const target = await run.migrate("bug-verification", true);
+  await run.reconcile();
+  await run.untilState("bug-verification");
+  await run.untilAttempt("started");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-awaiting-merge");
+  await run.resetDatabaseAndRestart();
+  await run.untilState("bug-awaiting-merge");
+  assert.equal((await run.control()).configRevision, target);
+  assert.equal((await run.changeRequest())!.number, before!.number);
+  assert.equal((await run.changeRequest())!.body, before!.body);
+  assert.equal((await run.changeRequest())!.headSha, before!.headSha);
+  assert.equal(await run.controllerId(), controller);
+  assert.equal((await run.migrationReceipts()).length, 1);
+  assert.equal(await run.maximumConcurrentAttempts(), 1);
+});
+
+for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
+  test(`completed ${replay} replay survives a later head change and SQLite loss`, async (t) => {
+    const run = await startFixture("github", { activationLabel: "bugfix" });
+    t.after(() => run.close());
+    await run.untilState("bug-reproduction-review");
+    await run.answer("approved");
+    await run.untilState("bug-awaiting-merge");
+    const before = await run.changeRequest();
+    const controller = await run.controllerId();
+    const target = await run.migrate(replay, true);
+    await run.reconcile();
+    await run.untilState("bug-awaiting-merge");
+    await run.blockNextAttempt("bug-review");
+    await run.changeHead();
+    await run.untilState("bug-review");
+    await run.untilAttempt("started");
+    await run.blockNextAttempt("bug-verification");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("bug-verification");
+    await run.untilAttempt("started");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("bug-awaiting-merge");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("bug-awaiting-merge");
+    assert.equal((await run.control()).configRevision, target);
+    assert.equal((await run.changeRequest())!.number, before!.number);
+    assert.equal((await run.changeRequest())!.body, before!.body);
+    assert.notEqual((await run.changeRequest())!.headSha, before!.headSha);
+    assert.equal(await run.controllerId(), controller);
+    assert.equal((await run.migrationReceipts()).length, 1);
+    assert.equal(await run.maximumConcurrentAttempts(), 1);
+  });
+
+}
+
+for (const { replay, rework } of [
+  ...["bug-development", "bug-review", "bug-verification"].map((replay) => ({ replay, rework: false })),
+  ...["bug-development", "bug-review"].map((replay) => ({ replay, rework: true })),
+]) {
+  test(`${replay} replay CI failure recovers correction after SQLite loss${rework ? " after review rework" : ""}`, async (t) => {
+    const run = await startFixture("github", { activationLabel: "bugfix" });
+    t.after(() => run.close());
+    await run.untilState("bug-reproduction-review");
+    await run.answer("approved");
+    await run.untilState("bug-awaiting-merge");
+    const before = await run.changeRequest();
+    const controller = await run.controllerId();
+    await run.blockNextAttempt("bug-verification");
+    if (rework) await run.requestChangesOnNextReview();
+    const target = await run.migrate(replay, true);
+    await run.reconcile();
+    if (rework) {
+      await run.untilState("bug-review");
+      await run.blockNextAttempt("bug-development");
+      await run.untilState("bug-development");
+      await run.untilAttempt("started");
+      await run.restart();
+    }
+    await run.untilState("bug-verification");
+    await run.untilAttempt("started");
+    await run.setCi("failure");
+    await run.restart();
+    await run.untilAttempt("succeeded");
+    await run.blockNextAttempt("bug-development");
+    await run.reconcile();
+    await run.untilState("bug-development");
+    await run.untilAttempt("started");
+    await run.setCi("success");
+    await run.blockNextAttempt("bug-development");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("bug-development");
+    await run.untilAttempt("started");
+    await run.blockNextAttempt("bug-review");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("bug-review");
+    await run.untilAttempt("started");
+    await run.blockNextAttempt("bug-verification");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("bug-verification");
+    await run.untilAttempt("started");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("bug-awaiting-merge");
+    await run.resetDatabaseAndRestart();
+    await run.untilState("bug-awaiting-merge");
+    assert.equal((await run.control()).configRevision, target);
+    assert.equal((await run.changeRequest())!.number, before!.number);
+    assert.equal((await run.changeRequest())!.body, before!.body);
+    assert.equal(await run.controllerId(), controller);
+    assert.equal((await run.migrationReceipts()).length, 1);
+    assert.equal(await run.maximumConcurrentAttempts(), 1);
+  });
+}

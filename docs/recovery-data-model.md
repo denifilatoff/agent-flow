@@ -166,3 +166,18 @@ For the first rollout, complete or cancel legacy active work with the old contro
 Inactive legacy history stays untouched. A new activation must be distinguishable from that history. If active legacy
 work is detected, report that migration is required and do not publish or assign a controller implicitly. No dual-write
 mode, automatic historical rewrites, or silent takeover is implemented.
+
+## Immutable migration receipt metadata
+
+`schemas/v1/migration-receipt.schema.json` defines the separately versioned `agent-flow-migration:v1` comment block
+alongside the unchanged two-field common marker. It records provider/ticket identity, original activation and
+ownership anchor, stable accepted request ID/actor/body digest, source pin/stage/resume, frozen target
+pin/flow/route/compatibility basis, exact carried PR URL/repository/branch/head/source marker, workspace UUID,
+restart stage, baseline comment/review IDs, explicit retained-result references/digests and predecessor receipt ID.
+A no-replay human-gate migration retains its predecessor result; optional `source.humanInput` stores the last
+interpreted human comment ID/body digest. Recovery verifies that comment and its author permission before restoring
+the input cutoff, leaving any later pending answer eligible. Older receipts without this optional context remain valid.
+Publication authors and original provenance remain provider-validated facts. Receipt comments are append-only commit
+points, not mutable control state. Optional local `LocalExecution.migrationId` caches the verified boundary; it does
+not alter old pinned ControlState schemas. The boundary participates in logical attempt input identity. Losing the
+cache reconstructs provider commitment while retaining the existing disposable retry limitations.

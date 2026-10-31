@@ -199,6 +199,7 @@ export interface ControlChangeRequest {
 }
 
 export interface LocalExecution {
+  migrationId?: string;
   controllerId: string;
   observedAt: string;
   owner: { controllerId: string; publicationKey: string } | null;
