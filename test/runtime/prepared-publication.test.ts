@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { ProviderHttpError } from "../../src/provider/http.ts";
 import { join } from "node:path";
 import test from "node:test";
-import { freezePreparedPublication, deliverPreparedPublication } from "../../src/runtime/prepared-publication.ts";
-import type { DecisionExpectation } from "../../src/runtime/receipts.ts";
+import { freezePreparedPublication, deliverPreparedPublication, needsPreparedComment } from "../../src/runtime/prepared-publication.ts";
+import { readDecisionAndBuildReceipt, type DecisionExpectation } from "../../src/runtime/receipts.ts";
 import type { ProviderAdapter, ProviderComment } from "../../src/provider/types.ts";
 
 async function fixture(t: test.TestContext) {
@@ -157,4 +157,55 @@ test("prepared replay retains the exact verified migration owner across configur
   f.comments[0] = { ...owner, id: "different" };
   await assert.rejects(deliverPreparedPublication(f.root, expected, f.provider), /ownership/);
   assert.equal(f.creates(), 1);
+});
+
+
+test("migrated development publishes and verifies completion on the canonical issue with its existing PR", async (t) => {
+  const f = await fixture(t);
+  const marker = `<!-- agent-flow:v1 {"config":"${"b".repeat(40)}","controller":"${f.expected.controllerId}"} -->`;
+  const change = { provider: "github" as const, repository: "owner/repo", number: 8,
+    url: "https://github.test/owner/repo/pull/8", headRepository: "owner/repo", headBranch: "feature",
+    headSha: "c".repeat(40), state: "open" as const, body: marker,
+    actor: { login: "agent", providerId: "1" }, createdAt: "2026-10-28T00:00:00Z", updatedAt: "2026-10-29T00:00:00Z" };
+  const owner: ProviderComment = { id: "owner", url: "https://github.test/comment/owner", body: `${marker}\nOriginal assessment.`,
+    actor: change.actor, createdAt: "2026-10-28T00:00:00Z", updatedAt: "2026-10-28T00:00:00Z" };
+  f.comments.push(owner);
+  f.provider.readComment = async (_ref, id) => f.comments.find((comment) => comment.id === id)!;
+  const expected = { ...f.expected, stateId: "development", resultContract: "development" as const,
+    flow: { ...f.expected.flow, spec: { states: { development: { kind: "agent" as const,
+      on: { "agent-succeeded": { target: "done" } } } } } },
+    pinnedChangeRequest: change, migration: { change: { ...change, marker }, owner: {
+      key: JSON.stringify(["github", "https://api.github.com/", "owner/repo", "comment", owner.id]), config: "b".repeat(40),
+    } } as DecisionExpectation["migration"] };
+  f.provider.readTicket = async () => ({ ref: expected.ticket,
+    repository: { provider: "github", name: "owner/repo" }, open: true,
+    activation: { present: true }, comments: f.comments, changeRequest: change } as never);
+  f.provider.readChangeRequest = async () => change;
+  f.provider.permission = async () => "write";
+  const create = f.provider.createComment;
+  f.provider.createComment = async (ref, body) => {
+    assert.deepEqual(ref, expected.ticket);
+    assert.equal(ref.number, 2);
+    return create(ref, body);
+  };
+  await writeFile(join(f.root, "prepared-comment.txt"), "Development revalidated; the existing PR is ready for review.");
+  await freezePreparedPublication(f.root, expected, { totalTokens: 1100 });
+  await deliverPreparedPublication(f.root, expected, f.provider);
+  assert.equal(f.creates(), 1);
+  const completion = f.comments.find((comment) => comment.id === "7")!;
+  assert.match(completion.body, /Development revalidated/);
+  assert.ok(completion.body.split("\n").includes("<!-- agent-flow-result:v1 state=development -->"));
+  assert.match(completion.body, /Usage: 1,100 tokens/);
+  const receipt = await readDecisionAndBuildReceipt(join(f.root, "decision.json"), expected, f.provider, false);
+  assert.equal(receipt.outcome, "succeeded");
+  assert.deepEqual(receipt.artifacts.map((artifact) => artifact.kind), ["comment", "change-request"]);
+  assert.equal(change.body, marker);
+  await deliverPreparedPublication(f.root, expected, f.provider);
+  assert.equal(f.creates(), 1);
+});
+
+
+test("ordinary development success keeps the agent-published PR contract", async (t) => {
+  const f = await fixture(t);
+  assert.equal(needsPreparedComment({ ...f.expected, resultContract: "development" }, "agent-succeeded"), false);
 });

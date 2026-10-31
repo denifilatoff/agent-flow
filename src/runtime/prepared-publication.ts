@@ -30,7 +30,8 @@ interface PreparedPublication {
 
 export function needsPreparedComment(expected: DecisionExpectation, event: AgentDecision["event"]): boolean {
   return ["agent-needs-human", "human-question", "human-unclear", "human-answer-unclear"].includes(event)
-    || (event === "agent-succeeded" && ["assessment", "plan", "diagnostic", "verification"].includes(expected.resultContract));
+    || (event === "agent-succeeded" && (["assessment", "plan", "diagnostic", "verification"].includes(expected.resultContract)
+      || (expected.resultContract === "development" && !!expected.migration)));
 }
 
 export async function freezePreparedPublication(root: string, expected: DecisionExpectation,
@@ -61,7 +62,8 @@ export async function freezePreparedPublication(root: string, expected: Decision
       const marker = renderPublication({ config: expected.configRevision, controller: expected.controllerId });
       const line = usageLine(usage);
       const resultMarker = decision.event === "agent-succeeded"
-        && ["assessment", "plan", "diagnostic"].includes(expected.resultContract)
+        && (["assessment", "plan", "diagnostic"].includes(expected.resultContract)
+          || (expected.resultContract === "development" && !!expected.migration))
         ? `\n<!-- agent-flow-result:v1 state=${expected.stateId} -->` : "";
       body = `${marker}\n${text}${resultMarker}\n\n<!-- agent-flow-attempt:v1 attempt=${expected.attemptId} -->${line ? `\n${line}` : ""}`;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }

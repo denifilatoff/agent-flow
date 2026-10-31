@@ -12,3 +12,5 @@ Remaining increments:
 References: owner-pinned ReviewCTL `bcc61d355c1c79bfbcc2df0866f67aa4fab14d69`, `usage.go` (completed session tree and complete pricing inputs), `signature.go` (target validation, exact readback, independent retry). Do not adopt its post-publication editing or add a dependency.
 
 Verification: focused Node tests per increment, then `npm run typecheck`, `npm test`, `npm run build`, `npm run test:e2e`, and diff review. No protocol version or pricing guesses; unavailable cost stays absent.
+
+Migrated development completion uses the same prepared publication path: retain the selected PR and its original marker, prepare the completion locally, and publish it with accounting on the canonical issue before receipt verification. The controller adds the development result-stage annotation. Ordinary development PR creation/updates and native reviews keep their existing evidence contracts. This corrects controller behavior under the existing migration contract; it changes no pinned schema or workflow and requires no migration rule.

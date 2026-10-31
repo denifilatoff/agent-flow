@@ -150,6 +150,12 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
 }
 
 function evidence(input: RuntimePromptInput, event: AgentEventType): string {
+  if (input.preparedCommentPath && input.migration && input.resultContract === "development"
+    && event === "agent-succeeded" && input.changeRequest) {
+    return `the existing PR ${input.changeRequest.url} to remain open with its original marker intact, plus fresh development `
+      + `completion comment text prepared at ${input.preparedCommentPath} for controller publication on the canonical issue. `
+      + "Explain the revalidated work even if no code change was needed. Never create another PR";
+  }
   if (input.preparedCommentPath && (event === "agent-needs-human" || event === "human-question"
     || event === "human-unclear" || event === "human-answer-unclear"
     || (event === "agent-succeeded" && ["assessment", "plan", "diagnostic", "verification"].includes(input.resultContract)))) {
