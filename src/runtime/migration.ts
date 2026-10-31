@@ -10,6 +10,7 @@ import {
   electOwner,
   parsePublication,
   renderPublication,
+  unanchoredPublicationKeys,
 } from "../provider/publication.ts";
 import type { RecoveryEvidence } from "../provider/types.ts";
 import type { ReconcileDependencies } from "./reconcile.ts";
@@ -17,7 +18,7 @@ import {
   parseMigrationRequest,
   isMigrationCommand,
 } from "./migration-request.ts";
-import { publicationIdentity, recoverMigration } from "./migration-recovery.ts";
+import { publicationIdentity, recoverMigration, scopeMigrationEvidence } from "./migration-recovery.ts";
 const authorized = new Set(["admin", "maintain", "write"]);
 const pending = new WeakMap<
   object,
@@ -75,6 +76,7 @@ export async function processMigration(
         throw new Error(
           "GitLab workflow migration is not supported; ordinary GitLab flows are unchanged",
         );
+      e = scopeMigrationEvidence(e, command.pr);
       if (!e.complete || e.activeBoundary !== "known" || e.legacyActive)
         throw new Error(
           "Migration requires complete source activation evidence",
@@ -169,17 +171,12 @@ export async function processMigration(
           carried?.number !== selected.number)
       )
         throw new Error("Selected PR has conflicting source provenance");
-      if (
-        !carried &&
-        !e.publications.some((p) => {
-          const [kind, id] = publicationIdentity(p.key);
-          return (
-            kind === "change-request" &&
-            id === String(selected.number) &&
-            p.ownershipEligible !== false
-          );
-        })
-      )
+      const selectedPublication = e.publications.find((publication) => {
+        const [kind, id] = publicationIdentity(publication.key);
+        return kind === "change-request" && id === String(selected.number);
+      });
+      if (!carried && (!selectedPublication
+        || unanchoredPublicationKeys([owner, selectedPublication]).length > 0))
         throw new Error(
           "Selected PR original publication provenance is unavailable",
         );
@@ -393,10 +390,10 @@ export async function processMigration(
       if (cached) await d.launcher.cancel(cached.flowInstanceId);
       if (cached && d.launcher.isRunning(cached.flowInstanceId))
         throw new Error("Old agent termination could not be confirmed");
-      const fresh = await d.provider.readRecoveryEvidence(
+      const fresh = scopeMigrationEvidence(await d.provider.readRecoveryEvidence(
         e.snapshot.ref,
         activation.label,
-      );
+      ), command.pr);
       const freshEffective = await recoverMigration(
         fresh,
         (sha) => d.config.loadPinned(sha),
