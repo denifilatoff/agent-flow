@@ -96,6 +96,13 @@ test(`${replay} replay revisions survive SQLite loss at the human gate and downs
   assert.equal((await run.changeRequest())!.number, before!.number);
   assert.equal((await run.changeRequest())!.body, before!.body);
   assert.equal(await run.controllerId(), controller);
+  if (preparedComments) {
+    const completion = await run.latestAgentComment();
+    assert.match(completion!.body, /Fixture development revalidated/);
+    assert.match(completion!.body, /<!-- agent-flow-result:v1 state=development -->/);
+    assert.match(completion!.url, /\/issues\/17#issuecomment-/);
+    assert.equal(completion!.createdAt, completion!.updatedAt);
+  }
   assert.equal((await run.migrationReceipts()).length, 1);
   assert.equal(await run.maximumConcurrentAttempts(), 1);
 });

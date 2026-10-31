@@ -817,13 +817,14 @@ class FixtureState {
       if (context.migration) {
         const completion = this.comments.findLast((comment) =>
           !context.migration!.baseline.comments.includes(comment.id)
-          && comment.body === context.publicationMarker + "\nFixture development revalidated.");
+          && comment.body.split(/\r?\n/).includes(context.publicationMarker)
+          && comment.body.split(/\r?\n/).includes("Fixture development revalidated."));
         const rejected = completion && [...this.reviews.values()].some((review) =>
           review.verdict === "changes-requested" && review.createdAt > completion.createdAt);
         const verified = completion && this.comments.some((comment) =>
           comment.createdAt > completion.createdAt
           && comment.body === context.publicationMarker + "\nBUG RECEIPT · VERIFIED");
-        if (!completion || rejected || verified) this.addComment(context.publicationMarker + "\nFixture development revalidated.");
+        if (!completion || rejected || verified) stageComment(context.publicationMarker + "\nFixture development revalidated.");
       }
       if (this.repairCiAfterFailure && this.change && this.ciStatus === "failure") {
         this.changeHead();
