@@ -106,6 +106,7 @@ test("renders paths, exact decisions, evidence, marker, and protocol boundaries"
   const prompt = renderRuntimePrompt(promptInput(flow));
   const marker = `<!-- agent-flow:v1 {"config":"${REVISION}","controller":"${CONTROLLER_ID}"} -->`;
 
+  assert.ok(prompt.includes("<!-- agent-flow-result:v1 state=assessment -->"));
   assert.match(prompt, /\/data\/sessions\/context\.json/);
   assert.match(prompt, /\/data\/sessions\/decision\.json/);
   assert.match(prompt, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -249,6 +250,7 @@ test("prepared comment protocol keeps stage text local until controller publicat
   assert.match(prompt, /Prepare the final stage comment text locally at \/session\/prepared-comment.txt/);
   assert.match(prompt, /Do not publish stage comments/);
   assert.match(prompt, /controller publishes/);
+  assert.doesNotMatch(prompt, /Append <!-- agent-flow-result/);
   const development = renderRuntimePrompt({ ...input, resultContract: "development", changeRequest: null });
   assert.match(development, /creation of one linked open change request/);
 });

@@ -14,6 +14,7 @@ import type {
   ExecutionSnapshot,
 } from "../config/types.js";
 import { validateDocument } from "../config/schema-validator.ts";
+import { HarnessTerminationError } from "../harness/process.ts";
 import { compileAgentContext, type CompiledAgent } from "../harness/apm.ts";
 import type { HarnessAdapter, HarnessResult, ProviderCredential } from "../harness/types.ts";
 import { HarnessProcessError } from "../harness/process.ts";
@@ -65,6 +66,7 @@ interface ActiveAttempt {
   completion: Promise<void>;
   control: ControlState;
   launched: boolean;
+  terminationFailure?: HarnessTerminationError;
   ready: Promise<void>;
   resolveReady(): void;
   rejectReady(error: unknown): void;
@@ -116,9 +118,10 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       running.completion = job.catch((error: unknown) => {
         if (!running.launched) running.rejectReady(classifyAttemptError(error));
       }).finally(() => {
-        dependencies.attemptFinished?.();
+        if(running.terminationFailure) void running.terminationFailure.termination.then(()=>dependencies.attemptFinished?.());
+        else dependencies.attemptFinished?.();
         if (!running.launched) running.resolveReady();
-        if (active.get(flowId) === running) active.delete(flowId);
+        if (!running.terminationFailure && active.get(flowId) === running) active.delete(flowId);
         if (running.launched && !running.cancelled) onSettled?.(request.ref);
       });
       await running.ready;
@@ -130,6 +133,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
       running.cancelled = true;
       running.abort.abort();
       await running.completion;
+      if(running.terminationFailure) throw new Error("Cannot confirm old agent termination; migration is blocked");
     },
 
     isRunning(flowInstanceId): boolean {
@@ -178,6 +182,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         ticket: request.ref,
         sourceComment: request.sourceComment,
         pinnedChangeRequest: request.snapshot.changeRequest,
+        migration: request.migration?.receipt,
       };
     }
     function deliveryDiagnostic(): void {
@@ -382,6 +387,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           request.ref,
           control.flowInstanceId,
           dependencies.providerCredential,
+          request.migration ? {...request.migration.receipt.change,headSha:request.snapshot.changeRequest!.headSha} : undefined,
         );
         assertCurrent(running, series, attempt);
         const context = attemptContext(request, control);
@@ -430,6 +436,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           ...(preparedProtocol ? { preparedCommentPath: join(session.root, "prepared-comment.txt") } : {}),
           changeRequest: request.snapshot.changeRequest,
           sourceComment: request.sourceComment,
+          migration:request.migration?.receipt,
           excludedReviewIds: request.publicationKeys.flatMap((key) => {
             const value = JSON.parse(key);
             return value[3] === "review" ? [value[4]] : [];
@@ -466,6 +473,14 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
         archived = true;
         return;
       } catch (error) {
+        if (error instanceof HarnessTerminationError) {
+          running.terminationFailure = error;
+          void error.termination.then(() => {
+            running.terminationFailure = undefined;
+            if (active.get(request.control.flowInstanceId) === running) active.delete(request.control.flowInstanceId);
+          });
+          return;
+        }
         if (error instanceof HarnessProcessError) { harnessEnded = true; usage = error.usage; }
         const classified = classifyAttemptError(error);
         const failure = failedReceipt(running.cancelled
@@ -622,7 +637,7 @@ async function persist(
 function attemptContext(request: AttemptRequest, controlState: ControlState): AttemptContext {
   const artifacts: ProviderArtifact[] = [...request.snapshot.comments];
   if (request.snapshot.changeRequest) artifacts.push(request.snapshot.changeRequest);
-  return { ticket: request.snapshot, controlState, artifacts, mode: request.mode };
+  return { ticket: request.snapshot, controlState, artifacts, mode: request.mode, ...request.migration ? {migration:request.migration.receipt} : {} };
 }
 
 function assertCompiled(compiled: CompiledAgent, agentId: string, target: "claude" | "codex"): void {

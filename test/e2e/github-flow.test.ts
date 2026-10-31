@@ -117,3 +117,56 @@ function assertCommentReceipt(
   assert.deepEqual(parsePublication(artifact.marker), { kind: "current", metadata });
   assert.ok(artifact.url.endsWith(`${urlFragment}${artifact.id}`));
 }
+
+test("current-head CI waits without models and gates development and approved review", async (t) => {
+  const run = await startFixture("github", { ciAfterReview: "pending" });
+  t.after(() => run.close());
+  await run.setCi("pending");
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("development");
+  await run.untilAttempt("succeeded");
+  const developmentSessions = await run.sessions();
+  for (let poll = 0; poll < 3; poll++) await run.reconcile();
+  assert.equal((await run.control()).stateId, "development");
+  assert.deepEqual(await run.sessions(), developmentSessions);
+  await run.setCi("success");
+  await run.untilState("review");
+  await run.untilAttempt("succeeded");
+  const reviewSessions = await run.sessions();
+  for (let poll = 0; poll < 3; poll++) await run.reconcile();
+  assert.equal((await run.control()).stateId, "review");
+  assert.deepEqual(await run.sessions(), reviewSessions);
+  await run.setCi("success");
+  await run.untilState("awaiting-merge");
+});
+
+test("failed CI after an approval returns corrective development instead of merge wait", async (t) => {
+  const run = await startFixture("github", { ciAfterReview: "failure" });
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("blocked");
+  const receipts = await run.receipts();
+  assert.ok(receipts.some((receipt) => receipt.error?.code === "REQUIRED_CI_FAILED"));
+  assert.ok((await run.routing()).filter((event) => event.agentId === "developer").length > 1);
+  assert.ok(!(await run.controllerLabels()).includes("agent-stage:awaiting-merge"));
+});
+
+
+test("corrected head with successful CI can advance after failed approval CI", async (t) => {
+  const run = await startFixture("github", { ciAfterReview: "failure", repairCiAfterFailure: true });
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  await run.answer("approved");
+  await run.untilState("plan-review");
+  await run.answer("approved");
+  await run.untilState("awaiting-merge");
+  assert.equal((await run.changeRequest())!.headSha, "1".repeat(40));
+  assert.ok((await run.receipts()).some((receipt) => receipt.error?.code === "REQUIRED_CI_FAILED"));
+  assert.equal((await run.routing()).filter((event) => event.agentId === "reviewer").length, 2);
+});

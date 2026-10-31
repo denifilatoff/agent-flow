@@ -28,7 +28,8 @@ export function classifyRecovery(evidence: RecoveryEvidence, controllerId: strin
     return decision("ambiguous", null, evidence.ambiguities[0] ?? "multiple linked change requests");
   }
 
-  const owner = electOwner(evidence.publications);
+  const originalOwner = evidence.migration?.owner;
+  const owner = originalOwner ? {...originalOwner,metadata:{...originalOwner.metadata,config:evidence.migration!.receipt.target.config}} : electOwner(evidence.publications);
   if (unanchoredPublicationKeys(evidence.publications).length > 0) {
     return decision("ambiguous", owner, "publication provenance is unavailable without an earlier matching owner");
   }
@@ -40,7 +41,7 @@ export function classifyRecovery(evidence: RecoveryEvidence, controllerId: strin
     const winningPins = new Set(evidence.publications
       .filter(({ metadata }) => metadata.controller === owner.metadata.controller)
       .map(({ metadata }) => metadata.config));
-    if (winningPins.size !== 1) {
+    if (winningPins.size > 1 || winningPins.size===0 && !evidence.migration) {
       return decision("ambiguous", owner, "winning controller publications have conflicting configuration pins");
     }
     if (evidence.publications.some((publication) =>

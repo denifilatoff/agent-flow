@@ -51,3 +51,10 @@ remain unchanged. An uncertain write with
 unavailable or mismatched provider evidence stays pending for inspection; do not delete local delivery state to force
 another create. Old post-publication `usage-delivery.json` records are no longer processed. No existing comment is
 edited for accounting, and no historic receipts are backfilled. See [the contracts](prototype-contracts.md#completed-attempt-accounting-and-prepared-stage-comments).
+
+## Explicit active-workflow migration
+
+After deploying the migration-capable controller and publishing a compatible target bundle, use [the operator
+procedure](operating-workflow-migrations.md) to retain an active ticket’s existing PR while changing its pin or
+replaying a stage. This does not relax the pre-Stack restrictions above, transfer ownership, or authorize migration
+of a live ticket automatically.

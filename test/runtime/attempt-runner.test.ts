@@ -706,3 +706,15 @@ test("permanent prepared comment rejection blocks and archives accounting withou
   assert.deepEqual(subject.delays, []);
   assert.equal(archived[0]?.usage?.totalTokens, 27);
 });
+
+test('unconfirmed process termination keeps the per-flow guard and rejects cancellation until exit',async()=>{
+ const {HarnessTerminationError}=await import('../../src/harness/process.ts');
+ const termination=deferred<void>(),f=fixture({results:[new HarnessTerminationError('codex',termination.promise)]});
+ await f.runner.start(f.request);
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.runner.isRunning(FLOW),true);
+ await assert.rejects(f.runner.cancel(FLOW),/termination/);
+ await f.runner.start(f.request);assert.equal(f.attempts.length,1);
+ termination.resolve();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(f.runner.isRunning(FLOW),false);
+});

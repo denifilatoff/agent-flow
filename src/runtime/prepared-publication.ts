@@ -60,7 +60,10 @@ export async function freezePreparedPublication(root: string, expected: Decision
       }
       const marker = renderPublication({ config: expected.configRevision, controller: expected.controllerId });
       const line = usageLine(usage);
-      body = `${marker}\n${text}\n\n<!-- agent-flow-attempt:v1 attempt=${expected.attemptId} -->${line ? `\n${line}` : ""}`;
+      const resultMarker = decision.event === "agent-succeeded"
+        && ["assessment", "plan", "diagnostic"].includes(expected.resultContract)
+        ? `\n<!-- agent-flow-result:v1 state=${expected.stateId} -->` : "";
+      body = `${marker}\n${text}${resultMarker}\n\n<!-- agent-flow-attempt:v1 attempt=${expected.attemptId} -->${line ? `\n${line}` : ""}`;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
   if (body === null && needsPreparedComment(expected, decision.event) && !expected.reusableCommentIds?.length) {
@@ -124,7 +127,12 @@ export async function deliverPreparedPublication(root: string, expected: Decisio
       && Date.parse(comment.createdAt) < Date.parse(expected.activatedAt))) return [];
     return [{ key: comment.id, createdAt: comment.createdAt, metadata: marker.metadata }];
   }));
-  if (owner && (owner.metadata.controller !== expected.controllerId || owner.metadata.config !== expected.configRevision)) {
+  const migrationOwner = expected.migration?.owner;
+  const retainedOwner = migrationOwner && owner
+    && JSON.parse(migrationOwner.key)[3] === "comment" && JSON.parse(migrationOwner.key)[4] === owner.key
+    && owner.metadata.config === migrationOwner.config;
+  if (owner && (owner.metadata.controller !== expected.controllerId
+    || (expected.migration ? !retainedOwner : owner.metadata.config !== expected.configRevision))) {
     throw new Error("publication ownership changed");
   }
   let comment = matches[0];

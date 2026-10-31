@@ -8,6 +8,13 @@ SQLite-local execution, `config`/`controller` publication metadata, and ownershi
 No second ownership read is added before publication. Agent attempts write a minimal local `AgentDecision`; the
 controller reads provider evidence and stores the verified `AgentReceipt` in local SQLite.
 
+New successful assessment, plan and diagnostic comments also append a separate
+`<!-- agent-flow-result:v1 state=planning -->` line with the actual agent state. It identifies comment results during
+recovery across multiple human gates; it does not extend the common `config`/`controller` object, establish ownership,
+or replace result validation and author authorization. Questions and progress notes do not carry it. Existing
+publications need no rewrite; ambiguous legacy multi-gate histories require clarification. See
+[workflow migration recovery](workflow-migrations.md) for the eligibility rules.
+
 ## Scope
 
 The prototype runs one polling controller in one Docker container. It supports GitHub and GitLab through separate REST
@@ -317,7 +324,10 @@ to the runtime-supplied `prepared-comment.txt` and its unchanged minimal decisio
 text absent when reusing a suitable existing publication. PR/MR creation and provider-native reviews retain their
 existing contracts. After the harness and native descendants finish, the controller validates and freezes the decision,
 text and accounting, then creates one complete comment containing the substantive result, unchanged common publication
-marker and compact usage line. It reads back the exact target/body and performs normal provider evidence verification
+marker and compact usage line. For successful assessment, plan and diagnostic comments, the controller also adds the
+stage result annotation needed for migration recovery; prepared agent text contains no controller metadata. Delivery
+under an accepted migration retains only the exact original owner identity and configuration verified by its receipt.
+It reads back the exact target/body and performs normal provider evidence verification
 before accepting the result. No accounting edit or usage-only comment is made. Reused publications remain unchanged.
 
 Each attempt session retains its immutable finalized `receipt.json`. A prepared attempt also retains
@@ -330,3 +340,17 @@ look for the exact existing publication and read it back; if no matching evidenc
 with a diagnostic rather than create a possible duplicate. Cancellation or foreign/ambiguous ownership prevents writes
 and advancement. These session records and SQLite remain disposable local artifacts, never a canonical workflow store.
 Losing them may lose accounting or unpublished prepared work; provider evidence still controls recovery.
+
+## Workflow migration contracts
+
+Migration rules live in target-pinned `config/migrations/` and use `schemas/v1/workflow-migration.schema.json`.
+Their format is independent of required Stack agent contracts so old Stack bundles remain loadable. Separately
+versioned immutable receipt metadata uses `schemas/v1/migration-receipt.schema.json`, preserving the common
+publication marker’s exact two-field contract. The controller resolves latest/tag/full-SHA selectors strictly only
+for explicit migration acceptance, validates and freezes compatibility, confirms old process termination, and
+verifies provider readback before target work. A verified carried PR exception applies only to that exact
+repository/number/URL/head repository/branch/original marker. Replayed development additionally requires a fresh
+marked completion comment, allowing explicit revalidation without rewriting the PR marker. Context retains history;
+baseline identities exclude stale results and human approvals, including same-pin replay. GitHub is supported
+initially; GitLab migration is explicitly rejected. See [workflow-migrations.md](workflow-migrations.md) for the
+canonical rule format, tested examples and validation commands.

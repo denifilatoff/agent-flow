@@ -101,9 +101,10 @@ test("C9/C17 a changed review head invalidates the old result", async (t) => {
   const oldHead = (await run.changeRequest())!.headSha;
   await run.changeHead();
   await run.reconcile();
-  await run.untilAttempt("succeeded");
+  // Observe after automatic reconciliation has consumed the review success.
+  await run.untilState("awaiting-merge");
   assert.notEqual((await run.changeRequest())!.headSha, oldHead);
-  assert.equal((await run.control()).stateId, "review");
+  assert.equal((await run.control()).stateId, "awaiting-merge");
   const review = (await run.control()).latestReceipt?.artifacts.find((artifact) => artifact.kind === "review");
   assert.equal(review?.kind === "review" ? review.headSha : null, (await run.changeRequest())!.headSha);
 });
@@ -113,9 +114,13 @@ test("C10 a closed unmerged change asks for reopen or cancel", async (t) => {
   t.after(() => run.close());
   await passHumanGates(run);
   await run.untilState("awaiting-merge");
+  const commentsBeforeClose = (await run.agentCommentIds()).length;
   await run.closeChangeRequest();
   await run.reconcile();
-  await run.untilAttempt("succeeded");
+  await run.untilAgentComments(commentsBeforeClose + 1);
+  // Recovery can retain the verified question after clearing the current attempt.
+  await run.reconcile();
+  assert.equal((await run.control()).latestReceipt?.outcome, "needs-human");
   assert.equal((await run.control()).stateId, "needs-human");
   assert.equal((await run.control()).resumeStateId, "review");
   assert.match((await run.latestAgentComment())!.body, /reopen|cancel/i);

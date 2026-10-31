@@ -42,6 +42,7 @@ test("publishes frozen substantive text and accounting together with exact readb
   await deliverPreparedPublication(f.root, f.expected, f.provider);
   assert.equal(f.creates(), 1);
   assert.match(f.comments[0]!.body, /Assessment complete\./);
+  assert.ok(f.comments[0]!.body.split("\n").includes("<!-- agent-flow-result:v1 state=assessment -->"));
   assert.match(f.comments[0]!.body, /Usage: 1,100 tokens/);
   assert.equal(f.comments[0]!.createdAt, f.comments[0]!.updatedAt);
 });
@@ -137,4 +138,23 @@ test("malformed prepared decisions keep the existing retryable invalid-decision 
         && (error as { retryable: boolean }).retryable);
   }
   assert.equal(f.creates(), 0);
+});
+
+test("prepared replay retains the exact verified migration owner across configuration pins", async (t) => {
+  const f = await fixture(t);
+  const oldConfig = "b".repeat(40);
+  const owner: ProviderComment = { id: "old", url: "https://github.test/comment/old",
+    body: `<!-- agent-flow:v1 {"config":"${oldConfig}","controller":"${f.expected.controllerId}"} -->\nOriginal assessment.`,
+    actor: { login: "agent", providerId: "1" }, createdAt: "2026-10-28T00:00:00Z", updatedAt: "2026-10-28T00:00:00Z" };
+  f.comments.push(owner);
+  f.provider.readComment = async (_ref, id) => f.comments.find((comment) => comment.id === id)!;
+  const expected = { ...f.expected, migration: { owner: {
+    key: JSON.stringify(["github", "https://api.github.com/", "owner/repo", "comment", owner.id]), config: oldConfig,
+  } } as DecisionExpectation["migration"] };
+  await freezePreparedPublication(f.root, expected, undefined);
+  await deliverPreparedPublication(f.root, expected, f.provider);
+  assert.equal(f.creates(), 1);
+  f.comments[0] = { ...owner, id: "different" };
+  await assert.rejects(deliverPreparedPublication(f.root, expected, f.provider), /ownership/);
+  assert.equal(f.creates(), 1);
 });

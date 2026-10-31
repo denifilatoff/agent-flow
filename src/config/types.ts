@@ -24,7 +24,7 @@ export interface FlowDefinition {
   apiVersion: "agent-flow/v1alpha1";
   kind: "Flow";
   metadata: { id: string; activationLabel: "agent-flow:development"; managedLabel: "agent-flow:managed" };
-  spec: { initial: string; activationRoutes?: Record<string, string>; states: Record<string, FlowState> };
+  spec: { initial: string; requiredChecks?: string[]; activationRoutes?: Record<string, string>; states: Record<string, FlowState> };
 }
 
 export interface FlowState {
@@ -214,6 +214,7 @@ export interface ControlChangeRequest {
 }
 
 export interface LocalExecution {
+  migrationId?: string;
   controllerId: string;
   observedAt: string;
   owner: { controllerId: string; publicationKey: string } | null;

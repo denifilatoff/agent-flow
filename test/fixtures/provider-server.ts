@@ -7,11 +7,11 @@ import { dirname, join, resolve } from "node:path";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 
 import { RuntimeManager } from "../../src/config/runtime.ts";
 import { parseControlComment } from "../../src/provider/control-comment.ts";
-import { electOwner, parsePublication, type Publication } from "../../src/provider/publication.ts";
+import { electOwner, parsePublication, renderPublication, type Publication } from "../../src/provider/publication.ts";
 import type {
   AgentDecision,
   AgentReceipt,
@@ -35,8 +35,12 @@ interface FixtureOptions {
   usage?: boolean;
   preparedComments?: boolean;
   uncertainCreate?: boolean;
+  oldCiPolicy?:boolean;
+  activationLabel?: "agent-flow:development" | "bugfix";
   firstAttempt?: AttemptMode;
   forceStartupFailure?: boolean;
+  repairCiAfterFailure?: boolean;
+  ciAfterReview?: "success" | "pending" | "failure";
 }
 
 interface StoredComment {
@@ -98,7 +102,9 @@ export interface FixtureRun {
   activeProcesses(): Promise<number>;
   answer(body: string): Promise<void>;
   blockNextAttempt(state: string): Promise<void>;
+  requestChangesOnNextReview(): Promise<void>;
   changeHead(): Promise<void>;
+  setCi(status: "success" | "pending" | "failure" | "missing"): Promise<void>;
   changeRequest(): Promise<NormalizedChangeRequest | null>;
   close(): Promise<void>;
   closeChangeRequest(): Promise<void>;
@@ -112,6 +118,9 @@ export interface FixtureRun {
   latestAgentComment(): Promise<ProviderComment | null>;
   maximumConcurrentAttempts(): Promise<number>;
   mergeChangeRequest(): Promise<void>;
+  migrate(resume?:string,agentOnly?:boolean):Promise<string>;
+  migrateCiPolicy():Promise<string>;
+  migrationReceipts():Promise<string[]>;
   reconcile(): Promise<void>;
   receipts(): Promise<AgentReceipt[]>;
   reviewRequests(): Promise<string[]>;
@@ -191,7 +200,9 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   await createCertificate(certificate, key);
   certificatesChanged = true;
   setDefaultCACertificates([...originalCertificates, await readFile(certificate, "utf8")]);
-  const state = new FixtureState(provider, options.firstAttempt);
+  const state = new FixtureState(provider, options.firstAttempt,options.oldCiPolicy, options.activationLabel);
+  state.ciAfterReview = options.ciAfterReview;
+  state.repairCiAfterFailure = options.repairCiAfterFailure;
   state.uncertainCreate = options.uncertainCreate ?? false;
   server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
     void state.handle(request, response).catch((error: unknown) => {
@@ -233,6 +244,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     60,
     options.firstAttempt === "race" ? 30 : 5,
     options.preparedComments ?? false,
+    options.oldCiPolicy,
   );
 
   environmentChanged = true;
@@ -297,7 +309,9 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     async activeProcesses() { return state.activeAttempts.size; },
     async answer(body) { state.addComment(body, MAINTAINER); },
     async blockNextAttempt(stateId) { state.nextModes.set(stateId, ["block"]); },
+    async requestChangesOnNextReview() { state.nextReviewVerdict = "changes-requested"; },
     async changeHead() { state.changeHead(); },
+    async setCi(status) { state.ciStatus = status; },
     async changeRequest() { return state.normalizedChange(); },
     async close() {
       await cleanup();
@@ -418,6 +432,30 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     },
     async maximumConcurrentAttempts() { return state.maximumActiveAttempts; },
     async mergeChangeRequest() { state.setChangeState("merged"); },
+    async migrate(resume,agentOnly=false) {
+      const control=requireControl(currentControl());
+      const worktree=join(dataDirectory,"worktrees",control.flowInstanceId);
+      const branch=(await execFile("git",["-C",worktree,"branch","--show-current"])).stdout.trim();
+      if(!branch) await execFile("git",["-C",worktree,"switch","-c","fixture-implementation"]);
+      if(agentOnly) {
+        const manifest=join(configRepository,"agent-packages/developer/.apm/agents/developer.agent.md");
+        await writeFile(manifest,(await readFile(manifest,"utf8"))+"\nRespect the accepted migration context.\n");
+        await execFile("git",["-C",configRepository,"add","."]);await execFile("git",["-C",configRepository,"commit","-m","Update developer guidance"]);
+      }
+      const sha=(await execFile("git",["-C",configRepository,"rev-parse","HEAD"])).stdout.trim();
+      state.addComment(`/agent-flow migrate --pr ${state.change!.number} --to latest${resume ? " --resume-from "+resume : ""}`,MAINTAINER);
+      return sha;
+    },
+    async migrateCiPolicy(){
+      const control=requireControl(currentControl());
+      await cp(join(ROOT,"config/flows/development.yaml"),join(configRepository,"config/flows/development.yaml"));
+      await mkdir(join(configRepository,"config/migrations"),{recursive:true});
+      await writeFile(join(configRepository,"config/migrations/ci-policy.yaml"),stringify({apiVersion:"agent-flow/migration-v1",kind:"WorkflowMigration",id:"fixture-ci",source:control.configRevision,sourceFlow:"development",targetFlow:"development",activationLabel:"agent-flow:development",states:{"awaiting-merge":{target:"development",replay:["planning","development"],retain:[]}}}));
+      await execFile("git",["-C",configRepository,"add","."]);await execFile("git",["-C",configRepository,"commit","-m","Require current-head CI and declare migration"]);
+      state.incidentalReference=true;
+      return run.migrate();
+    },
+    async migrationReceipts(){return state.comments.filter(c=>c.body.includes("<!-- agent-flow-migration:v1")).map(c=>c.body);},
     reconcile,
     async receipts() {
       const latest = currentControl()?.latestReceipt;
@@ -490,7 +528,14 @@ class FixtureState {
   readonly routing: Array<Omit<RoutingEvent, "kind">> = [];
   readonly requestLog: Array<{ method: string; path: string; phase: string; installation: string | null }> = [];
   readonly labelEvents: LabelEvent[] = [];
-  labels = ["agent-flow:development"];
+  incidentalReference=false;
+  readonly implementationNumber:number;
+  labels: string[];
+  readonly activationLabel: string;
+  repairCiAfterFailure?: boolean;
+  ciAfterReview?: "success" | "pending" | "failure";
+  nextReviewVerdict: "approved" | "changes-requested" = "approved";
+  ciStatus: "success" | "pending" | "failure" | "missing" = "success";
   open = true;
   change: StoredChange | null = null;
   activationId = 1;
@@ -503,10 +548,13 @@ class FixtureState {
   #reviewId = 700;
   #lastTimestamp = Date.now();
 
-  constructor(provider: ProviderKind, firstAttempt?: AttemptMode) {
+  constructor(provider: ProviderKind, firstAttempt?: AttemptMode,migrationCase=false, activationLabel = "agent-flow:development") {
+    this.activationLabel = activationLabel;
+    this.labels = [activationLabel];
     this.provider = provider;
     this.repository = provider === "github" ? "owner/repo" : "group/project";
-    this.number = provider === "github" ? 17 : 23;
+    this.number = migrationCase?2:provider === "github" ? 17 : 23;
+    this.implementationNumber=migrationCase?8:provider==="github"?31:41;
     this.ref = { provider, repository: this.repository, number: this.number };
     this.#raceParticipants = firstAttempt === "race" ? 2 : 0;
     this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.timestamp() });
@@ -520,13 +568,13 @@ class FixtureState {
   }
 
   activate(): void {
-    if (!this.labels.includes("agent-flow:development")) this.labels.push("agent-flow:development");
+    if (!this.labels.includes(this.activationLabel)) this.labels.push(this.activationLabel);
     this.activationId += 1;
     this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
   }
 
   removeActivation(): void {
-    this.labels = this.labels.filter((label) => label !== "agent-flow:development");
+    this.labels = this.labels.filter((label) => label !== this.activationLabel);
     this.activationId += 1;
     this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
   }
@@ -575,6 +623,7 @@ class FixtureState {
       repository: this.repository,
       number: this.change.number,
       url: this.changeUrl(),
+      headRepository:this.repository,headBranch:"fixture-implementation",
       headSha: this.change.headSha,
       state: this.change.state,
       actor: { login: "developer", providerId: "8" },
@@ -725,7 +774,7 @@ class FixtureState {
 
   private publish(context: AttemptContext, attemptId: string, reuse = false): AgentDecision {
     const stageComment = (body: string) => {
-      if (context.prepareComments) context.preparedComment = body.replace(context.publicationMarker, "").trim();
+      if (context.prepareComments) context.preparedComment = body.replace(context.publicationMarker, "").replace(/\n<!-- agent-flow-result:v1 state=[a-z][a-z0-9-]* -->/, "").trim();
       else this.addComment(body);
     };
     const state = context.controlState.stateId;
@@ -754,18 +803,35 @@ class FixtureState {
           : verdict === "question" ? "human-question"
             : verdict === "unclear" ? "human-unclear" : "human-approved" };
     }
-    if (state === "assessment" || state === "planning") {
-      const artifactKind = state === "assessment" ? "assessment" as const : "plan" as const;
-      const existing = context.artifacts.some((artifact) => "body" in artifact
+    if (state === "assessment" || state === "planning" || state === "bug-reproduction" || state === "bug-verification") {
+      const artifactKind = state === "assessment" ? "assessment" as const : state === "planning" ? "plan" as const : state === "bug-reproduction" ? "diagnostic" as const : "verification" as const;
+      const input = this.comments.find((comment) => comment.id === context.controlState.humanGate?.sourceCommentId);
+      const existing = context.artifacts.some((artifact) => (!input || ("createdAt" in artifact && artifact.createdAt > input.createdAt))
+        && !context.migration?.baseline.comments.includes(String(artifact.id)) && "body" in artifact
         && artifact.body.split(/\r?\n/).includes(context.publicationMarker)
         && artifact.body.includes(`Fixture ${artifactKind}.`));
-      if (!existing) stageComment(`${context.publicationMarker}\nFixture ${artifactKind}.`);
+      if (!existing) stageComment(`${context.publicationMarker}\n${state === "bug-verification" ? "BUG RECEIPT · VERIFIED" : `Fixture ${artifactKind}.`}${state === "bug-verification" ? "" : `\n<!-- agent-flow-result:v1 state=${state} -->`}`);
       return { event: "agent-succeeded" };
     }
-    if (state === "development") {
+    if (state === "development" || state === "bug-development") {
+      if (context.migration) {
+        const completion = this.comments.findLast((comment) =>
+          !context.migration!.baseline.comments.includes(comment.id)
+          && comment.body === context.publicationMarker + "\nFixture development revalidated.");
+        const rejected = completion && [...this.reviews.values()].some((review) =>
+          review.verdict === "changes-requested" && review.createdAt > completion.createdAt);
+        const verified = completion && this.comments.some((comment) =>
+          comment.createdAt > completion.createdAt
+          && comment.body === context.publicationMarker + "\nBUG RECEIPT · VERIFIED");
+        if (!completion || rejected || verified) this.addComment(context.publicationMarker + "\nFixture development revalidated.");
+      }
+      if (this.repairCiAfterFailure && this.change && this.ciStatus === "failure") {
+        this.changeHead();
+        this.ciStatus = "success";
+      }
       const timestamp = this.touch();
       this.change ??= {
-        number: this.provider === "github" ? 31 : 41,
+        number: this.implementationNumber,
         headSha: HEAD,
         state: "open",
         body: `${context.publicationMarker}\nFixture change request.`,
@@ -774,10 +840,16 @@ class FixtureState {
       };
       return { event: "agent-succeeded" };
     }
-    if (state === "review") {
+    if (state === "review" || state === "bug-review") {
       if (!this.change) throw new Error("review change request is missing");
-      this.addReview(context.publicationMarker, "approved");
-      return { event: "review-approved" };
+      const verdict = this.nextReviewVerdict;
+      this.nextReviewVerdict = "approved";
+      this.addReview(context.publicationMarker, verdict);
+      if (this.ciAfterReview) {
+        this.ciStatus = this.ciAfterReview;
+        this.ciAfterReview = undefined;
+      }
+      return { event: verdict === "approved" ? "review-approved" : "review-changes-requested" };
     }
     if (state === "needs-human" && this.change?.state === "closed") {
       stageComment(`${context.publicationMarker}\nReopen the existing change request or cancel the flow?`);
@@ -796,6 +868,10 @@ class FixtureState {
 
   private github(method: string, url: URL, body: unknown, response: import("node:http").ServerResponse): void {
     const path = url.pathname.slice("/api/github/".length);
+    if (method === "GET" && path.endsWith("/check-runs")) return json(response, 200, { check_runs: this.ciStatus === "missing" ? [] : [{
+      name: "verify", head_sha: this.change?.headSha, status: this.ciStatus === "pending" ? "in_progress" : "completed", conclusion: this.ciStatus,
+    }] });
+    if (method === "GET" && path.endsWith("/statuses")) return json(response, 200, []);
     if (method === "POST" && path === "graphql") {
       const ids = (body as { variables?: { ids?: string[] } })?.variables?.ids;
       return json(response, 200, ids
@@ -829,7 +905,7 @@ class FixtureState {
       const value = decodeURIComponent(label[1]!);
       const present = this.labels.includes(value);
       this.labels = this.labels.filter((candidate) => candidate !== value);
-      if (present && value === "agent-flow:development") {
+      if (present && value === this.activationLabel) {
         this.activationId += 1;
         this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
       }
@@ -839,7 +915,7 @@ class FixtureState {
       for (const value of (body as { labels: string[] }).labels) {
         if (!this.labels.includes(value)) {
           this.labels.push(value);
-          if (value === "agent-flow:development") {
+          if (value === this.activationLabel) {
             this.activationId += 1;
             this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
           }
@@ -849,9 +925,16 @@ class FixtureState {
       return json(response, 200, this.labels.map((name) => ({ name })));
     }
     const pull = new RegExp(`^repos/${this.repository}/pulls/(\\d+)$`).exec(path);
-    if (method === "GET" && pull) return json(response, 200, this.githubPull());
+    if (method === "GET" && pull) {
+      if(this.incidentalReference && pull[1]==="11") {
+        const original=this.githubPull(),marker=parsePublication(this.change!.body);
+        return json(response,200,{...original,number:11,html_url:`${this.origin}/${this.repository}/pull/11`,state:"closed",merged_at:this.change!.createdAt,body:marker.kind==="current"?renderPublication({...marker.metadata,config:"f".repeat(40)})+"\nCloses #9; mentions #2 as context.":"Policy update"});
+      }
+      return json(response, 200, this.githubPull());
+    }
     const reviews = new RegExp(`^repos/${this.repository}/pulls/(\\d+)/reviews$`).exec(path);
     if (method === "GET" && reviews) {
+      if(this.incidentalReference && reviews[1]==="11") return json(response,200,[]);
       if (!this.validChangeNumber(reviews[1]!)) return json(response, 400, { message: "unexpected change number" });
       const page = this.reviewPage(url);
       if (page === null) return json(response, 400, { message: "invalid review pagination" });
@@ -884,6 +967,8 @@ class FixtureState {
     if (method === "GET" && path === `${project}/issues/${this.number}`) return json(response, 200, this.gitlabIssue());
     if (method === "GET" && path === `${project}/issues/${this.number}/resource_label_events`) return json(response, 200, this.gitlabActivationEvents());
     if (method === "GET" && path === `${project}/issues/${this.number}/notes`) return json(response, 200, this.comments.map((comment) => this.gitlabNote(comment)));
+    if (method === "GET" && path.endsWith("/pipelines")) return json(response, 200, this.ciStatus === "missing" ? [] : [{ id: 10, sha: this.change?.headSha }]);
+    if (method === "GET" && path.endsWith("/pipelines/10/jobs")) return json(response, 200, [{ name: "verify", status: this.ciStatus === "pending" ? "running" : this.ciStatus === "failure" ? "failed" : "success" }]);
     if (method === "GET" && path === `${project}/issues/${this.number}/related_merge_requests`) return json(response, 200, this.change ? [this.gitlabRelated()] : []);
     const member = new RegExp(`^${project}/members/all/(\\d+)$`).exec(path);
     if (method === "GET" && member) return json(response, 200, { id: Number(member[1]), username: "maintainer", access_level: 40 });
@@ -906,7 +991,7 @@ class FixtureState {
       for (const value of update.remove_labels?.split(",").filter(Boolean) ?? []) {
         const present = this.labels.includes(value);
         this.labels = this.labels.filter((candidate) => candidate !== value);
-        if (present && value === "agent-flow:development") {
+        if (present && value === this.activationLabel) {
           this.activationId += 1;
           this.labelEvents.push({ id: this.activationId, action: "remove", createdAt: this.touch() });
         }
@@ -914,7 +999,7 @@ class FixtureState {
       for (const value of update.add_labels?.split(",").filter(Boolean) ?? []) {
         if (!this.labels.includes(value)) {
           this.labels.push(value);
-          if (value === "agent-flow:development") {
+          if (value === this.activationLabel) {
             this.activationId += 1;
             this.labelEvents.push({ id: this.activationId, action: "add", createdAt: this.touch() });
           }
@@ -992,7 +1077,7 @@ class FixtureState {
       event: event.action === "add" ? "labeled" : "unlabeled",
       created_at: event.createdAt,
       actor: this.githubActor(MAINTAINER),
-      label: { name: "agent-flow:development" },
+      label: { name: this.activationLabel },
     }));
     if (this.change) events.push({
       id: 900,
@@ -1001,6 +1086,7 @@ class FixtureState {
       actor: this.githubActor({ login: "developer", providerId: "8" }),
       source: { issue: { number: this.change.number, repository_url: `${this.apiUrl}/repos/${this.repository}`, pull_request: {} } },
     });
+    if(this.incidentalReference) events.push({id:911,event:"cross-referenced",created_at:this.change!.createdAt,actor:this.githubActor(CONTROLLER),source:{issue:{number:11,repository_url:`${this.apiUrl}/repos/${this.repository}`,pull_request:{}}}});
     return events;
   }
 
@@ -1020,7 +1106,7 @@ class FixtureState {
       body: this.change.body,
       created_at: this.change.createdAt,
       updated_at: this.change.updatedAt,
-      head: { sha: this.change.headSha },
+      head: { sha: this.change.headSha,ref:"fixture-implementation",repo:{full_name:this.repository} },
       user: this.githubActor({ login: "developer", providerId: "8" }),
     };
   }
@@ -1041,7 +1127,7 @@ class FixtureState {
     return this.labelEvents.map((event) => ({
       id: event.id,
       action: event.action,
-      label: { name: "agent-flow:development" },
+      label: { name: this.activationLabel },
       user: { id: 7, username: "maintainer" },
       created_at: event.createdAt,
     }));
@@ -1112,6 +1198,7 @@ class FixtureState {
 }
 
 interface AttemptContext {
+  migration?:import("../../src/provider/migration-receipt.ts").MigrationReceipt;
   ticket: unknown;
   controlState: ControlState;
   artifacts: Array<Record<string, unknown>>;
@@ -1145,6 +1232,7 @@ async function createConfiguration(
   pollingIntervalSeconds = 60,
   timeoutSeconds = 5,
   preparedComments = false,
+  oldCiPolicy=false,
 ): Promise<string> {
   await mkdir(join(repository, "config/flows"), { recursive: true });
   await Promise.all([
@@ -1158,6 +1246,9 @@ async function createConfiguration(
   await writeFile(stackFile, (await readFile(stackFile, "utf8"))
     .replace("config/flows/development-autonomous.yaml", "config/flows/development.yaml")
     .replace(preparedComments ? "__absent__" : "  publication: controller-prepared-v1\n", ""));
+  if(oldCiPolicy) {
+    const path=join(repository,"config/flows/development.yaml"),flow=parse(await readFile(path,"utf8"));delete flow.spec.requiredChecks;for(const state of Object.values(flow.spec.states) as Array<{on?:Record<string,unknown>}>) if(state.on) delete state.on["ci-failed"];await writeFile(path,stringify(flow));
+  }
   await execFile("git", ["init", repository]);
   await execFile("git", ["-C", repository, "config", "user.email", "fixture@example.test"]);
   await execFile("git", ["-C", repository, "config", "user.name", "Fixture"]);

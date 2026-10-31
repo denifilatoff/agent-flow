@@ -112,7 +112,16 @@ the existence of a marked comment or a PR with successful completion of a stage.
 The pinned flow's result contract must distinguish a completed result from a question, progress note, or partial
 implementation. After local data loss, a human gate returns through its unique preceding result-producing agent for
 reassessment. An open bugfix merge wait similarly reassesses the preceding verification result. Native reviews are
-checked against their logical verdict and current head; stale or missing approval returns through review. The
+checked against their logical verdict, author permission and current head; stale or missing approval returns through
+review. After migration, authorized approvals for superseded heads remain historical evidence when reconstructing
+downstream stages, so a head-change review cycle does not count both approvals as current results. Recovery still
+requires an authorized current-head approval before restoring merge wait. For a verification replay followed by a
+head change, completed authorized `BUG RECEIPT · VERIFIED` diagnostics preceding the new review belong to the old
+iteration. Retire them when reconstructing the declared head-change transition; keep the diagnostic following the
+current-head approval available for ordinary verification reassessment. Completed review rework and verification
+CI-failure iterations can compose: retire verified historical iterations in provider order until no further
+iteration can be removed, then isolate the current result. Keep the correction candidate available for ordinary
+validation, and stop on incomplete or unauthorized transition evidence. The
 reassessment uses existing agent decisions and provider readback, preserves the original publication identity, and
 keeps an authorized answer after that publication eligible. It adds no common metadata fields. Recovery can rerun an
 agent to interpret published content and inspect code. An interpretation that
@@ -297,3 +306,18 @@ The runtime and provider fixture suites cover the recovery, ownership, ambiguity
 A subsequent independent review covered the two-field block, ownership cases C18-C20, updated architecture, data model,
 and implementation plan. Its findings were corrected and rechecked. Runtime support is implemented with provider
 fixture and unit coverage; full live-provider restart and collision acceptance remains separate end-to-end validation.
+
+## Migration receipt boundaries
+
+Before ordinary mixed-pin/result classification, validate immutable migration receipts against their original
+activation/owner anchor, accepted request content and unique predecessor chain. Validate the exact source/target
+bundles and declared compatibility decision, selected PR repository/branch/original marker, workspace identity,
+explicit retained-result references and comment/review baseline. Only a verified receipt establishes a new
+pin/replay boundary. A carried old PR marker binds only that PR; it grants no target ownership or approval. Same-pin
+replay excludes prior selected/downstream results. Receipts and migration commands are not stage results or human
+answers. After a receipt-before-label/cache crash, repair the same committed decision; after later work advances,
+use justified provider evidence rather than resetting to the receipt’s initial stage. Uncertain writes require
+complete readback before retry. Edited requests/receipts, forks, incomplete evidence, unavailable pins or
+contradictory stages stop with diagnostics. Activation removal, closure and foreign ownership still stop work.
+Surviving SQLite retains retry counts; complete loss may reset them or repeat unpublished work. The receipt is not
+an attempt ledger. See [the migration authoring guide](workflow-migrations.md).
