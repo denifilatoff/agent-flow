@@ -41,6 +41,41 @@ export function publicationIdentity(key: string): [string, string] {
     throw new Error("Invalid publication identity");
   return [parts[3], parts[4]];
 }
+export function scopeMigrationEvidence(
+  evidence: RecoveryEvidence,
+  selectedNumber: number,
+): RecoveryEvidence {
+  const selected = evidence.changes.find((change) => change.number === selectedNumber);
+  if (!selected) return evidence;
+  const marker = parsePublication(selected.body);
+  if (marker.kind !== "current") return evidence;
+  const incidental = evidence.changes.filter((change) => {
+    if (change.number === selectedNumber || change.state === "open") return false;
+    const other = parsePublication(change.body);
+    return other.kind === "current" && other.metadata.controller === marker.metadata.controller;
+  });
+  const reviewIds = new Set(evidence.reviews.filter((review) => {
+    const publication = parsePublication(review.body);
+    return publication.kind === "current"
+      && publication.metadata.controller === marker.metadata.controller
+      && incidental.some((change) => review.url.split("#", 1)[0] === change.url);
+  }).map((review) => review.id));
+  const ignoredKeys = new Set(evidence.publications.filter((publication) => {
+    const [kind, id] = publicationIdentity(publication.key);
+    if (publication.metadata.controller !== marker.metadata.controller) return false;
+    return kind === "change-request"
+      ? incidental.some((change) => String(change.number) === id)
+      : kind === "review" && reviewIds.has(id);
+  }).map((publication) => publication.key));
+  return {
+    ...evidence,
+    publications: evidence.publications.filter((publication) => !ignoredKeys.has(publication.key)),
+    reviews: evidence.reviews.filter((review) => !reviewIds.has(review.id)),
+    ambiguities: evidence.ambiguities.filter((reason) => ![...ignoredKeys].some((key) =>
+      reason === "publication provenance is unavailable: " + key,
+    )),
+  };
+}
 export function assertCarriedChange(
   change: NormalizedChangeRequest,
   receipt: MigrationReceipt,
@@ -87,6 +122,7 @@ export async function recoverMigration(
   const selectedNumbers = new Set(rows.map((r) => r.receipt.change.number));
   if (selectedNumbers.size !== 1)
     throw new Error("Migration receipt chain changes the selected PR");
+  evidence = scopeMigrationEvidence(evidence, [...selectedNumbers][0]!);
   const ordinary = evidence.publications.filter((p) => {
     const [kind, id] = publicationIdentity(p.key);
     return (

@@ -1,6 +1,132 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { processMigration } from "../../src/runtime/migration.ts";
+
+test("explicit PR migration excludes merged incidental PR provenance and reviews across recovery", async (t) => {
+  const f = await migrationFixture(t);
+  const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+  const { renderPublication } = await import("../../src/provider/publication.ts");
+  const raw = f.raw;
+  const key = (kind: string, id: string) => JSON.stringify([
+    "github", "https://api.github.com/", f.ref.repository, kind, id,
+  ]);
+  const incidental = {
+    ...f.selected, number: 13, state: "merged",
+    url: "https://github.com/owner/repo/pull/13",
+    body: renderPublication({ config: f.target.revision, controller: f.d.controllerId }),
+  };
+  const review = {
+    id: "900", url: incidental.url + "#pullrequestreview-900",
+    actor: f.selected.actor, submittedAt: "2026-10-30T00:01:02Z",
+    headSha: incidental.headSha, verdict: "approved", body: incidental.body,
+  };
+  const evidence = () => {
+    const e = raw();
+    return {
+      ...e, snapshot: { ...e.snapshot, changeRequest: null },
+      changes: [...e.changes, incidental], reviews: [...e.reviews, review],
+      publications: [...e.publications,
+        { key: key("change-request", "13"), createdAt: incidental.createdAt,
+          metadata: { config: f.target.revision, controller: f.d.controllerId }, ownershipEligible: false },
+        { key: key("review", review.id), createdAt: review.submittedAt,
+          metadata: { config: f.target.revision, controller: f.d.controllerId } },
+      ],
+      ambiguities: ["publication provenance is unavailable: " + key("change-request", "13"),
+        "multiple linked pull requests"],
+    };
+  };
+  f.d.provider.readRecoveryEvidence = async () => evidence();
+  const migrated = await reconcileTicket(f.d as never, f.ref);
+  assert.deepEqual({ state: migrated.stateId, pin: migrated.configRevision, creates: f.counts().creates },
+    { state: "development", pin: f.target.revision, creates: 1 });
+  await f.reset();
+  const recovered = await reconcileTicket(f.d as never, f.ref);
+  assert.deepEqual({ state: recovered.stateId, pin: recovered.configRevision, creates: f.counts().creates },
+    { state: "development", pin: f.target.revision, creates: 1 });
+});
+
+test("explicit PR migration still rejects damaged selected PR provenance", async (t) => {
+  const f = await migrationFixture(t);
+  const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+  const raw = f.raw;
+  f.d.provider.readRecoveryEvidence = async () => {
+    const e = raw();
+    const selected = e.publications.find((p) => JSON.parse(p.key)[3] === "change-request")!;
+    return { ...e,
+      publications: e.publications.map((p) => p === selected ? { ...p, ownershipEligible: false } : p),
+      ambiguities: ["publication provenance is unavailable: " + selected.key],
+    };
+  };
+  const result = await reconcileTicket(f.d as never, f.ref);
+  assert.deepEqual({ started: result.started, pin: result.configRevision, resolves: f.counts().resolves },
+    { started: false, pin: null, resolves: 0 });
+  assert.equal(f.snapshot.comments.some((c) => c.body.includes("<!-- agent-flow-migration:v1 ")), false);
+});
+
+test("explicit PR migration still rejects another open implementation", async (t) => {
+  const f = await migrationFixture(t);
+  const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+  const raw = f.raw;
+  f.d.provider.readRecoveryEvidence = async () => {
+    const e = raw();
+    return { ...e, changes: [...e.changes,
+      { ...f.selected, number: 13, url: "https://github.com/owner/repo/pull/13" }],
+      ambiguities: ["multiple linked pull requests"],
+    };
+  };
+  const result = await reconcileTicket(f.d as never, f.ref);
+  assert.deepEqual({ started: result.started, pin: result.configRevision, resolves: f.counts().resolves },
+    { started: false, pin: null, resolves: 0 });
+  assert.equal(f.snapshot.comments.some((c) => c.body.includes("<!-- agent-flow-migration:v1 ")), false);
+});
+
+test("incidental PR scoping preserves an earlier foreign review owner", async (t) => {
+  const f = await migrationFixture(t);
+  const { scopeMigrationEvidence } = await import("../../src/runtime/migration-recovery.ts");
+  const { electOwner, renderPublication } = await import("../../src/provider/publication.ts");
+  const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+  const foreign = "11111111-1111-4111-8111-111111111111";
+  const incidental = { ...f.selected, number: 13, state: "merged",
+    url: "https://github.com/owner/repo/pull/13" };
+  const review = { id: "901", url: incidental.url + "#pullrequestreview-901",
+    actor: f.selected.actor, submittedAt: "2026-10-30T00:00:20Z",
+    headSha: incidental.headSha, verdict: "approved",
+    body: renderPublication({ config: f.source.revision, controller: foreign }) };
+  const raw = f.raw;
+  const evidence = () => {
+    const e = raw();
+    return { ...e, changes: [...e.changes, incidental], reviews: [...e.reviews, review],
+      publications: [...e.publications, {
+        key: JSON.stringify(["github", "https://api.github.com/", f.ref.repository, "review", review.id]),
+        createdAt: review.submittedAt, metadata: { config: f.source.revision, controller: foreign },
+      }],
+      ambiguities: ["multiple linked pull requests"],
+    };
+  };
+  assert.equal(electOwner(scopeMigrationEvidence(evidence() as never, 8).publications)?.metadata.controller, foreign);
+  f.d.provider.readRecoveryEvidence = async () => evidence();
+  await reconcileTicket(f.d as never, f.ref);
+  assert.deepEqual(f.counts(), { resolves: 0, creates: 0, cancels: 0 });
+});
+
+test("migration carries an edited selected PR anchored by an earlier verified source publication", async (t) => {
+  const f = await migrationFixture(t);
+  const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+  const raw = f.raw;
+  f.d.provider.readRecoveryEvidence = async () => {
+    const e = raw();
+    return { ...e, publications: e.publications.map((p) =>
+      JSON.parse(p.key)[3] === "change-request" ? { ...p, ownershipEligible: false } : p),
+    };
+  };
+  const migrated = await reconcileTicket(f.d as never, f.ref);
+  assert.deepEqual({ state: migrated.stateId, pin: migrated.configRevision },
+    { state: "development", pin: f.target.revision });
+  await f.reset();
+  const recovered = await reconcileTicket(f.d as never, f.ref);
+  assert.deepEqual({ state: recovered.stateId, pin: recovered.configRevision },
+    { state: "development", pin: f.target.revision });
+});
 test("unauthorized migration comments never resolve targets or mutate provider state", async () => {
   const evidence = {
     complete: true,
