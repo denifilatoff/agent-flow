@@ -101,9 +101,9 @@ test("C9/C17 a changed review head invalidates the old result", async (t) => {
   const oldHead = (await run.changeRequest())!.headSha;
   await run.changeHead();
   await run.reconcile();
-  await run.untilAttempt("succeeded");
+  await run.untilState("awaiting-merge");
   assert.notEqual((await run.changeRequest())!.headSha, oldHead);
-  assert.equal((await run.control()).stateId, "review");
+  assert.equal((await run.control()).stateId, "awaiting-merge");
   const review = (await run.control()).latestReceipt?.artifacts.find((artifact) => artifact.kind === "review");
   assert.equal(review?.kind === "review" ? review.headSha : null, (await run.changeRequest())!.headSha);
 });
@@ -115,7 +115,7 @@ test("C10 a closed unmerged change asks for reopen or cancel", async (t) => {
   await run.untilState("awaiting-merge");
   await run.closeChangeRequest();
   await run.reconcile();
-  await run.untilAttempt("succeeded");
+  await run.untilReceipt("needs-human");
   assert.equal((await run.control()).stateId, "needs-human");
   assert.equal((await run.control()).resumeStateId, "review");
   assert.match((await run.latestAgentComment())!.body, /reopen|cancel/i);
