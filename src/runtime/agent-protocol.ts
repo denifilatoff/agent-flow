@@ -4,7 +4,7 @@ import type {
   ResultContract,
 } from "../config/types.js";
 import type { FlowEventType } from "../flow/types.js";
-import type { NormalizedChangeRequest, ProviderComment } from "../provider/types.js";
+import type { NormalizedChangeRequest, ProviderComment, TicketRef } from "../provider/types.js";
 import { renderPublication } from "../provider/publication.ts";
 
 type EventSource = "agent" | "provider" | "controller";
@@ -21,9 +21,12 @@ export interface RuntimePromptInput {
   controllerId: string;
   contextPath: string;
   decisionPath: string;
+  ticket: TicketRef;
   changeRequest: NormalizedChangeRequest | null;
   sourceComment: ProviderComment | null;
+  excludedCommentIds?: readonly string[];
   excludedReviewIds?: readonly string[];
+  previousFailureCode?: string;
 }
 
 export const EVENT_SOURCES: Readonly<Record<FlowEventType, EventSource>> = Object.freeze({
@@ -77,7 +80,24 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
   const lines = [
     `Read the attempt context from ${input.contextPath}.`,
     `Write exactly one allowed JSON object to ${input.decisionPath}, with no other fields.`,
+    `Result and question comments belong on ticket ${input.ticket.provider} ${input.ticket.repository}#${input.ticket.number} `
+      + "from context.ticket. A PR/MR comment does not satisfy this requirement. "
+      + "Change-request descriptions and provider-native reviews belong on the selected PR/MR as required below.",
   ];
+  const excludedCommentIds = [...new Set([
+    ...input.excludedCommentIds ?? [], ...input.migration?.baseline.comments ?? [],
+  ])];
+  if (excludedCommentIds.length) {
+    lines.push(`Do not reuse these existing comment IDs as result or question evidence: ${excludedCommentIds.join(", ")}. `
+      + "They belong to the publication baseline. Only eligible comments outside this list can satisfy an agent publication requirement.");
+  }
+  if (input.previousFailureCode === "DECISION_EVIDENCE_UNAVAILABLE") {
+    lines.push("Previous attempt failed with DECISION_EVIDENCE_UNAVAILABLE. "
+      + "Repair the required provider publication before returning the decision. "
+      + "Check its location, marker, and excluded IDs against the evidence contract below. "
+      + "A successful test run or completion report on the PR/MR alone cannot replace a required ticket comment. "
+      + "Reuse completed implementation and checks unless a new change or unresolved failure requires more work.");
+  }
   if (input.sourceComment) {
     lines.push(`Interpret the authorized human comment ${input.sourceComment.id} from the attempt context.`);
   }
@@ -106,6 +126,7 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
   }
   if(input.migration) {
     lines.push("This execution follows an accepted migration/replay. Historical publications remain context. The selected stage and downstream results/approvals in migration.baseline are ineligible for reuse. Revalidate and publish a fresh eligible result. Keep updating the exact existing PR and branch; never create a replacement. Preserve its original description marker. New comments/reviews use the current marker.");
+    lines.push("Migration receipts are control records, never stage results or questions.");
   }
   if (input.mode === "stage" && ["assessment", "plan", "diagnostic"].includes(input.resultContract)) {
     lines.push(`Append <!-- agent-flow-result:v1 state=${input.stateId} --> on its own line to a new successful final result comment. `
@@ -172,7 +193,10 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
         return `creation of one linked open change request whose description contains exactly ${marker(input)}`;
       }
       const change = input.changeRequest;
-      if(input.migration) return `the existing PR ${change.url} to remain open with its original marker intact, plus a fresh marked development completion comment containing exactly ${marker(input)}. Explain the revalidated work even if no code change was needed. Never create another PR`;
+      if(input.migration) return `the existing PR ${change.url} to remain open with its original marker intact, `
+        + `plus a fresh marked development completion comment on ticket ${input.ticket.provider} `
+        + `${input.ticket.repository}#${input.ticket.number} containing exactly ${marker(input)}. `
+        + "Explain the revalidated work even if no code change was needed. Never create another PR";
       return `the exact pinned change request ${change.provider} ${change.repository}#${change.number} to remain open `
         + `and be updated during this attempt. Its description must contain exactly ${marker(input)}. `
         + "Do not create another change request";

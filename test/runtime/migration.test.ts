@@ -391,6 +391,59 @@ async function migrationFixture(t: import("node:test").TestContext) {
   };
 }
 
+test("migrated development requires the ticket completion described by its runtime prompt", async (t) => {
+  const f = await migrationFixture(t);
+  const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+  const { renderRuntimePrompt } = await import("../../src/runtime/agent-protocol.ts");
+  const { readDecisionAndBuildReceipt, DecisionEvidenceUnavailableError } = await import("../../src/runtime/receipts.ts");
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  await reconcileTicket(f.d as never, f.ref);
+  const request = f.starts[0] as import("../../src/runtime/reconcile.ts").AttemptRequest;
+  const root = await mkdtemp(join(tmpdir(), "migration-completion-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const decisionPath = join(root, "decision.json");
+  await writeFile(decisionPath, JSON.stringify({ event: "agent-succeeded" }));
+  const prompt = renderRuntimePrompt({
+    flow: f.target.flow, stateId: request.stateId, mode: request.mode,
+    resultContract: request.resultContract, configRevision: f.target.revision,
+    controllerId: f.d.controllerId, contextPath: join(root, "context.json"), decisionPath,
+    ticket: f.ref, changeRequest: f.selected, sourceComment: null, migration: request.migration!.receipt,
+    excludedCommentIds: ["1", "4"],
+  });
+  const success = prompt.split("\n").find((line) => line.startsWith('{"event":"agent-succeeded"}'))!;
+  assert.match(success, /development completion comment on ticket github owner\/repo#2/);
+  assert.match(prompt, /A PR\/MR comment does not satisfy this requirement/);
+  assert.match(prompt, /Do not reuse these existing comment IDs as result or question evidence: 1, 4, 3\./);
+
+  const expected = {
+    flow: f.target.flow, stateId: request.stateId, mode: request.mode,
+    resultContract: request.resultContract, configRevision: f.target.revision,
+    controllerId: f.d.controllerId, publicationKeys: request.publicationKeys,
+    flowInstanceId: request.control.flowInstanceId, attemptId: "22222222-2222-4222-8222-222222222222",
+    ticket: f.ref, sourceComment: null, pinnedChangeRequest: f.selected, migration: request.migration!.receipt,
+  };
+  await assert.rejects(readDecisionAndBuildReceipt(decisionPath, expected, f.d.provider as never, false),
+    DecisionEvidenceUnavailableError);
+  const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+  f.snapshot.comments.push(f.comment("20", marker + "\nDevelopment revalidated on the selected PR."));
+  const receipt = await readDecisionAndBuildReceipt(decisionPath, expected, f.d.provider as never, false);
+  assert.equal(receipt.outcome, "succeeded");
+  assert.deepEqual(receipt.artifacts.map((artifact) => artifact.kind), ["comment", "change-request"]);
+  assert.equal(receipt.artifacts[0]!.url, "https://github.com/owner/repo/issues/2#issuecomment-20");
+  assert.equal(receipt.artifacts[1]!.url, f.selected.url);
+  await assert.rejects(readDecisionAndBuildReceipt(decisionPath, {
+    ...expected,
+    migration: { ...expected.migration, baseline: { ...expected.migration.baseline, comments: ["20"] } },
+  }, f.d.provider as never, false), DecisionEvidenceUnavailableError);
+  await assert.rejects(readDecisionAndBuildReceipt(decisionPath, {
+    ...expected,
+    publicationKeys: [...expected.publicationKeys,
+      JSON.stringify(["github", "https://api.github.com/", f.ref.repository, "comment", "20"])],
+  }, f.d.provider as never, false), DecisionEvidenceUnavailableError);
+});
+
 test("receipt commit/readback carries PR 8 and duplicate reconciliation preserves one replay boundary", async (t) => {
   const f = await migrationFixture(t),
     { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
