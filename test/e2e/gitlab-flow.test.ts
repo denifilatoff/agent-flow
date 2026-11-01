@@ -6,7 +6,7 @@ import { parsePublication } from "../../src/provider/publication.ts";
 import { startFixture } from "../fixtures/provider-server.ts";
 
 test("GitLab activation reaches done through both human gates", async (t) => {
-  const run = await startFixture("gitlab");
+  const run = await startFixture("gitlab", { usage: true, preparedComments: true });
   t.after(() => run.close());
   assert.equal(await run.unauthenticatedProviderStatus(), 400);
 
@@ -19,7 +19,7 @@ test("GitLab activation reaches done through both human gates", async (t) => {
   await run.untilState("done");
 
   assert.deepEqual(await run.controllerLabels(), ["agent-flow:managed", "agent-stage:done"]);
-  assert.equal(await run.controllerCommentWrites(), 0);
+  assert.equal(await run.controllerCommentWrites(), 2);
   const decisions = await run.decisions();
   assert.equal(decisions.length, 6);
   assert.deepEqual(decisions.map(({ event }) => event).toSorted(), [
@@ -33,6 +33,9 @@ test("GitLab activation reaches done through both human gates", async (t) => {
   for (const decision of decisions) assert.deepEqual(Object.keys(decision), ["event"]);
 
   const receipts = await run.receipts();
+  assert.ok(receipts.every((receipt) => receipt.usage?.totalTokens === 1100));
+  const annotated = await run.latestAgentComment();
+  assert.equal(annotated?.body.match(/Usage:/g)?.length, 1);
   assert.deepEqual(receipts.map((receipt) => ({
     outcome: receipt.outcome,
     summary: receipt.summary,

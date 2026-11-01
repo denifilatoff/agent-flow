@@ -38,6 +38,7 @@ export interface DecisionExpectation {
   resultContract: ResultContract;
   configRevision: string;
   activationLabel?: string;
+  activatedAt?: string;
   controllerId: string;
   publicationKeys: readonly string[];
   reusableCommentIds?: readonly string[];

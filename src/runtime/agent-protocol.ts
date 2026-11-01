@@ -26,6 +26,7 @@ export interface RuntimePromptInput {
   sourceComment: ProviderComment | null;
   excludedCommentIds?: readonly string[];
   excludedReviewIds?: readonly string[];
+  preparedCommentPath?: string;
   previousFailureCode?: string;
 }
 
@@ -84,6 +85,14 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
       + "from context.ticket. A PR/MR comment does not satisfy this requirement. "
       + "Change-request descriptions and provider-native reviews belong on the selected PR/MR as required below.",
   ];
+  if (input.preparedCommentPath) {
+    lines.push(`Prepare the final stage comment text locally at ${input.preparedCommentPath}. `
+      + "Do not publish stage comments. The controller publishes the prepared text, publication marker, and usage together "
+      + "after the agent and its native subagents finish. Write only substantive text, without publication or usage markers. "
+      + "Keep the decision JSON unchanged. When reusing a suitable existing result, leave this file absent. "
+      + `The controller adds ${marker(input)}. `
+      + "Change-request creation/updates and provider-native reviews still use the existing publication protocol.");
+  }
   const excludedCommentIds = [...new Set([
     ...input.excludedCommentIds ?? [], ...input.migration?.baseline.comments ?? [],
   ])];
@@ -128,7 +137,7 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
     lines.push("This execution follows an accepted migration/replay. Historical publications remain context. The selected stage and downstream results/approvals in migration.baseline are ineligible for reuse. Revalidate and publish a fresh eligible result. Keep updating the exact existing PR and branch; never create a replacement. Preserve its original description marker. New comments/reviews use the current marker.");
     lines.push("Migration receipts are control records, never stage results or questions.");
   }
-  if (input.mode === "stage" && ["assessment", "plan", "diagnostic"].includes(input.resultContract)) {
+  if (!input.preparedCommentPath && input.mode === "stage" && ["assessment", "plan", "diagnostic"].includes(input.resultContract)) {
     lines.push(`Append <!-- agent-flow-result:v1 state=${input.stateId} --> on its own line to a new successful final result comment. `
       + "This identifies its stage across human-gate revisions; keep the common publication marker unchanged. "
       + "Do not add this result annotation to questions or progress notes, or rewrite historical results.");
@@ -162,6 +171,17 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
 }
 
 function evidence(input: RuntimePromptInput, event: AgentEventType): string {
+  if (input.preparedCommentPath && input.migration && input.resultContract === "development"
+    && event === "agent-succeeded" && input.changeRequest) {
+    return `the existing PR ${input.changeRequest.url} to remain open with its original marker intact, plus fresh development `
+      + `completion comment text prepared at ${input.preparedCommentPath} for controller publication on the canonical issue. `
+      + "Explain the revalidated work even if no code change was needed. Never create another PR";
+  }
+  if (input.preparedCommentPath && (event === "agent-needs-human" || event === "human-question"
+    || event === "human-unclear" || event === "human-answer-unclear"
+    || (event === "agent-succeeded" && ["assessment", "plan", "diagnostic", "verification"].includes(input.resultContract)))) {
+    return `final substantive comment text prepared at ${input.preparedCommentPath}, or reuse of an existing suitable marked result`;
+  }
   if (event === "agent-needs-human"
     || event === "human-question"
     || event === "human-unclear"

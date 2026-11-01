@@ -1,6 +1,7 @@
 apiVersion: agent-flow/v1alpha1
 kind: Stack
 spec:
+  publication: controller-prepared-v1
   flow: config/flows/development-autonomous.yaml
   catalog: config/agents.yaml
   contracts:
