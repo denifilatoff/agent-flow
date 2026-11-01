@@ -32,6 +32,7 @@ function promptInput(flow: FlowDefinition, overrides: Partial<RuntimePromptInput
     attemptId: ATTEMPT_ID,
     contextPath: "/data/sessions/context.json",
     decisionPath: "/data/sessions/decision.json",
+    ticket: { provider: "github", repository: "owner/repo", number: 7 },
     changeRequest: null,
     sourceComment: null,
     ...overrides,
@@ -221,9 +222,11 @@ test("human input publishes only clarification questions", async () => {
     mode: "human-input",
     resultContract: "human-gate",
     sourceComment,
+    excludedCommentIds: [sourceComment.id],
   }));
 
   assert.match(prompt, /authorized human comment comment-17/);
+  assert.match(prompt, /comment IDs as result or question evidence: comment-17\./);
   assert.ok(prompt.includes(
     "Human-input mode: interpret only the supplied authorized human comment. Do not perform stage work or publish "
       + "stage artifacts or a review verdict. Accepted, rejected, or cancelled decisions publish nothing. A question "
@@ -261,7 +264,8 @@ test("prepared migrated development requires local completion text and preserves
     preparedCommentPath: "/session/prepared-comment.txt",
     changeRequest: { provider: "github", repository: "owner/repo", number: 8,
       url: "https://github.test/owner/repo/pull/8", headSha: HEAD_SHA, state: "open" } as never,
-    migration: {} as RuntimePromptInput["migration"] });
+    migration: { baseline: { comments: ["old-completion"], reviews: [] } } as RuntimePromptInput["migration"],
+    previousFailureCode: "DECISION_EVIDENCE_UNAVAILABLE" });
   const prompt = renderRuntimePrompt(input);
   const success = prompt.split("\n").find((line) => line.startsWith('{"event":"agent-succeeded"} requires'))!;
   assert.match(success, /existing PR.*remain open with its original marker intact/);
@@ -269,4 +273,9 @@ test("prepared migrated development requires local completion text and preserves
   assert.match(success, /canonical issue/);
   assert.doesNotMatch(success, /fresh marked development completion comment containing exactly/);
   assert.match(success, /Never create another PR/);
+  assert.match(prompt, /Result and question comments belong on ticket github owner\/repo#7/);
+  assert.match(prompt, /Do not reuse these existing comment IDs.*old-completion/);
+  assert.match(prompt, /Previous attempt failed with DECISION_EVIDENCE_UNAVAILABLE/);
+  assert.match(prompt, /Do not publish stage comments/);
+  assert.match(prompt, /Migration receipts are control records/);
 });

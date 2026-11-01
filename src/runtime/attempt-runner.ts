@@ -352,6 +352,7 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
 
     while (series.consumed < series.maxAttempts) {
       if (running.cancelled) return;
+      const previousFailureCode = series.current?.status === "failed" ? series.current.error?.code : undefined;
       const attempt: Attempt = {
         attemptId: newId(),
         status: "started",
@@ -434,9 +435,15 @@ export function createAttemptRunner(dependencies: AttemptRunnerDependencies): At
           contextPath: session.contextPath,
           decisionPath: session.decisionPath,
           ...(preparedProtocol ? { preparedCommentPath: join(session.root, "prepared-comment.txt") } : {}),
+          ticket: request.ref,
           changeRequest: request.snapshot.changeRequest,
           sourceComment: request.sourceComment,
           migration:request.migration?.receipt,
+          previousFailureCode,
+          excludedCommentIds: request.publicationKeys.flatMap((key) => {
+            const value = JSON.parse(key);
+            return value[3] === "comment" ? [value[4]] : [];
+          }),
           excludedReviewIds: request.publicationKeys.flatMap((key) => {
             const value = JSON.parse(key);
             return value[3] === "review" ? [value[4]] : [];

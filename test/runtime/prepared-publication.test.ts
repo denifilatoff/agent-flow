@@ -174,7 +174,7 @@ test("migrated development publishes and verifies completion on the canonical is
   const expected = { ...f.expected, stateId: "development", resultContract: "development" as const,
     flow: { ...f.expected.flow, spec: { states: { development: { kind: "agent" as const,
       on: { "agent-succeeded": { target: "done" } } } } } },
-    pinnedChangeRequest: change, migration: { change: { ...change, marker }, owner: {
+    pinnedChangeRequest: change, migration: { baseline: { comments: [owner.id], reviews: [] }, change: { ...change, marker }, owner: {
       key: JSON.stringify(["github", "https://api.github.com/", "owner/repo", "comment", owner.id]), config: "b".repeat(40),
     } } as DecisionExpectation["migration"] };
   f.provider.readTicket = async () => ({ ref: expected.ticket,

@@ -238,7 +238,9 @@ async function discoverDecisionComment(
   provider: ProviderAdapter,
 ): Promise<ProviderComment> {
   const expectedMarker = decisionMarker(expected);
-  const candidates = ticket.comments.filter((comment) => !isBaseline(expected, "comment", comment.id));
+  const candidates = ticket.comments.filter((comment) => !isBaseline(expected, "comment", comment.id)
+    && !expected.migration?.baseline.comments.includes(comment.id)
+    && !comment.body.includes("<!-- agent-flow-migration:"));
   const reusable = new Set(expected.reusableCommentIds ?? []);
   const marked = candidates.filter((comment) => hasExpectedPublication(comment.body, expected));
   const fresh = marked.filter(({ id }) => !reusable.has(id));

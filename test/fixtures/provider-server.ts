@@ -123,6 +123,7 @@ export interface FixtureRun {
   migrationReceipts():Promise<string[]>;
   reconcile(): Promise<void>;
   receipts(): Promise<AgentReceipt[]>;
+  untilReceipt(outcome: AgentReceipt["outcome"]): Promise<void>;
   reviewRequests(): Promise<string[]>;
   controllerCommentWrites(): Promise<number>;
   removeActivation(): Promise<void>;
@@ -461,6 +462,9 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
       const latest = currentControl()?.latestReceipt;
       if (latest) state.recordAcceptedReceipt(latest);
       return state.acceptedReceipts;
+    },
+    async untilReceipt(outcome) {
+      await waitFor(() => currentControl()?.latestReceipt?.outcome === outcome);
     },
     async reviewRequests() { return [...state.reviewRequests]; },
     async controllerCommentWrites() {

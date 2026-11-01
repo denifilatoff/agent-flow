@@ -34,8 +34,10 @@ local-state loss; provider acceptance begins at the verified receipt.
 
 The original PR branch, history, marker and controller identity are retained. New comments/reviews use the target pin.
 Old assessments, plans, answers and reviews remain context. Replayed work and downstream approvals need fresh eligible
-evidence, including on the same head/SHA. Development replay publishes a marked completion comment as well as updating
-or revalidating the existing PR. CI and review remain ordinary target-workflow checks, and merge stays manual.
+evidence, including on the same head/SHA. Development replay publishes a marked completion comment on the original
+ticket as well as updating or revalidating the existing PR. A comment on the PR does not satisfy the ticket-comment
+requirement. Migration receipts are control records and cannot substitute for stage results. CI and review remain
+ordinary target-workflow checks, and merge stays manual.
 
 A closed unmerged PR must be reopened by the operator before requesting migration. A merged PR cannot resume the same
 implementation; follow-up work needs a separate decision. An unavailable/unlinked/foreign-repository PR, competing open
@@ -53,6 +55,18 @@ and ownership loss prevent new work.
 For the issue #2 / PR #8 case, publish and deploy this feature first, then separately authorize the desired migration.
 The shipped old-CI rules return merge wait to development under required exact-head `verify` checks and fresh review.
 Implementing this feature does not migrate that live ticket or repair PR #8's E2E timeout.
+
+## DECISION_EVIDENCE_UNAVAILABLE during replay
+
+The agent returned a decision without an eligible provider result. During development replay, the controller requires
+both the selected open PR and a marked completion comment on the original ticket. A completion report on the PR alone
+leaves the stage incomplete, even when its CI is green.
+
+The next attempt's runtime prompt identifies the ticket and excluded comment IDs. It also reports this failure code
+and asks the agent to repair the publication. The agent can reuse an eligible ticket result outside the excluded IDs;
+comments in the migration baseline or the attempt's publication baseline cannot complete that attempt. If no eligible
+result exists, the agent revalidates the work and publishes its completion on the ticket. Completed implementation and
+checks need not be repeated without a new change or unresolved failure. The finite retry budget remains in force.
 
 Maintainers author and test rules using [the canonical authoring guide](workflow-migrations.md). Pre-Stack upgrades
 still follow [the existing upgrade restrictions](upgrading.md); this command is not a legacy-state converter.
