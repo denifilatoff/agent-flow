@@ -290,6 +290,37 @@ test("retries with injected delay and a fresh session", async () => {
   assert.equal(subject.controls.at(-1)!.attemptSeries?.consumed, 2);
 });
 
+test("passes the canonical ticket and excluded comment IDs to the runtime prompt", async () => {
+  const configured = request();
+  configured.publicationKeys = [
+    JSON.stringify(["github", "https://api.github.com/", "owner/repo", "comment", "101"]),
+    JSON.stringify(["github", "https://api.github.com/", "owner/repo", "review", "701"]),
+  ];
+  const subject = fixture({ request: configured, results: [OK] });
+  await subject.runner.start(subject.request);
+  await waitIdle(subject);
+
+  assert.match(subject.prompts[0]!, /Result and question comments belong on ticket github owner\/repo#7/);
+  assert.match(subject.prompts[0]!, /Do not reuse these existing comment IDs as result or question evidence: 101\./);
+  assert.doesNotMatch(subject.prompts[0]!, /comment IDs as result or question evidence: 701/);
+});
+
+test("tells an evidence retry to repair publication without exposing raw failure text", async () => {
+  let calls = 0;
+  const subject = fixture({ results: [OK, OK], verify: async (_path, expected) => {
+    if (calls++ === 0) throw new DecisionEvidenceUnavailableError("secret-provider-response");
+    return receipt(expected.attemptId);
+  } });
+  await subject.runner.start(subject.request);
+  await waitIdle(subject);
+
+  assert.doesNotMatch(subject.prompts[0]!, /Previous attempt failed/);
+  assert.match(subject.prompts[1]!, /Previous attempt failed with DECISION_EVIDENCE_UNAVAILABLE/);
+  assert.match(subject.prompts[1]!, /Repair the required provider publication/);
+  assert.doesNotMatch(subject.prompts.join("\n"), /secret-provider-response/);
+  assert.equal(subject.controls.at(-1)!.attemptSeries?.current?.status, "succeeded");
+});
+
 test("retries process and decision failures with a fresh session", async () => {
   const cases: Array<HarnessResult | Error> = [
     { exitCode: null, signal: "SIGTERM", timedOut: true }, new HarnessProcessError("codex", true),

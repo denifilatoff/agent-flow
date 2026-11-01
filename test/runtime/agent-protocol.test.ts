@@ -32,6 +32,7 @@ function promptInput(flow: FlowDefinition, overrides: Partial<RuntimePromptInput
     attemptId: ATTEMPT_ID,
     contextPath: "/data/sessions/context.json",
     decisionPath: "/data/sessions/decision.json",
+    ticket: { provider: "github", repository: "owner/repo", number: 7 },
     changeRequest: null,
     sourceComment: null,
     ...overrides,
@@ -221,9 +222,11 @@ test("human input publishes only clarification questions", async () => {
     mode: "human-input",
     resultContract: "human-gate",
     sourceComment,
+    excludedCommentIds: [sourceComment.id],
   }));
 
   assert.match(prompt, /authorized human comment comment-17/);
+  assert.match(prompt, /comment IDs as result or question evidence: comment-17\./);
   assert.ok(prompt.includes(
     "Human-input mode: interpret only the supplied authorized human comment. Do not perform stage work or publish "
       + "stage artifacts or a review verdict. Accepted, rejected, or cancelled decisions publish nothing. A question "

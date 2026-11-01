@@ -153,7 +153,8 @@ marker, plus the original activation/owner, request identity, compatibility basi
 rewrite the PR description or earlier publications. Old planning results, downstream development results, reviews
 and approvals cannot finish the replay, even on the same SHA or head. Replayed planning publishes a fresh result;
 configured human gates require new answers. The developer updates the same branch/PR and publishes a fresh marked
-completion comment, including when revalidation needs no code change. New comments/reviews use the target pin.
+completion comment on the original ticket, including when revalidation needs no code change. PR comments and migration
+receipts cannot substitute for that result. New comments/reviews use the target pin.
 
 ### Rejected unsupported mapping
 
