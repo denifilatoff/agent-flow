@@ -6,6 +6,7 @@ import { parse } from "yaml";
 import { AGENT_PACKAGE_PROTOCOL_CONTRACT } from "../helpers/agent-package-contracts.ts";
 
 const PACKAGE_TARGETS = {
+  documentarian: ["claude", "codex"],
   architect: ["claude", "codex"],
   planner: ["claude", "codex"],
   developer: ["codex"],
@@ -15,6 +16,7 @@ const PACKAGE_TARGETS = {
 } as const;
 
 const PACKAGE_VERSIONS = {
+  documentarian: "1.0.0",
   architect: "1.0.3",
   planner: "1.0.3",
   developer: "1.0.3",
@@ -28,6 +30,7 @@ const ADVERSARIAL_REVIEW_DEPENDENCY =
 const BUG_SKILL_REVISION = "634b92f887487fc61cddc2f61d77830e09e8f589";
 const ENGINEERING_SKILL_REVISION = "f63ec56a3cc936408d792956ae583c3c96a825bd";
 const ENGINEERING_SKILLS = {
+  documentarian: ["documentation-and-adrs"],
   architect: ["spec-driven-development"],
   planner: ["planning-and-task-breakdown"],
   developer: ["incremental-implementation", "test-driven-development"],
@@ -35,6 +38,8 @@ const ENGINEERING_SKILLS = {
 } as const;
 
 const DOMAIN_CONTRACTS = {
+  documentarian: [/documentation-and-adrs/, /complete.*diff/, /supplied head/, /existing linked change request/,
+    /no-op/, /no empty commit/, /ADRs/, /changelogs/, /generated files/, /Do not repair implementation/],
   architect: [/spec-driven-development/, /\bscope\b/, /\bconstraints\b/, /\binterfaces\b/, /\brisks\b/, /acceptance conditions/],
   planner: [
     /planning-and-task-breakdown/,
@@ -266,4 +271,12 @@ test("reviewer keeps the GitHub native self-review fallback", async () => {
     ),
   );
   assert.match(reviewer.body, /GitHub self-review\s+fallback[\s\S]*native `COMMENT` review/);
+});
+
+
+test("documentarian has one scoped entry agent and a dual-target pinned skill", async () => {
+  await assertAgentPackage("documentarian", "documentation");
+  const lock = await readFile(new URL("../../agent-packages/documentarian/apm.lock.yaml", import.meta.url), "utf8");
+  assert.match(lock, /\.claude\/skills\/documentation-and-adrs\/SKILL\.md/);
+  assert.match(lock, /\.agents\/skills\/documentation-and-adrs\/SKILL\.md/);
 });

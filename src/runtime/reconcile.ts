@@ -21,6 +21,7 @@ import {
   renderControlComment,
   type ParsedControlComment,
 } from "../provider/control-comment.ts";
+import { parseDocumentation } from "../provider/documentation.ts";
 import { electOwner, parsePublication } from "../provider/publication.ts";
 import type {
   Permission,
@@ -501,16 +502,29 @@ function clearUncommittedReceipt(
         && review.headSha === artifact.headSha
         && review.verdict === artifact.verdict);
     }
+    if (artifact.artifactKind === "documentation") {
+      const comment = evidence.snapshot.comments.find(({ id }) => id === artifact.id);
+      const report = comment && parseDocumentation(comment.body);
+      return report !== null && report !== undefined && evidence.snapshot.changeRequest?.state === "open"
+        && report.inputHead === artifact.inputHead
+        && report.change === evidence.snapshot.changeRequest.number
+        && report.resultHead === evidence.snapshot.changeRequest.headSha;
+    }
     return true;
   }) && (!receipt.humanGate || evidence.snapshot.comments.some((comment) =>
     comment.id === receipt.humanGate!.sourceCommentId && !isMarked(comment.body)));
   if (committed && (receipt.artifacts.length > 0 || receipt.humanGate)) return control;
 
+  const documentation = receipt.artifacts.find((artifact) =>
+    artifact.kind === "comment" && artifact.artifactKind === "documentation");
+  const changeRequest = control.changeRequest && documentation?.kind === "comment" && documentation.inputHead
+    ? { ...control.changeRequest, headSha: documentation.inputHead }
+    : normalizedChange(evidence.snapshot.changeRequest);
   return advanceControlState(control, {
     attemptSeries: control.attemptSeries ? { ...control.attemptSeries, current: null } : null,
     latestReceipt: null,
     humanGate: control.humanGate?.interpretedByAttemptId === receipt.attemptId ? null : control.humanGate,
-    changeRequest: normalizedChange(evidence.snapshot.changeRequest),
+    changeRequest,
   }, now(dependencies));
 }
 
@@ -739,6 +753,7 @@ function hasValidLocalResume(flow: FlowDefinition, control: ControlState): boole
 }
 
 type PublicationObjectKind = "comment" | "change-request" | "review";
+type RecoveryPublicationKind = PublicationObjectKind | "documentation";
 
 type RecoveryIteration =
   | { kind: "ready"; baselineKeys: string[]; humanCutoff: string | null; reassessState?: string }
@@ -755,6 +770,13 @@ async function recoveryIteration(
   const baselineKeys = markedObjectKeys(bundle, evidence, apiUrl);
   const linked = evidence.snapshot.changeRequest;
   const migration = evidence.migration;
+  const recoveryKind = (key: string): RecoveryPublicationKind | null => {
+    const kind = publicationObjectKind(key, evidence.snapshot.ref, bundle);
+    if (kind !== "comment") return kind;
+    const comment = evidence.snapshot.comments.find(({ id }) =>
+      hasPublicationIdentity(key, evidence.snapshot.ref, "comment", id));
+    return comment && parseDocumentation(comment.body) ? "documentation" : kind;
+  };
   if (migration?.receipt.start === stage && bundle.flow.spec.states[stage]?.kind === "human-gate") {
     const predecessor = migration.receipt.retained.filter((retained) =>
       bundle.flow.spec.states[retained.stage]?.on?.["agent-succeeded"]?.target === stage);
@@ -766,12 +788,12 @@ async function recoveryIteration(
     const later = evidence.publications.filter((publication) =>
       publication.metadata.controller === ownerController
       && !migration.receipt.retained.some((retained) => retained.key === publication.key)
-      && publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) !== "change-request")
+      && recoveryKind(publication.key) !== "change-request")
       .toSorted((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
         || left.key.localeCompare(right.key));
     if (later.length > 0) {
       if (later.some((publication) =>
-        publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) !== "comment"
+        recoveryKind(publication.key) !== "comment"
         || !baselineKeys.includes(publication.key))) {
         return { kind: "ambiguous", baselineKeys, reason: "Migrated human gate iteration cannot be isolated" };
       }
@@ -803,13 +825,40 @@ async function recoveryIteration(
     .filter(({ metadata }) => ownerController === null || metadata.controller === ownerController)
     .filter((publication) => {
       if (publication.ownershipEligible === false
-        && publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) === "review") return false;
+        && recoveryKind(publication.key) === "review") return false;
       return true;
     })
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
+  const documentationEnabled = Object.values(bundle.flow.spec.states).some((state) => state.resultContract === "documentation");
+  if (documentationEnabled && !migration) {
+    const rework = evidence.reviews.filter((review) => review.verdict === "changes-requested"
+      && evidence.publications.some((publication) => publication.metadata.controller === ownerController
+        && publication.ownershipEligible !== false
+        && hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", review.id)))
+      .toSorted((left, right) => Date.parse(right.submittedAt) - Date.parse(left.submittedAt))[0];
+    if (rework && linked && rework.headSha !== linked.headSha) {
+      const boundary = Date.parse(rework.submittedAt);
+      active = active.filter((publication) => {
+        if (Date.parse(publication.createdAt) > boundary) return true;
+        const kind = recoveryKind(publication.key);
+        if (kind === "review") return false;
+        if (kind !== "documentation") return true;
+        const comment = evidence.snapshot.comments.find(({ id }) =>
+          hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", id));
+        const report = comment && parseDocumentation(comment.body);
+        if (!report || report.change !== linked.number) return true;
+        // An ordered review on the report's result head proves that this report belongs to a consumed iteration.
+        return !evidence.reviews.some((review) => review.headSha === report.resultHead
+          && Date.parse(review.submittedAt) > Date.parse(publication.createdAt)
+          && Date.parse(review.submittedAt) <= boundary
+          && evidence.publications.some((candidate) => candidate.metadata.controller === ownerController
+            && hasPublicationIdentity(candidate.key, evidence.snapshot.ref, "review", review.id)));
+      });
+    }
+  }
   let recoveryStart = migration?.receipt.start;
-  let committed: PublicationObjectKind[] | null;
+  let committed: RecoveryPublicationKind[] | null;
   let previousLength: number;
   // Retiring one completed iteration can expose another kind of iteration.
   // Repeat in provider order until rework and CI recovery agree on the suffix.
@@ -826,11 +875,11 @@ async function recoveryIteration(
           const prefix = successfulPublicationPath(bundle.flow, verificationId,
             evidence.snapshot.activation.label, recoveryStart);
           if (!prefix || !prefix.every((kind, index) => active[index]
-            && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === kind)) break;
+            && recoveryKind(active[index]!.key) === kind)) break;
           const diagnostic = active[prefix.length];
           const next = active[prefix.length + 1];
           if (!diagnostic || (stage !== ciTarget && (!next
-            || publicationObjectKind(next.key, evidence.snapshot.ref, bundle) !== "comment"))) break;
+            || recoveryKind(next.key) !== "comment"))) break;
           const completion = evidence.snapshot.comments.find((comment) =>
             hasPublicationIdentity(diagnostic.key, evidence.snapshot.ref, "comment", comment.id));
           if (!completion || !isVerifiedBugReceipt(completion.body)) break;
@@ -871,7 +920,7 @@ async function recoveryIteration(
         // the diagnostic after the current-head review must remain revalidatable.
         while (active[0]) {
           const publication = active[0];
-          const kind = publicationObjectKind(publication.key, evidence.snapshot.ref, bundle);
+          const kind = recoveryKind(publication.key);
           if (kind !== "comment") break;
           const completion = evidence.snapshot.comments.find((comment) =>
             hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
@@ -946,8 +995,8 @@ async function recoveryIteration(
           if (gates.length > 1 && resultStage(active[offset]!.key) !== predecessors[0]![0]) break;
           const next = active[offset + 1];
           if ((!next && stage === gateId)
-            || publicationObjectKind(active[offset]!.key, evidence.snapshot.ref, bundle) !== "comment"
-            || (next && publicationObjectKind(next.key, evidence.snapshot.ref, bundle) !== "comment")) break;
+            || recoveryKind(active[offset]!.key) !== "comment"
+            || (next && recoveryKind(next.key) !== "comment")) break;
           let authorized = false;
           for (const comment of evidence.snapshot.comments) {
             if (comment.createdAt <= active[offset]!.createdAt || (next && comment.createdAt >= next.createdAt)
@@ -983,7 +1032,7 @@ async function recoveryIteration(
       // A revised gate result is followed by human input before downstream work.
       // Keep a current agent result without that input available for revalidation.
       while (active.length > committed.length
-        && publicationObjectKind(active[0]!.key, evidence.snapshot.ref, bundle) === "comment") {
+        && recoveryKind(active[0]!.key) === "comment") {
         const resultAt = active[0]!.createdAt;
         const nextAt = active[1]?.createdAt;
         let answered = false;
@@ -1005,13 +1054,16 @@ async function recoveryIteration(
     if (migration) {
       for (const [developmentId, development] of Object.entries(bundle.flow.spec.states)) {
         if (development.resultContract !== "development") continue;
-        const review = bundle.flow.spec.states[development.on?.["agent-succeeded"]?.target ?? ""];
+        const next = bundle.flow.spec.states[development.on?.["agent-succeeded"]?.target ?? ""];
+        const documentation = next?.resultContract === "documentation" ? next : undefined;
+        const review = documentation
+          ? bundle.flow.spec.states[documentation.on?.["agent-succeeded"]?.target ?? ""] : next;
         if (review?.resultContract !== "review"
           || review.on?.["review-changes-requested"]?.target !== developmentId) continue;
         const prefix = successfulPublicationPath(bundle.flow, developmentId,
           evidence.snapshot.activation.label, recoveryStart);
         if (!prefix || !prefix.every((kind, index) => active[index]
-          && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === kind)) continue;
+          && recoveryKind(active[index]!.key) === kind)) continue;
         const index = prefix.length;
         // CI retries can publish another completion without a rejection review.
         // Supersede only authorized completions on a configured CI retry path;
@@ -1020,10 +1072,24 @@ async function recoveryIteration(
           && (development.on?.["ci-failed"]?.target === developmentId
             || review.on?.["ci-failed"]?.target === developmentId);
         while (active[index] && active[index + 1]
-          && publicationObjectKind(active[index]!.key, evidence.snapshot.ref, bundle) === "comment") {
-          const nextKind = publicationObjectKind(active[index + 1]!.key, evidence.snapshot.ref, bundle);
+          && recoveryKind(active[index]!.key) === "comment") {
+          let iterationLength = 1;
+          let report: ReturnType<typeof parseDocumentation> = null;
+          if (documentation && recoveryKind(active[index + 1]!.key) === "documentation") {
+            const comment = evidence.snapshot.comments.find((candidate) =>
+              hasPublicationIdentity(active[index + 1]!.key, evidence.snapshot.ref, "comment", candidate.id));
+            report = comment ? parseDocumentation(comment.body) : null;
+            if (!comment || !report || report.change !== linked?.number) break;
+            const permission = await providerCall("provider permission read failed", () =>
+              provider.permission(evidence.snapshot.ref.repository, comment.actor));
+            if (!AUTHORIZED.has(permission)) break;
+            iterationLength++;
+          }
+          const following = active[index + iterationLength];
+          if (!following) break;
+          const nextKind = recoveryKind(following.key);
           if (nextKind === "comment" && retriesCi) {
-            const completions = active.slice(index, index + 2).map((publication) =>
+            const completions = [active[index]!, following].map((publication) =>
               evidence.snapshot.comments.find((comment) =>
                 hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id)));
             if (completions.some((completion) => !completion)) break;
@@ -1037,23 +1103,24 @@ async function recoveryIteration(
               providerCall("provider permission read failed", () =>
                 provider.permission(evidence.snapshot.ref.repository, completion!.actor))));
             if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
-            active.splice(index, 1);
+            active.splice(index, iterationLength);
             continue;
           }
           // A verified rejection closes that completion/review iteration, even
           // when a later correction has moved the PR head.
-          if (nextKind !== "review") break;
+          if (nextKind !== "review" || (documentation && !report)) break;
           const completion = evidence.snapshot.comments.find((comment) =>
             hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "comment", comment.id));
           const rejection = evidence.reviews.find((candidate) =>
-            hasPublicationIdentity(active[index + 1]!.key, evidence.snapshot.ref, "review", candidate.id));
+            hasPublicationIdentity(following.key, evidence.snapshot.ref, "review", candidate.id));
           if (!completion || rejection?.verdict !== "changes-requested"
-            || !/^[0-9a-f]{40}$/.test(rejection.headSha)) break;
+            || !/^[0-9a-f]{40}$/.test(rejection.headSha)
+            || (report && report.resultHead !== rejection.headSha)) break;
           const permissions = await Promise.all([completion.actor, rejection.actor].map((actor) =>
             providerCall("provider permission read failed", () =>
               provider.permission(evidence.snapshot.ref.repository, actor))));
           if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
-          active.splice(index, 2);
+          active.splice(index, iterationLength + 1);
         }
       }
     }
@@ -1070,7 +1137,7 @@ async function recoveryIteration(
         // Retire only the authorized old-head approval/verification pair, keeping
         // the preceding work and the current-head verification candidate intact.
         while (prefix.every((kind, offset) => active[offset]
-          && publicationObjectKind(active[offset]!.key, evidence.snapshot.ref, bundle) === kind)) {
+          && recoveryKind(active[offset]!.key) === kind)) {
           const approval = evidence.reviews.find((review) =>
             hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "review", review.id));
           const publication = active[index + 1];
@@ -1090,7 +1157,7 @@ async function recoveryIteration(
   } while (active.length < previousLength);
   if (bundle.flow.spec.states[stage]?.resultContract === "review") {
     active = active.filter((publication) =>
-      publicationObjectKind(publication.key, evidence.snapshot.ref, bundle) !== "review"
+      recoveryKind(publication.key) !== "review"
       || evidence.reviews.some((review) =>
         hasPublicationIdentity(publication.key, evidence.snapshot.ref, "review", review.id)
         && review.headSha === linked?.headSha));
@@ -1110,7 +1177,21 @@ async function recoveryIteration(
     }
     active = active.filter((publication) => !superseded.has(publication.key));
   }
-  const kinds = active.map((publication) => publicationObjectKind(publication.key, evidence.snapshot.ref, bundle));
+  const kinds = active.map((publication) => recoveryKind(publication.key));
+  const documentation = active.flatMap((publication, index) => {
+    if (kinds[index] !== "documentation") return [];
+    const comment = evidence.snapshot.comments.find(({ id }) =>
+      hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", id))!;
+    return [{ metadata: parseDocumentation(comment.body)!, publication }];
+  });
+  // Provider changes expose only the current head, not the implementation boundary before a documentation push.
+  // With no local state, only an unchanged-head report establishes both boundaries independently.
+  if (documentation.some(({ metadata }) => !linked || metadata.change !== linked.number
+    || metadata.resultHead !== linked.headSha || metadata.inputHead !== metadata.resultHead)
+    || (bundle.flow.spec.states[stage]?.resultContract === "documentation" && documentation.length !== 1)) {
+    return { kind: "ambiguous", baselineKeys,
+      reason: "documentation implementation boundary cannot be established from provider evidence" };
+  }
   if (kinds.some((kind) => kind === null) || !active.every(({ key }) => baselineKeys.includes(key))) {
     return { kind: "ambiguous", baselineKeys, reason: "publication identity cannot be verified for the active work" };
   }
@@ -1166,13 +1247,13 @@ async function recoveryIteration(
   };
 }
 
-function successfulPublicationPath(flow: FlowDefinition, target: string, activationLabel: string | null,start?:string): PublicationObjectKind[] | null {
-  const queue: Array<{ stateId: string; kinds: PublicationObjectKind[]; visited: Set<string> }> = [{
+function successfulPublicationPath(flow: FlowDefinition, target: string, activationLabel: string | null, start?: string): RecoveryPublicationKind[] | null {
+  const queue: Array<{ stateId: string; kinds: RecoveryPublicationKind[]; visited: Set<string> }> = [{
     stateId: start ?? entryStage(flow, activationLabel),
     kinds: [],
     visited: new Set(),
   }];
-  const matches: PublicationObjectKind[][] = [];
+  const matches: RecoveryPublicationKind[][] = [];
   while (queue.length > 0) {
     const current = queue.shift()!;
     if (current.stateId === target) {
@@ -1200,8 +1281,9 @@ function successfulPublicationPath(flow: FlowDefinition, target: string, activat
   return matches[0]!;
 }
 
-function resultPublicationKind(result: ResultContract | undefined,migrated=false): PublicationObjectKind | null {
-  if(migrated && result==="development") return "comment";
+function resultPublicationKind(result: ResultContract | undefined, migrated = false): RecoveryPublicationKind | null {
+  if (result === "documentation") return "documentation";
+  if (migrated && result === "development") return "comment";
   if (result === "assessment" || result === "plan" || result === "diagnostic" || result === "verification") return "comment";
   if (result === "development") return "change-request";
   if (result === "review") return "review";
@@ -1569,7 +1651,7 @@ async function startIfNeeded(
   }
 
   if (!agentId || !resultContract) throw new Error("launchable flow state is missing its agent contract");
-  const inputRevision = attemptInputRevision(control, snapshot, sourceComment,dependencies.migration?.id);
+  const inputRevision = attemptInputRevision(control, snapshot, sourceComment, resultContract, dependencies.migration?.id);
   if (hasAcceptedAttempt(control, agentId, inputRevision)) return false;
 
   await dependencies.launcher.start({
@@ -1607,7 +1689,8 @@ function attemptInputRevision(
   control: ControlState,
   snapshot: ProviderTicketSnapshot,
   sourceComment: ProviderComment | null,
-  migrationId?:string,
+  resultContract: ResultContract,
+  migrationId?: string,
 ): string {
   const parts: unknown[] = [
     ["config", control.configRevision],
@@ -1623,7 +1706,7 @@ function attemptInputRevision(
         snapshot.changeRequest.provider,
         snapshot.changeRequest.repository,
         snapshot.changeRequest.number,
-        snapshot.changeRequest.headSha,
+        resultContract === "documentation" ? control.changeRequest?.headSha : snapshot.changeRequest.headSha,
         snapshot.changeRequest.state,
       ]);
     }

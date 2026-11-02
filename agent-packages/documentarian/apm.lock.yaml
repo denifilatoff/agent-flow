@@ -1,0 +1,94 @@
+lockfile_version: '1'
+generated_at: '2026-10-29T14:31:12.808947+00:00'
+apm_version: 0.28.0
+dependencies:
+- repo_url: addyosmani/agent-skills
+  name: documentation-and-adrs
+  host: github.com
+  resolved_commit: f63ec56a3cc936408d792956ae583c3c96a825bd
+  resolved_ref: f63ec56a3cc936408d792956ae583c3c96a825bd
+  version: unknown
+  virtual_path: skills/documentation-and-adrs
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .agents/skills/documentation-and-adrs
+  - .agents/skills/documentation-and-adrs/SKILL.md
+  - .claude/skills/documentation-and-adrs
+  - .claude/skills/documentation-and-adrs/SKILL.md
+  deployed_file_hashes:
+    .agents/skills/documentation-and-adrs/SKILL.md: sha256:b867bb80fb681257c7625ae59a0dfd849b1fc0f0a2f0338e7923f38030df9793
+    .claude/skills/documentation-and-adrs/SKILL.md: sha256:b867bb80fb681257c7625ae59a0dfd849b1fc0f0a2f0338e7923f38030df9793
+  content_hash: sha256:7464fd2950b99fb00bbf65cab27653e0a049eef00c98927713ffdfe232a9daa9
+deployments:
+- kind: project-relative
+  target: claude
+  value: .claude/agents/documentarian.md
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:8a955365ca6f99db2201ab4016507c77872eea4d1e940fec82d4e67117de565e
+- kind: project-relative
+  target: claude
+  value: .claude/rules/documentarian.md
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:02a3fdd7c2bba3c90414c4953c72a0b2a3c8deaa527737695c2b7d7a4d65d747
+- kind: project-relative
+  target: claude
+  value: .claude/skills/documentation-and-adrs
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/documentation-and-adrs
+  active_owner: addyosmani/agent-skills/skills/documentation-and-adrs
+  content_hash: null
+- kind: project-relative
+  target: claude
+  value: .claude/skills/documentation-and-adrs/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/documentation-and-adrs
+  active_owner: addyosmani/agent-skills/skills/documentation-and-adrs
+  content_hash: sha256:b867bb80fb681257c7625ae59a0dfd849b1fc0f0a2f0338e7923f38030df9793
+- kind: project-relative
+  target: codex
+  value: .agents/skills/documentation-and-adrs
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/documentation-and-adrs
+  active_owner: addyosmani/agent-skills/skills/documentation-and-adrs
+  content_hash: null
+- kind: project-relative
+  target: codex
+  value: .agents/skills/documentation-and-adrs/SKILL.md
+  runtime: null
+  scope: project
+  owners:
+  - addyosmani/agent-skills/skills/documentation-and-adrs
+  active_owner: addyosmani/agent-skills/skills/documentation-and-adrs
+  content_hash: sha256:b867bb80fb681257c7625ae59a0dfd849b1fc0f0a2f0338e7923f38030df9793
+- kind: project-relative
+  target: codex
+  value: .codex/agents/documentarian.toml
+  runtime: null
+  scope: project
+  owners:
+  - .
+  active_owner: .
+  content_hash: sha256:06bdc3d7d1b0377204b48b7219bb4417aed9c724c8d41e79884e210d808a0cb4
+local_deployed_files:
+- .claude/agents/documentarian.md
+- .claude/rules/documentarian.md
+- .codex/agents/documentarian.toml
+local_deployed_file_hashes:
+  .claude/agents/documentarian.md: sha256:8a955365ca6f99db2201ab4016507c77872eea4d1e940fec82d4e67117de565e
+  .claude/rules/documentarian.md: sha256:02a3fdd7c2bba3c90414c4953c72a0b2a3c8deaa527737695c2b7d7a4d65d747
+  .codex/agents/documentarian.toml: sha256:06bdc3d7d1b0377204b48b7219bb4417aed9c724c8d41e79884e210d808a0cb4

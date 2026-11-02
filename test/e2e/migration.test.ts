@@ -3,8 +3,8 @@ import test from "node:test";
 import { startFixture } from "../fixtures/provider-server.ts";
 import { parseMigrationReceipt } from "../../src/provider/migration-receipt.ts";
 
-test("agent-only update replays development on the same PR and recovers after SQLite loss", async (t) => {
-  const run = await startFixture("github");
+test("agent-only update replays development and documentation on the same PR after SQLite loss", async (t) => {
+  const run = await startFixture("github", { preparedComments: true, usage: true });
   t.after(() => run.close());
   await run.untilState("assessment-review");
   await run.answer("approved");
@@ -35,7 +35,7 @@ test("agent-only update replays development on the same PR and recovers after SQ
 });
 
 test("same-configuration planning replay requires a fresh plan and downstream human approval", async (t) => {
-  const run = await startFixture("github");
+  const run = await startFixture("github", { legacyFlow: true });
   t.after(() => run.close());
   await run.untilState("assessment-review");
   await run.answer("approved");
@@ -59,7 +59,7 @@ test("same-configuration planning replay requires a fresh plan and downstream hu
 for (const preparedComments of [false, true]) {
 for (const replay of ["planning", "assessment"]) {
 test(`${replay} replay revisions survive SQLite loss at the human gate and downstream stages (prepared=${preparedComments})`, async (t) => {
-  const run = await startFixture("github", { preparedComments });
+  const run = await startFixture("github", { preparedComments, legacyFlow: true });
   t.after(() => run.close());
   await run.untilState("assessment-review");
   await run.answer("approved");
@@ -111,7 +111,7 @@ test(`${replay} replay revisions survive SQLite loss at the human gate and downs
 }
 
 test("changed-CI migration of fixture issue 2 preserves PR 8 despite incidental PR 11 and requires target CI", async (t) => {
-  const run = await startFixture("github", { oldCiPolicy: true });
+  const run = await startFixture("github", { oldCiPolicy: true, legacyFlow: true });
   t.after(() => run.close());
   await run.setCi("missing");
   await run.untilState("assessment-review");
@@ -141,7 +141,7 @@ test("changed-CI migration of fixture issue 2 preserves PR 8 despite incidental 
 });
 
 test("agent-only migration at a replayed human gate retains its plan across empty-store recovery", async (t) => {
-  const run = await startFixture("github");
+  const run = await startFixture("github", { legacyFlow: true });
   t.after(() => run.close());
   await run.untilState("assessment-review");
   await run.answer("approved");
@@ -192,7 +192,7 @@ test("agent-only migration at a replayed human gate retains its plan across empt
 
 for (const replay of ["development", "review"]) {
   test(`${replay} replay rework survives SQLite loss at development, review, and merge wait`, async (t) => {
-    const run = await startFixture("github");
+    const run = await startFixture("github", { legacyFlow: true });
     t.after(() => run.close());
     await run.untilState("assessment-review");
     await run.answer("approved");
@@ -225,7 +225,7 @@ for (const replay of ["development", "review"]) {
 }
 
 test("migrated required-CI correction survives SQLite loss through approval", async (t) => {
-  const run = await startFixture("github");
+  const run = await startFixture("github", { legacyFlow: true });
   t.after(() => run.close());
   await run.untilState("assessment-review");
   await run.answer("approved");
@@ -258,7 +258,7 @@ test("migrated required-CI correction survives SQLite loss through approval", as
 
 for (const replay of [undefined, "development"]) {
   test(`${replay ?? "no-replay merge-wait"} migration head-change approval survives SQLite loss at review and merge wait`, async (t) => {
-    const run = await startFixture("github");
+    const run = await startFixture("github", { legacyFlow: true });
     t.after(() => run.close());
     await run.untilState("assessment-review");
     await run.answer("approved");
@@ -289,7 +289,7 @@ for (const replay of [undefined, "development"]) {
 
 
 test("verification replay head change resumes review after SQLite loss on the bugfix route", async (t) => {
-  const run = await startFixture("github", { activationLabel: "bugfix" });
+  const run = await startFixture("github", { activationLabel: "bugfix", legacyFlow: true });
   t.after(() => run.close());
   await run.untilState("bug-reproduction-review");
   await run.blockNextAttempt("bug-verification");
@@ -299,7 +299,7 @@ test("verification replay head change resumes review after SQLite loss on the bu
   const before = await run.changeRequest();
   const controller = await run.controllerId();
   await run.blockNextAttempt("bug-verification");
-  const target = await run.migrate("bug-verification", true);
+  const target = await run.migrate("bug-verification", true, { blockReplay: true });
   await run.reconcile();
   await run.untilState("bug-verification");
   await run.untilAttempt("started");
@@ -321,7 +321,7 @@ test("verification replay head change resumes review after SQLite loss on the bu
 });
 
 test("merge-wait verification replay starts fresh work and survives SQLite loss", async (t) => {
-  const run = await startFixture("github", { activationLabel: "bugfix" });
+  const run = await startFixture("github", { activationLabel: "bugfix", legacyFlow: true });
   t.after(() => run.close());
   await run.untilState("bug-reproduction-review");
   await run.answer("approved");
@@ -348,7 +348,7 @@ test("merge-wait verification replay starts fresh work and survives SQLite loss"
 
 for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
   test(`completed ${replay} replay survives a later head change and SQLite loss`, async (t) => {
-    const run = await startFixture("github", { activationLabel: "bugfix" });
+    const run = await startFixture("github", { activationLabel: "bugfix", legacyFlow: true });
     t.after(() => run.close());
     await run.untilState("bug-reproduction-review");
     await run.answer("approved");
@@ -386,7 +386,7 @@ for (const { replay, rework } of [
   ...["bug-development", "bug-review"].map((replay) => ({ replay, rework: true })),
 ]) {
   test(`${replay} replay CI failure recovers correction after SQLite loss${rework ? " after review rework" : ""}`, async (t) => {
-    const run = await startFixture("github", { activationLabel: "bugfix" });
+    const run = await startFixture("github", { activationLabel: "bugfix", legacyFlow: true });
     t.after(() => run.close());
     await run.untilState("bug-reproduction-review");
     await run.answer("approved");

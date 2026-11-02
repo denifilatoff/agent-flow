@@ -209,3 +209,41 @@ test("ordinary development success keeps the agent-published PR contract", async
   const f = await fixture(t);
   assert.equal(needsPreparedComment({ ...f.expected, resultContract: "development" }, "agent-succeeded"), false);
 });
+
+test("documentation publishes its report and accounting together and verifies the implementation boundary", async (t) => {
+  const f = await fixture(t);
+  const head = "c".repeat(40);
+  const marker = `<!-- agent-flow:v1 {"config":"${f.expected.configRevision}","controller":"${f.expected.controllerId}"} -->`;
+  const change = { provider: "github" as const, repository: "owner/repo", number: 8,
+    url: "https://github.test/owner/repo/pull/8", headSha: head, state: "open" as const, body: marker,
+    actor: { login: "agent", providerId: "1" }, createdAt: "2026-10-28T00:00:00Z", updatedAt: "2026-10-29T00:00:00Z" };
+  const expected = { ...f.expected, resultContract: "documentation" as const, pinnedChangeRequest: change };
+  f.provider.readTicket = async () => ({ ref: expected.ticket, repository: { provider: "github", name: "owner/repo" }, open: true,
+    activation: { present: true }, comments: f.comments, changeRequest: change } as never);
+  f.provider.readChangeRequest = async () => change;
+  f.provider.permission = async () => "write";
+  const report = `<!-- agent-flow-documentation:v1 ${JSON.stringify({ change: 8, inputHead: head, resultHead: head })} -->\nChecked changed APIs; documentation already matches.`;
+  await writeFile(join(f.root, "prepared-comment.txt"), report);
+  await freezePreparedPublication(f.root, expected, { totalTokens: 1200 });
+  await deliverPreparedPublication(f.root, expected, f.provider);
+  const receipt = await readDecisionAndBuildReceipt(join(f.root, "decision.json"), expected, f.provider, false);
+  assert.equal(receipt.outcome, "succeeded");
+  assert.equal(receipt.artifacts[0]?.kind === "comment" && receipt.artifacts[0].inputHead, head);
+  assert.match(f.comments[0]!.body, /Usage: 1,200 tokens/);
+  assert.equal(f.comments[0]!.createdAt, f.comments[0]!.updatedAt);
+  await deliverPreparedPublication(f.root, expected, f.provider);
+  assert.equal(f.creates(), 1);
+});
+
+test("prepared documentation rejects empty reports and additional protocol markers", async (t) => {
+  const head = "c".repeat(40);
+  const metadata = `<!-- agent-flow-documentation:v1 ${JSON.stringify({ change: 8, inputHead: head, resultHead: head })} -->`;
+  for (const text of [metadata, `${metadata}\n${metadata}\nChecked docs.`,
+    `${metadata}\nChecked docs.\n<!-- agent-flow-attempt:v1 attempt=foreign -->`]) {
+    const f = await fixture(t);
+    await writeFile(join(f.root, "prepared-comment.txt"), text);
+    await assert.rejects(freezePreparedPublication(f.root, { ...f.expected, resultContract: "documentation" },
+      { totalTokens: 1200 }), /prepared comment text is invalid/);
+    assert.equal(f.creates(), 0);
+  }
+});

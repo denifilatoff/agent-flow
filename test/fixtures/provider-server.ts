@@ -11,6 +11,7 @@ import { parse, stringify } from "yaml";
 
 import { RuntimeManager } from "../../src/config/runtime.ts";
 import { parseControlComment } from "../../src/provider/control-comment.ts";
+import { parseDocumentation, renderDocumentation } from "../../src/provider/documentation.ts";
 import { electOwner, parsePublication, renderPublication, type Publication } from "../../src/provider/publication.ts";
 import type {
   AgentDecision,
@@ -29,7 +30,7 @@ const NEXT_HEAD = "1111111111111111111111111111111111111111";
 const MAINTAINER = { login: "maintainer", providerId: "7" };
 const CONTROLLER = { login: "controller", providerId: "51" };
 
-type AttemptMode = "success" | "exit-failure" | "block" | "late" | "crash-after-publish" | "reuse" | "race";
+type AttemptMode = "success" | "exit-failure" | "block" | "late" | "crash-after-publish" | "crash-after-push" | "reuse" | "race";
 
 interface FixtureOptions {
   usage?: boolean;
@@ -39,6 +40,12 @@ interface FixtureOptions {
   activationLabel?: "agent-flow:development" | "bugfix";
   firstAttempt?: AttemptMode;
   forceStartupFailure?: boolean;
+  policy?: "conservative" | "autonomous";
+  scenario?: "feature" | "bugfix";
+  documentationEdits?: boolean;
+  documentationAttempt?: AttemptMode;
+  reviewRework?: boolean;
+  legacyFlow?: boolean;
   repairCiAfterFailure?: boolean;
   ciAfterReview?: "success" | "pending" | "failure";
 }
@@ -108,6 +115,7 @@ export interface FixtureRun {
   changeRequest(): Promise<NormalizedChangeRequest | null>;
   close(): Promise<void>;
   closeChangeRequest(): Promise<void>;
+  reopenChangeRequest(): Promise<void>;
   control(): Promise<ControlState>;
   controllerLabels(): Promise<string[]>;
   compilations(): Promise<Array<Omit<RoutingEvent, "kind">>>;
@@ -118,7 +126,7 @@ export interface FixtureRun {
   latestAgentComment(): Promise<ProviderComment | null>;
   maximumConcurrentAttempts(): Promise<number>;
   mergeChangeRequest(): Promise<void>;
-  migrate(resume?:string,agentOnly?:boolean):Promise<string>;
+  migrate(resume?: string, agentOnly?: boolean, options?: { blockReplay?: boolean }): Promise<string>;
   migrateCiPolicy():Promise<string>;
   migrationReceipts():Promise<string[]>;
   reconcile(): Promise<void>;
@@ -201,7 +209,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   await createCertificate(certificate, key);
   certificatesChanged = true;
   setDefaultCACertificates([...originalCertificates, await readFile(certificate, "utf8")]);
-  const state = new FixtureState(provider, options.firstAttempt,options.oldCiPolicy, options.activationLabel);
+  const state = new FixtureState(provider, options.firstAttempt, options);
   state.ciAfterReview = options.ciAfterReview;
   state.repairCiAfterFailure = options.repairCiAfterFailure;
   state.uncertainCreate = options.uncertainCreate ?? false;
@@ -244,8 +252,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     operatorAuthFile,
     60,
     options.firstAttempt === "race" ? 30 : 5,
-    options.preparedComments ?? false,
-    options.oldCiPolicy,
+    options,
   );
 
   environmentChanged = true;
@@ -318,6 +325,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
       await cleanup();
     },
     async closeChangeRequest() { state.setChangeState("closed"); },
+    async reopenChangeRequest() { state.setChangeState("open"); },
     control: async () => requireControl(currentControl()),
     controllerId: async () => (await readFile(join(dataDirectory, "controller-id"), "utf8")).trim(),
     controllerLabels: async () => state.labels.filter((label) => label.startsWith("agent-")).sort(),
@@ -433,7 +441,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     },
     async maximumConcurrentAttempts() { return state.maximumActiveAttempts; },
     async mergeChangeRequest() { state.setChangeState("merged"); },
-    async migrate(resume,agentOnly=false) {
+    async migrate(resume, agentOnly = false, options = {}) {
       const control=requireControl(currentControl());
       const worktree=join(dataDirectory,"worktrees",control.flowInstanceId);
       const branch=(await execFile("git",["-C",worktree,"branch","--show-current"])).stdout.trim();
@@ -444,6 +452,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
         await execFile("git",["-C",configRepository,"add","."]);await execFile("git",["-C",configRepository,"commit","-m","Update developer guidance"]);
       }
       const sha=(await execFile("git",["-C",configRepository,"rev-parse","HEAD"])).stdout.trim();
+      if (options.blockReplay && resume) state.nextModes.set(`${resume}:${sha}`, ["block"]);
       state.addComment(`/agent-flow migrate --pr ${state.change!.number} --to latest${resume ? " --resume-from "+resume : ""}`,MAINTAINER);
       return sha;
     },
@@ -552,9 +561,16 @@ class FixtureState {
   #reviewId = 700;
   #lastTimestamp = Date.now();
 
-  constructor(provider: ProviderKind, firstAttempt?: AttemptMode,migrationCase=false, activationLabel = "agent-flow:development") {
-    this.activationLabel = activationLabel;
-    this.labels = [activationLabel];
+  readonly options: FixtureOptions;
+  activationLabel = "agent-flow:development";
+  reworkRequested = false;
+
+  constructor(provider: ProviderKind, firstAttempt?: AttemptMode, options: FixtureOptions = {}) {
+    this.options = options;
+    this.activationLabel = options.activationLabel ?? (options.scenario === "bugfix" ? "bugfix" : "agent-flow:development");
+    this.labels = [this.activationLabel];
+    const migrationCase = options.oldCiPolicy ?? false;
+    if (options.documentationAttempt) this.nextModes.set(options.scenario === "bugfix" ? "bug-documentation" : "documentation", [options.documentationAttempt]);
     this.provider = provider;
     this.repository = provider === "github" ? "owner/repo" : "group/project";
     this.number = migrationCase?2:provider === "github" ? 17 : 23;
@@ -736,8 +752,15 @@ class FixtureState {
       return;
     }
     const key = control.stateId === "needs-human" ? "needs-human" : control.stateId;
-    const queue = this.nextModes.get(key) ?? [];
+    const queue = this.nextModes.get(`${key}:${control.configRevision}`) ?? this.nextModes.get(key) ?? [];
     const mode = queue.shift() ?? "success";
+    if (mode === "crash-after-push") {
+      if (!this.change) throw new Error("documentation push needs an existing request");
+      this.change.headSha = (BigInt(`0x${this.change.headSha}`) + 1n).toString(16).padStart(40, "0");
+      this.change.updatedAt = this.touch();
+      this.nextModes.set(key, ["reuse"]);
+      return;
+    }
     if (mode === "crash-after-publish") {
       this.publish(context, attemptId);
       this.nextModes.set(key, ["reuse"]);
@@ -835,6 +858,10 @@ class FixtureState {
         this.ciStatus = "success";
       }
       const timestamp = this.touch();
+      if (this.change && this.reworkRequested) {
+        this.change.headSha = (BigInt(`0x${this.change.headSha}`) + 1n).toString(16).padStart(40, "0");
+        this.change.updatedAt = timestamp;
+      }
       this.change ??= {
         number: this.implementationNumber,
         headSha: HEAD,
@@ -845,9 +872,31 @@ class FixtureState {
       };
       return { event: "agent-succeeded" };
     }
+    if (state === "documentation" || state === "bug-documentation") {
+      if (!this.change || !context.controlState.changeRequest) throw new Error("documentation input is missing");
+      if (this.change.state !== "open") {
+        stageComment(`${context.publicationMarker}\nReopen the existing change request or cancel documentation?`);
+        return { event: "agent-needs-human" };
+      }
+      const inputHead = context.controlState.changeRequest.headSha;
+      const existing = this.comments.some(({ body }) => {
+        const report = parseDocumentation(body);
+        return report?.change === this.change!.number && report.inputHead === inputHead
+          && report.resultHead === this.change!.headSha && body.includes(context.publicationMarker);
+      });
+      if (!existing && this.options.documentationEdits && this.change.headSha === inputHead) {
+        this.change.headSha = (BigInt(`0x${inputHead}`) + 1n).toString(16).padStart(40, "0");
+        this.change.updatedAt = this.touch();
+      }
+      if (!existing) stageComment(`${context.publicationMarker}\n${renderDocumentation({
+        change: this.change.number, inputHead, resultHead: this.change.headSha,
+      })}\nDocumentation checked against all delivered APIs and existing usage examples.`);
+      return { event: "agent-succeeded" };
+    }
     if (state === "review" || state === "bug-review") {
       if (!this.change) throw new Error("review change request is missing");
-      const verdict = this.nextReviewVerdict;
+      const verdict = this.options.reviewRework && !this.reworkRequested ? "changes-requested" : this.nextReviewVerdict;
+      if (verdict === "changes-requested") this.reworkRequested = true;
       this.nextReviewVerdict = "approved";
       this.addReview(context.publicationMarker, verdict);
       if (this.ciAfterReview) {
@@ -1236,22 +1285,30 @@ async function createConfiguration(
   operatorAuthFile = join(dirname(repository), "operator-password"),
   pollingIntervalSeconds = 60,
   timeoutSeconds = 5,
-  preparedComments = false,
-  oldCiPolicy=false,
+  fixtureOptions: FixtureOptions = {},
 ): Promise<string> {
   await mkdir(join(repository, "config/flows"), { recursive: true });
   await Promise.all([
     cp(join(ROOT, "schemas"), join(repository, "schemas"), { recursive: true }),
     cp(join(ROOT, "agent-packages"), join(repository, "agent-packages"), { recursive: true }),
-    cp(join(ROOT, "config/flows/development.yaml"), join(repository, "config/flows/development.yaml")),
+    cp(join(ROOT, fixtureOptions.policy === "autonomous" ? "config/flows/development-autonomous.yaml" : "config/flows/development.yaml"), join(repository, "config/flows/development.yaml")),
     cp(join(ROOT, "config/stack.yaml"), join(repository, "config/stack.yaml")),
   ]);
+  if (fixtureOptions.legacyFlow) {
+    const flowPath = join(repository, "config/flows/development.yaml");
+    const flow = parse(await readFile(flowPath, "utf8"));
+    for (const prefix of ["", "bug-"]) {
+      flow.spec.states[`${prefix}development`].on["agent-succeeded"].target = `${prefix}review`;
+      delete flow.spec.states[`${prefix}documentation`];
+    }
+    await writeFile(flowPath, stringify(flow));
+  }
   await cp(join(ROOT, "config/agents.yaml"), join(repository, "config/agents.yaml"));
   const stackFile = join(repository, "config/stack.yaml");
   await writeFile(stackFile, (await readFile(stackFile, "utf8"))
     .replace("config/flows/development-autonomous.yaml", "config/flows/development.yaml")
-    .replace(preparedComments ? "__absent__" : "  publication: controller-prepared-v1\n", ""));
-  if(oldCiPolicy) {
+    .replace(fixtureOptions.preparedComments ? "__absent__" : "  publication: controller-prepared-v1\n", ""));
+  if(fixtureOptions.oldCiPolicy) {
     const path=join(repository,"config/flows/development.yaml"),flow=parse(await readFile(path,"utf8"));delete flow.spec.requiredChecks;for(const state of Object.values(flow.spec.states) as Array<{on?:Record<string,unknown>}>) if(state.on) delete state.on["ci-failed"];await writeFile(path,stringify(flow));
   }
   await execFile("git", ["init", repository]);
@@ -1278,7 +1335,7 @@ async function createConfiguration(
     execution: {
       agents: {
         architect: execution("claude"), planner: execution("claude"),
-        developer: execution("codex"), reviewer: execution("codex"),
+        documentarian: execution("claude"), developer: execution("codex"), reviewer: execution("codex"),
         "bug-investigator": execution("claude"), bugfixer: execution("codex"),
       },
       harnesses: { codex: { authFile: codexAuthFile }, claude: { authFile: claudeAuthFile } },

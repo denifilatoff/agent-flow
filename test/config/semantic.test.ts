@@ -34,7 +34,8 @@ test("accepts the shipped bundle", async () => {
     guards: ["receipt-valid"],
     actions: ["record-receipt"],
   });
-  await assert.doesNotReject(validateSemantics(bundle));
+  const targets = await validateSemantics(bundle);
+  assert.deepEqual(targets.documentarian, ["claude", "codex"]);
 });
 
 test("loads the autonomous development flow without mandatory human gates", async () => {

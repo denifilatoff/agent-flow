@@ -1,0 +1,7 @@
+# APM dependencies and generated harness output
+apm_modules/
+.claude/
+.codex/
+.agents/
+AGENTS.md
+CLAUDE.md
