@@ -15,7 +15,9 @@ const receipt = {
 
 test("accepts legacy receipts and optional complete or partial usage", () => {
   for (const usage of [undefined, { totalTokens: 0, costUsd: 0, costSource: "harness" },
-    { inputTokens: 12 }, { totalTokens: 123, model: "example", costUsd: 0.1, costSource: "estimated" }]) {
+    { inputTokens: 12 }, { totalTokens: 123, model: "example", costUsd: 0.1, costSource: "estimated" },
+    { costUsd: 0.1, costSource: "estimated", costCalculator: "ccusage 20.0.47" },
+    { totalTokens: 123, costError: "CCUSAGE_UNAVAILABLE" }]) {
     const value = { ...receipt, ...(usage ? { usage } : {}) };
     assert.deepEqual(validateDocument("AgentReceipt", value), value);
   }

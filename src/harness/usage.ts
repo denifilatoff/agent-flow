@@ -143,14 +143,24 @@ export class ClaudeUsage implements UsageObserver {
 
 export class CodexUsage implements UsageObserver {
   rootId: string | undefined;
+  readonly spawned = new Set<string>();
   completed = false;
+  private unverifiedSpawn = false;
   private readonly lines = new JsonLines((record) => {
     if (record?.type === "thread.started" && typeof record.thread_id === "string") this.rootId ??= record.thread_id;
     if (record?.type === "turn.completed") this.completed = true;
     if (record?.type === "turn.failed") this.completed = false;
+    const item = record?.item;
+    if (record?.type === "item.completed" && item?.type === "collab_tool_call"
+      && item.tool === "spawn_agent" && item.status === "completed") {
+      if (!Array.isArray(item.receiver_thread_ids) || !item.receiver_thread_ids.length
+        || item.receiver_thread_ids.some((id: unknown) => typeof id !== "string" || !id)) this.unverifiedSpawn = true;
+      else for (const id of item.receiver_thread_ids) this.spawned.add(id);
+    }
   });
   write(chunk: Buffer): void { this.lines.write(chunk); }
   end(): void { this.lines.end(); }
+  get valid(): boolean { return !this.lines.invalid && !this.unverifiedSpawn; }
   usage(): AttemptUsage | undefined { return undefined; }
 }
 
@@ -163,11 +173,13 @@ const codexCategories = {
   cacheCreationInputTokens: "cache_write_input_tokens", reasoningOutputTokens: "reasoning_output_tokens",
 } as const;
 
-export async function collectCodexUsage(home: string, decoder: CodexUsage): Promise<AttemptUsage | undefined> {
+export async function collectCodexUsage(home: string, decoder: CodexUsage, signal?: AbortSignal): Promise<AttemptUsage | undefined> {
+  signal?.throwIfAborted();
   if (!decoder.rootId) return undefined;
   const threads = new Map<string, CodexThread>();
   let covered = true; let files = 0; let bytes = 0;
   async function visit(directory: string, depth = 0): Promise<void> {
+    signal?.throwIfAborted();
     if (depth > 5) { covered = false; return; }
     await assertSafeDirectory(home, directory, "usage session directory");
     for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -206,7 +218,7 @@ export async function collectCodexUsage(home: string, decoder: CodexUsage): Prom
           }
           thread.counters = counters;
         });
-        for await (const chunk of file.createReadStream({ autoClose: false })) lines.write(chunk as Buffer);
+        for await (const chunk of file.createReadStream({ autoClose: false, signal })) lines.write(chunk as Buffer);
         lines.end();
         if (lines.invalid && thread) thread.valid = false;
       } finally { await file.close(); }
@@ -228,7 +240,8 @@ export async function collectCodexUsage(home: string, decoder: CodexUsage): Prom
     const total = sum(observed.map((thread) => thread.counters![field]!));
     if (total !== undefined) usage[key as keyof typeof codexCategories] = total;
   }
-  if (covered && decoder.completed && own.every((thread) => thread?.valid && thread.finished && thread.counters)) {
+  if (covered && decoder.valid && decoder.completed && [...decoder.spawned].every((id) => included.has(id))
+    && own.every((thread) => thread?.valid && thread.finished && thread.counters)) {
     usage.totalTokens = sum([usage.inputTokens!, usage.outputTokens!]);
   }
   return usage;

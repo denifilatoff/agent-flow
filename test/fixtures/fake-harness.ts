@@ -1,8 +1,19 @@
 import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 const [tool, ...args] = process.argv.slice(2);
+
+if (tool === "ccusage") {
+  if (args[0] === "--version") console.log("ccusage 20.0.47");
+  else {
+    const files = (await readdir(join(process.env.CODEX_HOME!, "sessions"))).sort();
+    const report = JSON.parse(await readFile(new URL("./harness/ccusage-codex.json", import.meta.url), "utf8"));
+    for (let index = 0; index < report.sessions.length; index++) report.sessions[index].sessionId = basename(files[index]!, ".jsonl");
+    console.log(JSON.stringify(report));
+  }
+  process.exit(0);
+}
 
 if (tool === "gh" || tool === "glab") {
   if (args[0] === "repo" && args[1] === "clone") clone(args[2]!, args[3]!);

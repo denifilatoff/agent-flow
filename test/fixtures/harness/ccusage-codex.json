@@ -1,0 +1,61 @@
+{
+  "sessions": [
+    {
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 7,
+      "costUSD": 0.0027842500000000003,
+      "directory": "",
+      "inputTokens": 693,
+      "lastActivity": "2026-10-29T14:30:09.662Z",
+      "models": {
+        "gpt-5.4": {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 7,
+          "inputTokens": 693,
+          "isFallback": false,
+          "outputTokens": 70,
+          "reasoningOutputTokens": 7,
+          "totalTokens": 770
+        }
+      },
+      "outputTokens": 70,
+      "reasoningOutputTokens": 7,
+      "sessionFile": "0",
+      "sessionId": "0",
+      "totalTokens": 770
+    },
+    {
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 3,
+      "costUSD": 0.00119325,
+      "directory": "",
+      "inputTokens": 297,
+      "lastActivity": "2026-10-29T14:30:09.636Z",
+      "models": {
+        "gpt-5.4": {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 3,
+          "inputTokens": 297,
+          "isFallback": false,
+          "outputTokens": 30,
+          "reasoningOutputTokens": 3,
+          "totalTokens": 330
+        }
+      },
+      "outputTokens": 30,
+      "reasoningOutputTokens": 3,
+      "sessionFile": "1",
+      "sessionId": "1",
+      "totalTokens": 330
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 10,
+    "costUSD": 0.0039775,
+    "inputTokens": 990,
+    "outputTokens": 100,
+    "reasoningOutputTokens": 10,
+    "totalTokens": 1100
+  }
+}

@@ -45,7 +45,9 @@
         "reasoningOutputTokens": { "$ref": "#/$defs/count" },
         "model": { "type": "string", "minLength": 1, "maxLength": 255 },
         "costUsd": { "type": "number", "minimum": 0 },
-        "costSource": { "enum": ["harness", "estimated"] }
+        "costSource": { "enum": ["harness", "estimated"] },
+        "costCalculator": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "costError": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$", "maxLength": 128 }
       }
     },
     "uuid": {

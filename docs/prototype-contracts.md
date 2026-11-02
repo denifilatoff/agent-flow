@@ -341,15 +341,19 @@ including tickets whose local flow identity could not be reconstructed. Secret v
 
 An `AgentReceipt` may include optional `usage`: total tokens, available input/output/cache/reasoning categories,
 actual model when one model describes the whole attempt, and paired `costUsd`/`costSource` (`harness` or `estimated`).
+Calculator estimates also retain `costCalculator`. A failed calculation may retain the safe `costError` code.
 Counters are nonnegative safe integers. Unknown values remain absent; zero is valid. Legacy receipts remain valid.
 Codex cached input and reasoning output are subsets of input/output. Claude cache creation/read are separate from
 uncached input. Accounting includes the entry agent and its native descendants exactly once; it excludes earlier retries.
 See [protocol evidence](harness-usage-protocols.md) for pinned-version sources and fixtures.
 
-Harness cost takes precedence. Estimates require complete actual-model, token-category and pricing dimensions from
-`src/harness/usage-cost.ts`; unknown models, cache distinctions, tiers or incomplete descendants omit the amount.
-Pricing definitions include their source, effective date and version. Change rates only with reviewed evidence and
-regression tests; never reprice stored receipts. A harness amount is still an estimate rather than an invoice.
+Harness cost takes precedence. Codex estimates come from the installed ccusage tool, which reads selected completed
+session logs and refreshes its pricing catalog online. Its session coverage, model attribution, pricing flags, token
+categories, and totals must validate before the estimate is accepted. The controller maintains no Codex rate table.
+Claude's fallback in `src/harness/usage-cost.ts` still requires complete actual-model and pricing dimensions.
+Unknown prices or incomplete descendants omit the amount; calculator failures display `cost unavailable` with any
+known token count. Never reprice stored receipts. These amounts are API-equivalent estimates, not invoices or
+subscription charges.
 
 New Stack pins opt into `spec.publication: controller-prepared-v1`. The agent writes substantive stage comment text
 to the runtime-supplied `prepared-comment.txt` and its unchanged minimal decision to `decision.json`. It leaves prepared

@@ -22,6 +22,8 @@ import test from "node:test";
 
 import { createClaudeAdapter } from "../../src/harness/claude.ts";
 import { createCodexAdapter } from "../../src/harness/codex.ts";
+
+
 import {
   HarnessPreflightError,
   HarnessProcessError,
@@ -341,7 +343,7 @@ If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_D
   );
   call.child.finish(0, null);
 
-  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_UNAVAILABLE" } });
   assert.equal(await readFile(fixture.input.session.logPath, "utf8"), "stdout line\nstderr line\n");
   await assert.rejects(access(call.env.CODEX_HOME!), { code: "ENOENT" });
 });
@@ -356,7 +358,7 @@ test("keeps late stdio errors guarded after a normal close", async (t) => {
   await waitForSpawn(processes.calls);
   const child = processes.children[0]!;
   child.finish(0, null);
-  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_UNAVAILABLE" } });
 
   for (const stream of [child.stdin, child.stdout, child.stderr]) {
     assert.doesNotThrow(() => stream.emit("error", new Error("late stdio error")));
@@ -493,7 +495,7 @@ test("passes a GitLab personal token without seeding OAuth metadata", async (t) 
   assert.equal(metadataCalls, 0);
   assert.deepEqual(await readdir(call.env.GLAB_CONFIG_DIR!), []);
   call.child.finish(0, null);
-  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_UNAVAILABLE" } });
 });
 
 test("rejects unsafe harness environment names and values", () => {
@@ -615,7 +617,7 @@ test("settles after direct-child exit when a descendant retains output descripto
   child.stdout.write("during drain\n");
   processes.clock.fire(1_000);
 
-  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_UNAVAILABLE" } });
   assert.equal(await readFile(fixture.input.session.logPath, "utf8"), "before exit\nduring drain\n");
   assert.equal(processes.clock.timers.size, 0);
 });
@@ -1040,5 +1042,63 @@ for (const lateProcessError of [false, true]) {
     child.finish(null, "SIGKILL");
     await failure.termination;
     assert.equal(confirmed, true);
+  });
+}
+
+for (const accountingFailure of [false, "unavailable", "timeout"] as const) {
+  test(`Codex completes one model run with ${accountingFailure || "ccusage cost"}`, async (t) => {
+    const fixture = await runFixture("codex");
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const processes = processFixture();
+    if (accountingFailure === "timeout") {
+      const timeout = AbortSignal.timeout.bind(AbortSignal);
+      t.mock.method(AbortSignal, "timeout", (milliseconds: number) => timeout(milliseconds === 30_000 ? 300 : milliseconds));
+    }
+    const records = JSON.parse(await readFile("test/fixtures/harness/codex-delegation.json", "utf8"));
+    const ids = records.map((lines: Array<{ payload: { id: string } }>) => lines[0]!.payload.id);
+    processes.dependencies.runCommand = async (file, args, options = {}) => {
+      if (file !== "ccusage") return { stdout: "", stderr: "" };
+      if (accountingFailure === "timeout") {
+        await new Promise<void>((_resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("Accounting command ignored its deadline")), 2000);
+          options.signal!.addEventListener("abort", () => { clearTimeout(timer); reject(options.signal!.reason); }, { once: true });
+        });
+      }
+      if (accountingFailure) throw new Error("token=SHOULD_NOT_ESCAPE");
+      if (args[0] === "--version") return { stdout: "ccusage 20.0.47", stderr: "" };
+      const sessions = ids.map((sessionId: string, index: number) => {
+        const inputTokens = index === 0 ? 693 : 297;
+        const cacheReadTokens = index === 0 ? 7 : 3;
+        const outputTokens = index === 0 ? 70 : 30;
+        const counts = { inputTokens, cacheReadTokens, outputTokens, cacheCreationTokens: 0,
+          totalTokens: inputTokens + cacheReadTokens + outputTokens };
+        return { sessionId, ...counts, costUSD: 0.002,
+          models: { "gpt-5.4": { ...counts, isFallback: false } } };
+      });
+      return { stdout: JSON.stringify({ sessions, totals: { inputTokens: 990, cacheReadTokens: 10,
+        outputTokens: 100, cacheCreationTokens: 0, totalTokens: 1100, costUSD: 0.004 } }), stderr: "" };
+    };
+    const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+    const pending = adapter.run(fixture.input);
+    await waitForSpawn(processes.calls);
+    const home = processes.calls[0]!.env.CODEX_HOME!;
+    await mkdir(join(home, "sessions"));
+    for (let index = 0; index < records.length; index++) {
+      await writeFile(join(home, "sessions", `${ids[index]}.jsonl`), records[index].map(JSON.stringify).join("\n") + "\n");
+    }
+    const child = processes.children[0]!;
+    child.stdout.write(JSON.stringify({ type: "thread.started", thread_id: ids[0] }) + "\n");
+    child.stdout.write('{"type":"turn.completed"}\n');
+    child.finish(0, null);
+    const result = await pending;
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.usage?.totalTokens, accountingFailure ? undefined : 1100);
+    assert.equal(result.usage?.inputTokens, 1000);
+    assert.equal(result.usage?.costUsd, accountingFailure ? undefined : 0.004);
+    assert.equal(result.usage?.costCalculator, accountingFailure ? undefined : "ccusage 20.0.47");
+    assert.equal(result.usage?.costError, accountingFailure ? "CCUSAGE_UNAVAILABLE" : undefined);
+    assert.doesNotMatch(JSON.stringify(result), /SHOULD_NOT_ESCAPE/);
+    assert.equal(processes.calls.length, 1);
+    await assert.rejects(access(home));
   });
 }

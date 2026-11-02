@@ -77,7 +77,7 @@ export type SpawnRunner = (file: string, args: string[], options: SpawnOptions) 
 export type CommandRunner = (
   file: string,
   args: string[],
-  options?: { env?: NodeJS.ProcessEnv },
+  options?: { env?: NodeJS.ProcessEnv; cwd?: string; signal?: AbortSignal },
 ) => Promise<{ stdout: string; stderr: string }>;
 
 type TimerHandle = object;
@@ -135,7 +135,7 @@ const DEFAULT_DEPENDENCIES: ProcessDependencies = {
   runCommand: async (file, args, options = {}) => {
     const result = await execFile(file, args, {
       encoding: "utf8",
-      env: options.env,
+      ...options,
       maxBuffer: 1_048_576,
       shell: false,
     });
@@ -218,7 +218,7 @@ export async function createCliConfigEnvironment(
   return { GH_CONFIG_DIR: github, GLAB_CONFIG_DIR: gitlab };
 }
 
-export async function copyRegularFile(source: string, destination: string, label: string): Promise<void> {
+export async function copyRegularFile(source: string, destination: string, label: string, signal?: AbortSignal): Promise<void> {
   // Production auth sources are read-only mounts. Component checks plus O_NOFOLLOW and inode comparison protect this
   // file boundary without introducing a separate filesystem sandbox.
   const sourceHandle = await openRegularSource(source, label);
@@ -236,6 +236,7 @@ export async function copyRegularFile(source: string, destination: string, label
     await pipeline(
       sourceHandle.createReadStream(),
       destinationHandle.createWriteStream(),
+      { signal },
     );
     copied = true;
   } finally {

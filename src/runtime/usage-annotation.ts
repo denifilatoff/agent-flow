@@ -5,7 +5,10 @@ export function usageLine(usage: AttemptUsage | undefined): string | null {
   const parts: string[] = [];
   if (usage.totalTokens !== undefined) parts.push(`${usage.totalTokens.toLocaleString("en-US")} tokens`);
   if (usage.costUsd !== undefined && usage.costSource) {
-    parts.push(`$${usage.costUsd.toFixed(2)} ${usage.costSource === "estimated" ? "estimated" : "harness estimate"}`);
+    const amount = usage.costUsd > 0 && usage.costUsd < 0.01 ? "<$0.01" : `$${usage.costUsd.toFixed(2)}`;
+    parts.push(`${amount} ${usage.costSource === "estimated" ? "estimated" : "harness estimate"}`);
+  } else if (usage.costError) {
+    parts.push("cost unavailable");
   }
   return parts.length ? `Usage: ${parts.join(" · ")}` : null;
 }

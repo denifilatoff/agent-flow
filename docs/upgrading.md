@@ -63,6 +63,16 @@ The updated runtime prompt prepares local comment text; the controller publishes
 and verifies provider readback before advancement. Documentation reports use the same prepared publication path,
 including their documentation metadata and completed accounting. PR/MR and native review publication are unchanged.
 
+The runtime image includes ccusage `20.0.47` for Codex USD estimates. External installations must provide a compatible
+`ccusage >=20.0.47 <21` on the controller's `PATH`. No RuntimeConfig pricing fields are needed. Each calculation enables
+online pricing explicitly, so price updates come from the tool's catalog instead of a controller table. When updating
+the CLI, update `docker/tools/package.json` and its lockfile, build the image, and run a JSON session smoke on isolated
+completed logs. Keep calculator version and accounting errors in new receipts; do not recalculate historical costs.
+Missing or incompatible tools and pricing/report failures leave the workflow result intact and publish an unavailable
+cost diagnostic. They must not trigger another model invocation.
+External installations that seed a Codex configuration file also need Python 3.11 or newer to parse its top-level
+service tier safely. The runtime image already supplies it.
+
 Preserve disposable session directories when restarting if pending prepared results or accounting should survive.
 Delivery reconciliation reuses completed work and does not automatically run another model. Invalid or permanently
 untrusted results retain failed accounting and follow existing failure/retry/block rules; PR/review evidence requirements
