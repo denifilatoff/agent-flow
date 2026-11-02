@@ -802,8 +802,15 @@ test("verification replay follows a changed head to review across SQLite loss", 
   assert.equal(f.counts().creates, 1);
 });
 
-for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
-  test(`${replay} replay retires completed verification after a head change`, async (t) => {
+const verificationSeparators = [
+  { name: "immediate LF", separator: "\n" },
+  { name: "blank LF", separator: "\n\n" },
+  { name: "whitespace-only CRLF", separator: "\r\n \t\r\n\r\n" },
+];
+
+for (const { replay, name, separator } of ["bug-development", "bug-review", "bug-verification"]
+  .flatMap((replay) => verificationSeparators.map((format) => ({ replay, ...format })))) {
+  test(`${replay} replay retires completed verification after a head change with ${name}`, async (t) => {
     for (const stage of ["bug-review", "bug-verification", "awaiting-merge", "unauthorized", "incomplete"]) {
       await t.test(stage, async (t) => {
         const f = await migrationFixture(t);
@@ -821,7 +828,7 @@ for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
           submittedAt: f.comment("19", "").createdAt,
           url: "https://github.com/owner/repo/pull/8#pullrequestreview-19",
         });
-        f.snapshot.comments.push(f.comment("20", "# Bug receipt\nBUG RECEIPT · VERIFIED\n" + marker));
+        f.snapshot.comments.push(f.comment("20", marker + separator + "BUG RECEIPT · VERIFIED"));
         if (stage === "unauthorized") {
           f.snapshot.comments.at(-1)!.actor = { login: "outsider", providerId: "2" };
           f.d.provider.permission = async (...args: unknown[]) =>
@@ -837,7 +844,7 @@ for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
           url: "https://github.com/owner/repo/pull/8#pullrequestreview-21",
         });
         if (stage === "awaiting-merge") f.snapshot.comments.push(
-          f.comment("22", "# Bug receipt\nBUG RECEIPT · VERIFIED\n" + marker));
+          f.comment("22", marker + separator + "BUG RECEIPT · VERIFIED"));
         f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:" + (["unauthorized", "incomplete"].includes(stage) ? "bug-review" : stage)];
         await f.reset();
         const recovered = await reconcileTicket(f.d as never, f.ref);
@@ -857,11 +864,11 @@ for (const replay of ["bug-development", "bug-review", "bug-verification"]) {
 
 }
 
-for (const { replay, rework } of [
+for (const { replay, rework, name, separator } of [
   ...["bug-development", "bug-review", "bug-verification"].map((replay) => ({ replay, rework: false })),
   ...["bug-development", "bug-review"].map((replay) => ({ replay, rework: true })),
-]) {
-  test(`${replay} replay CI correction survives SQLite loss through subsequent stages${rework ? " after review rework" : ""}`, async (t) => {
+].flatMap((scenario) => verificationSeparators.map((format) => ({ ...scenario, ...format })))) {
+  test(`${replay} replay CI correction survives SQLite loss through subsequent stages${rework ? " after review rework" : ""} with ${name}`, async (t) => {
     for (const stage of ["bug-development", "development-without-result", "bug-review", "review-new-head", "bug-verification", "awaiting-merge", "unauthorized", "incomplete", ...(replay !== "bug-verification" ? ["unauthorized-approval"] : [])]) {
       await t.test(stage, async (t) => {
         const f = await migrationFixture(t);
@@ -893,7 +900,7 @@ for (const { replay, rework } of [
           f.d.provider.permission = async (...args: unknown[]) =>
             (args[1] as { login: string }).login === "outsider" ? "read" : "write";
         }
-        f.snapshot.comments.push(f.comment("20", "# Bug receipt\nBUG RECEIPT · VERIFIED\n" + marker));
+        f.snapshot.comments.push(f.comment("20", marker + separator + "BUG RECEIPT · VERIFIED"));
         if (stage === "unauthorized") {
           f.snapshot.comments.at(-1)!.actor = { login: "outsider", providerId: "2" };
           f.d.provider.permission = async (...args: unknown[]) =>
@@ -909,7 +916,7 @@ for (const { replay, rework } of [
           url: "https://github.com/owner/repo/pull/8#pullrequestreview-22",
         });
         if (stage === "awaiting-merge") f.snapshot.comments.push(
-          f.comment("23", "# Bug receipt\nBUG RECEIPT · VERIFIED\n" + marker));
+          f.comment("23", marker + separator + "BUG RECEIPT · VERIFIED"));
         const recorded = ["unauthorized", "incomplete", "unauthorized-approval", "development-without-result"].includes(stage)
           ? "bug-development" : stage === "review-new-head" ? "bug-review" : stage;
         f.snapshot.labels = ["agent-flow:managed", "bugfix", "agent-stage:" + recorded];

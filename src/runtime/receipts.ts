@@ -1,3 +1,4 @@
+import { isVerifiedBugReceipt } from "./bug-receipt.ts";
 import { assertCarriedChange } from "./migration-recovery.ts";
 import type { MigrationReceipt } from "../provider/migration-receipt.ts";
 import { open } from "node:fs/promises";
@@ -529,8 +530,7 @@ function assertPinnedChange(
 }
 
 function assertVerifiedBugReceipt(body: string): void {
-  const heading = body.split(/\r?\n/).slice(1).find((line) => line.trim().length > 0);
-  if (heading !== "BUG RECEIPT · VERIFIED") {
+  if (!isVerifiedBugReceipt(body)) {
     decisionTrust("bug verification requires a BUG RECEIPT · VERIFIED diagnostic");
   }
 }
