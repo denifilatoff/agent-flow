@@ -20,6 +20,10 @@
   deployment behavior. GitHub or GitLab remains the only canonical operational store.
 - Agents changing workflows, execution contracts, or migration rules must read `docs/workflow-migrations.md` and
   assess whether the change requires a migration rule.
+- Before rolling out controller or workflow changes, assess whether active work needs migration. When required,
+  perform and verify the migration as part of the rollout using
+  [the migration operating procedure](docs/operating-workflow-migrations.md). Deploying a controller alone does not
+  migrate active configuration pins.
 - Keep flow definitions data-only. Do not add executable code, shell commands, or inline scripts to flow YAML.
 - Do not introduce a database, durable queue, distributed lease, webhook, or multi-controller behavior without an
   approved architecture change.
