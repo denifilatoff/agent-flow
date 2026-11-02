@@ -249,3 +249,21 @@ test("ignores inherited completion, spawn, and compaction evidence in native for
   };
   assert.equal((await collectCodexCost(f.home, decoder, runner)).totalTokens, 1100);
 });
+
+test("omits overflowing observed categories when the calculator fails", async (t) => {
+  const f = await fixture(t);
+  for (const id of f.ids) {
+    const path = join(f.home, "sessions", `${id}.jsonl`);
+    const lines = (await readFile(path, "utf8")).trim().split("\n").map(JSON.parse);
+    const total = lines.findLast((line) => line.payload?.type === "token_count").payload.info.total_token_usage;
+    total.input_tokens = 6e15;
+    total.total_tokens = 6e15 + total.output_tokens;
+    await writeFile(path, lines.map(JSON.stringify).join("\n") + "\n");
+  }
+  let observed: import("../../src/config/types.ts").AttemptUsage | undefined;
+  await assert.rejects(collectCodexCost(f.home, f.decoder, async () => { throw new Error("Calculator unavailable"); },
+    AbortSignal.timeout(1000), (usage) => { observed = usage; }));
+  assert.equal(observed?.inputTokens, undefined);
+  assert.equal(observed?.outputTokens, 100);
+  assert.equal(observed?.cachedInputTokens, 10);
+});

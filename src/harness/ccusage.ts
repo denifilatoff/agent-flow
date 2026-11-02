@@ -253,6 +253,7 @@ export async function collectCodexCost(home: string, decoder: CodexUsage, run: C
       if (log.counters[field] !== undefined) observed[key] = (observed[key] ?? 0) + log.counters[field]!;
     }
   }
+  for (const [key, value] of Object.entries(observed)) if (!count(value)) delete observed[key as keyof AttemptUsage];
   if (Object.keys(observed).length) onObserved?.(observed);
   const snapshot = await realpath(await mkdtemp(join(tmpdir(), "agent-flow-ccusage-")));
   try {
