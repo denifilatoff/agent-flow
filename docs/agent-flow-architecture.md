@@ -108,6 +108,11 @@ The [recovery specification](recovery-from-provider-draft.md) defines restart, o
   development package is not the foundation of the flow.
 - An `apm.yml` may reference a specific external APM artifact when the local catalog does not provide the required
   capability. External artifacts are reused individually rather than importing another orchestration flow.
+- Every role includes the pinned `qubership-user-essentials` package from Qubership AI Packages. It supplies shared
+  authoring skills, including `test-authoring` and `final-review`, through transitive dependencies. Developer, bugfixer,
+  bug-investigator and reviewer also include `blackbox-test-design` for reference-system and external-interface tests.
+  Existing role-specific engineering skills remain in place; reviewer uses `adversarial-code-review`. Shared skills do
+  not expand a role's permissions: reviewer and bug-investigator remain read-only, and no skill authorizes merging.
 - APM lockfiles are committed to the configuration repository. Updating an external artifact requires a lockfile
   update and a new configuration commit.
 - APM generates files for a named target harness. The selected target must match the harness that will execute the

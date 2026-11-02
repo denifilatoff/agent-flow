@@ -264,6 +264,15 @@ test("compiles every package with domain-only role instructions", async (t) => {
       assert.match(result.instructions, expected);
       assert.match(result.instructions, /only entry agent/);
       assert.doesNotMatch(result.instructions, AGENT_PACKAGE_PROTOCOL_CONTRACT);
+      for (const skill of ["test-authoring", "final-review", "docs-page-authoring"]) {
+        assert.ok(result.instructions.includes(skill), `${agentId}/${target} must expose the ${skill} trigger`);
+        await access(join(result.runtimeDirectory, target === "claude" ? ".claude" : ".agents",
+          "skills", skill, "SKILL.md"));
+      }
+      if (["developer", "bugfixer", "bug-investigator", "reviewer"].includes(agentId)) {
+        await access(join(result.runtimeDirectory, target === "claude" ? ".claude" : ".agents",
+          "skills", "blackbox-test-design", "SKILL.md"));
+      }
       await execFile("apm", ["audit", "--ci", "--no-policy"], { cwd: result.runtimeDirectory });
       const packageDirectory = join(process.cwd(), `agent-packages/${agentId}`);
       await assert.rejects(access(join(packageDirectory, target === "claude" ? ".claude" : ".codex")), {

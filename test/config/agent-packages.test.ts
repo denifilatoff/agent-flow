@@ -16,17 +16,21 @@ const PACKAGE_TARGETS = {
 } as const;
 
 const PACKAGE_VERSIONS = {
-  documentarian: "1.0.0",
-  architect: "1.0.3",
-  planner: "1.0.3",
-  developer: "1.0.3",
-  reviewer: "1.0.3",
-  "bug-investigator": "1.0.0",
-  bugfixer: "1.0.0",
+  documentarian: "1.1.0",
+  architect: "1.1.0",
+  planner: "1.1.0",
+  developer: "1.1.0",
+  reviewer: "1.1.0",
+  "bug-investigator": "1.1.0",
+  bugfixer: "1.1.0",
 } as const;
 
-const ADVERSARIAL_REVIEW_DEPENDENCY =
-  "Netcracker/qubership-ai-packages/agent-packages/adversarial-code-review#9b0af51d160b866548f97af0ee50c9467766815d";
+const AI_PACKAGES_REVISION = "375b5f87a881da999d6a66e20cf8c6d6f257a6d0";
+const AI_PACKAGES = "Netcracker/qubership-ai-packages/agent-packages";
+const USER_ESSENTIALS_DEPENDENCY = `${AI_PACKAGES}/qubership-user-essentials#${AI_PACKAGES_REVISION}`;
+const ADVERSARIAL_REVIEW_DEPENDENCY = `${AI_PACKAGES}/adversarial-code-review#${AI_PACKAGES_REVISION}`;
+const BLACKBOX_DEPENDENCY = `${AI_PACKAGES}/blackbox-test-design#${AI_PACKAGES_REVISION}`;
+const TESTING_ROLES = new Set(["developer", "bugfixer", "bug-investigator", "reviewer"]);
 const BUG_SKILL_REVISION = "634b92f887487fc61cddc2f61d77830e09e8f589";
 const ENGINEERING_SKILL_REVISION = "f63ec56a3cc936408d792956ae583c3c96a825bd";
 const ENGINEERING_SKILLS = {
@@ -168,11 +172,13 @@ test("reviewer pins and locks the adversarial review skill", async () => {
   const manifest = parse(await readFile(new URL("apm.yml", packageRoot), "utf8")) as {
     dependencies?: { apm?: string[] };
   };
-  assert.deepEqual(manifest.dependencies?.apm, [ADVERSARIAL_REVIEW_DEPENDENCY]);
+  assert.deepEqual(manifest.dependencies?.apm, [
+    USER_ESSENTIALS_DEPENDENCY, ADVERSARIAL_REVIEW_DEPENDENCY, BLACKBOX_DEPENDENCY,
+  ]);
 
   const lock = await readFile(new URL("apm.lock.yaml", packageRoot), "utf8");
   assert.match(lock, /name: adversarial-code-review/);
-  assert.match(lock, /resolved_commit: 9b0af51d160b866548f97af0ee50c9467766815d/);
+  assert.match(lock, new RegExp(`resolved_commit: ${AI_PACKAGES_REVISION}`));
   assert.match(lock, /\.agents\/skills\/adversarial-code-review\/SKILL\.md/);
 });
 
@@ -182,8 +188,10 @@ test("bug investigator pins and locks both bug skills for Claude and Codex", asy
     dependencies?: { apm?: string[] };
   };
   assert.deepEqual(manifest.dependencies?.apm, [
+    USER_ESSENTIALS_DEPENDENCY,
     `github/awesome-copilot/skills/bug-reproduction-brief#${BUG_SKILL_REVISION}`,
     `github/awesome-copilot/skills/bug-receipt#${BUG_SKILL_REVISION}`,
+    BLACKBOX_DEPENDENCY,
   ]);
 
   const lock = await readFile(new URL("apm.lock.yaml", packageRoot), "utf8");
@@ -202,7 +210,11 @@ for (const [packageName, skills] of Object.entries(ENGINEERING_SKILLS)) {
     };
     assert.deepEqual(
       manifest.dependencies?.apm,
-      skills.map((skill) => `addyosmani/agent-skills/skills/${skill}#${ENGINEERING_SKILL_REVISION}`),
+      [
+        USER_ESSENTIALS_DEPENDENCY,
+        ...skills.map((skill) => `addyosmani/agent-skills/skills/${skill}#${ENGINEERING_SKILL_REVISION}`),
+        ...(TESTING_ROLES.has(packageName) ? [BLACKBOX_DEPENDENCY] : []),
+      ],
     );
 
     const lock = await readFile(new URL("apm.lock.yaml", packageRoot), "utf8");
@@ -211,6 +223,31 @@ for (const [packageName, skills] of Object.entries(ENGINEERING_SKILLS)) {
       assert.match(lock, new RegExp(`\\.agents/skills/${skill}/SKILL\\.md`));
     }
     assert.equal(lock.match(new RegExp(`resolved_commit: ${ENGINEERING_SKILL_REVISION}`, "g"))?.length, skills.length);
+  });
+}
+
+for (const [packageName, targets] of Object.entries(PACKAGE_TARGETS)) {
+  test(`${packageName} locks user essentials and its role-specific test skills for every target`, async () => {
+    const root = new URL(`../../agent-packages/${packageName}/`, import.meta.url);
+    const manifest = parse(await readFile(new URL("apm.yml", root), "utf8"));
+    assert.equal(manifest.dependencies.apm.filter((dep: string) => dep === USER_ESSENTIALS_DEPENDENCY).length, 1);
+    const lock = parse(await readFile(new URL("apm.lock.yaml", root), "utf8"));
+    const aiPackages = lock.dependencies.filter((dep: { repo_url: string }) =>
+      dep.repo_url.toLowerCase() === "netcracker/qubership-ai-packages",
+    );
+    assert.ok(aiPackages.length > 1, "umbrella dependencies must be resolved transitively");
+    for (const dependency of aiPackages) assert.equal(dependency.resolved_commit, AI_PACKAGES_REVISION);
+    const skills = ["test-authoring", "final-review", "docs-page-authoring"];
+    if (TESTING_ROLES.has(packageName)) skills.push("blackbox-test-design");
+    else assert.ok(!lock.dependencies.some((dep: { name: string }) => dep.name === "blackbox-test-design"));
+    for (const skill of skills) {
+      const dependency = lock.dependencies.find((dep: { name: string }) => dep.name === skill);
+      assert.ok(dependency, `${packageName} must lock ${skill}`);
+      for (const target of targets) {
+        const directory = target === "claude" ? ".claude" : ".agents";
+        assert.ok(dependency.deployed_files.includes(`${directory}/skills/${skill}/SKILL.md`));
+      }
+    }
   });
 }
 

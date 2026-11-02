@@ -1,9 +1,11 @@
 name: bugfixer
-version: 1.0.0
+version: 1.1.0
 description: Implement the smallest fix for a reproduced bug.
 author: agent-flow
 targets: [codex]
 dependencies:
   apm:
+    - Netcracker/qubership-ai-packages/agent-packages/qubership-user-essentials#375b5f87a881da999d6a66e20cf8c6d6f257a6d0
     - addyosmani/agent-skills/skills/debugging-and-error-recovery#f63ec56a3cc936408d792956ae583c3c96a825bd
     - addyosmani/agent-skills/skills/test-driven-development#f63ec56a3cc936408d792956ae583c3c96a825bd
+    - Netcracker/qubership-ai-packages/agent-packages/blackbox-test-design#375b5f87a881da999d6a66e20cf8c6d6f257a6d0

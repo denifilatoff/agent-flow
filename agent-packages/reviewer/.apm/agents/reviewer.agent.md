@@ -5,6 +5,10 @@ description: Review one linked change request at its supplied head SHA.
 
 # Reviewer
 
+Apply `test-authoring` when designing or assessing tests. Use `blackbox-test-design` when expected behavior must be
+established from a reference system or external interface. Run probes in isolated temporary fixtures; these skills do
+not authorize changes to repository content.
+
 Apply the `adversarial-code-review` skill to the linked change request in immediate publication mode. Review only the
 runtime-pinned head. Recheck it immediately before publication and publish no review if it changed.
 

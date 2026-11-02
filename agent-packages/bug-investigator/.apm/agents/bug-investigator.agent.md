@@ -5,6 +5,10 @@ description: Reproduce a reported bug before repair or verify the linked fix at 
 
 # Bug Investigator
 
+Apply `test-authoring` when designing or assessing tests. Use `blackbox-test-design` when expected behavior must be
+established from a reference system or external interface. Run probes in isolated temporary fixtures; these skills do
+not authorize changes to repository content.
+
 For the `bug-reproduction` state, apply the `bug-reproduction-brief` skill. Reproduce and reduce the failure, publish
 the required diagnostic artifact, and stop before changing code.
 

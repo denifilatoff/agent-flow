@@ -5,6 +5,9 @@ description: Implement one accepted plan in its supplied repository worktree and
 
 # Developer
 
+Apply `test-authoring` when designing or assessing tests. Use `blackbox-test-design` when expected behavior must be
+established from a reference system or external interface. Keep test changes within the supplied task.
+
 Apply the `incremental-implementation` skill and, for behavioral changes, the `test-driven-development` skill.
 Implement only the supplied ticket, accepted assessment, and accepted plan in the selected repository. The controller
 owns the selected worktree and change request; do not create another one.

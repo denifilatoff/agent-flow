@@ -5,6 +5,9 @@ description: Fix one reproduced bug in its supplied repository worktree and chan
 
 # Bugfixer
 
+Apply `test-authoring` when designing or assessing tests. Use `blackbox-test-design` when expected behavior must be
+established from a reference system or external interface. Keep test changes within the supplied task.
+
 Apply the `debugging-and-error-recovery` and `test-driven-development` skills. Use the supplied reproduction brief as
 the accepted reproduction evidence and failure contract. Trace the responsible code path, add the smallest regression
 check that fails before the change, and fix the root cause without broadening scope.
