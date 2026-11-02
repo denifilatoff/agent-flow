@@ -1,0 +1,208 @@
+import { constants } from "node:fs";
+import { mkdir, mkdtemp, open, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { tmpdir } from "node:os";
+import type { AttemptUsage } from "../config/types.ts";
+import { assertSafeDirectory, assertSafeFile } from "../runtime/filesystem.ts";
+import { copyRegularFile, harnessEnvironment, type CommandRunner } from "./process.ts";
+import { count, CodexUsage, JsonLines } from "./usage.ts";
+
+interface Counts {
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens?: number;
+  totalTokens: number;
+  isFallback?: boolean;
+  missingPricing?: boolean;
+}
+
+interface Session extends Counts {
+  sessionId: string;
+  costUSD: number;
+  models: Record<string, Counts>;
+}
+
+const fields = ["inputTokens", "cacheReadTokens", "cacheCreationTokens", "outputTokens", "totalTokens"] as const;
+const validAmount = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+function validCounts(value: Counts): boolean {
+  return !!value && fields.every((field) => count(value[field]) && value[field] <= 1e12)
+    && value.totalTokens === value.inputTokens + value.cacheReadTokens + value.cacheCreationTokens + value.outputTokens
+    && (value.reasoningOutputTokens === undefined || (count(value.reasoningOutputTokens)
+      && value.reasoningOutputTokens <= value.outputTokens))
+    && (value.isFallback === undefined || value.isFallback === false)
+    && (value.missingPricing === undefined || value.missingPricing === false);
+}
+
+export function decodeCodexCostReport(source: unknown, expected: readonly string[]): AttemptUsage {
+  const report = source as { sessions?: Session[]; totals?: Counts & { costUSD: number; unpricedModels?: string[] } };
+  if (!report || !Array.isArray(report.sessions) || !report.totals || !expected.length
+    || report.sessions.length !== expected.length || !validCounts(report.totals)
+    || !validAmount(report.totals.costUSD)
+    || (report.totals.unpricedModels !== undefined
+      && (!Array.isArray(report.totals.unpricedModels) || report.totals.unpricedModels.length))) {
+    throw new Error("ccusage report is incomplete or unpriced");
+  }
+  const seen = new Set<string>();
+  const models = new Set<string>();
+  const sums = Object.fromEntries(fields.map((field) => [field, 0])) as Record<typeof fields[number], number>;
+  let cost = 0;
+  for (const session of report.sessions) {
+    if (!session || !expected.includes(session.sessionId) || seen.has(session.sessionId)
+      || !validCounts(session) || !validAmount(session.costUSD) || !session.models
+      || typeof session.models !== "object" || Array.isArray(session.models) || !Object.keys(session.models).length) {
+      throw new Error("ccusage session coverage or accounting is invalid");
+    }
+    seen.add(session.sessionId);
+    const modelSums = Object.fromEntries(fields.map((field) => [field, 0])) as typeof sums;
+    for (const [model, usage] of Object.entries(session.models)) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/.test(model) || !validCounts(usage)) {
+        throw new Error("ccusage model pricing is unavailable");
+      }
+      models.add(model);
+      for (const field of fields) modelSums[field] += usage[field];
+    }
+    if (fields.some((field) => modelSums[field] !== session[field])) {
+      throw new Error("ccusage model totals do not match the session");
+    }
+    for (const field of fields) sums[field] += session[field];
+    cost += session.costUSD;
+  }
+  if (fields.some((field) => sums[field] !== report.totals![field])
+    || !validAmount(cost) || Math.abs(cost - report.totals.costUSD) > 1e-8) {
+    throw new Error("ccusage totals do not match the selected sessions");
+  }
+  return {
+    inputTokens: sums.inputTokens + sums.cacheReadTokens + sums.cacheCreationTokens,
+    cachedInputTokens: sums.cacheReadTokens,
+    cacheCreationInputTokens: sums.cacheCreationTokens,
+    outputTokens: sums.outputTokens,
+    ...(report.totals.reasoningOutputTokens !== undefined ? { reasoningOutputTokens: report.totals.reasoningOutputTokens } : {}),
+    totalTokens: sums.totalTokens,
+    ...(models.size === 1 ? { model: [...models][0] } : {}),
+    costUsd: cost,
+    costSource: "estimated",
+  };
+}
+
+interface Log {
+  id: string;
+  parent?: string;
+  agentPath?: string;
+  path: string;
+  complete: boolean;
+  spawned: Set<string>;
+}
+
+async function selectedLogs(home: string, decoder: CodexUsage, signal: AbortSignal): Promise<Log[]> {
+  if (!decoder.rootId || !decoder.completed) throw new Error("Codex attempt did not finish");
+  const logs = new Map<string, Log>();
+  let files = 0;
+  let bytes = 0;
+  async function visit(directory: string, depth = 0): Promise<void> {
+    signal.throwIfAborted();
+    if (depth > 6) throw new Error("Codex log nesting exceeds the accounting limit");
+    await assertSafeDirectory(home, directory, "Codex accounting directory");
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (++files > 2048 || entry.isSymbolicLink()) throw new Error("Codex accounting files are unsafe");
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) { await visit(path, depth + 1); continue; }
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      await assertSafeFile(home, path, "Codex accounting log");
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      let log: Log | undefined;
+      let turn: string | undefined;
+      const calls = new Set<string>();
+      const lines = new JsonLines((record) => {
+        const p = record?.payload;
+        if (!p || typeof p !== "object") return;
+        if (!log && record.type === "session_meta" && typeof p.id === "string") {
+          const spawn = p.source?.subagent?.thread_spawn;
+          log = { id: p.id, parent: p.parent_thread_id ?? spawn?.parent_thread_id ?? p.forked_from_id,
+            agentPath: spawn?.agent_path, path, complete: false, spawned: new Set() };
+          return;
+        }
+        if (!log) return;
+        if (record.type === "event_msg" && p.type === "task_started") { turn = p.turn_id; log.complete = false; }
+        if (record.type === "event_msg" && p.type === "task_complete" && turn && p.turn_id === turn) log.complete = true;
+        if (record.type !== "response_item") return;
+        if (p.type === "function_call" && (p.name === "spawn_agent" || p.name?.endsWith(".spawn_agent"))) calls.add(p.call_id);
+        if (p.type === "function_call_output" && calls.has(p.call_id) && typeof p.output === "string") {
+          let result;
+          try { result = JSON.parse(p.output); } catch { return; }
+          if (typeof result.agent_id === "string") log.spawned.add(result.agent_id);
+          else if (typeof result.task_name === "string") log.spawned.add(result.task_name);
+          else if (!result.error) throw new Error("Spawned Codex session identity is missing");
+        }
+      }, 16 << 20);
+      try {
+        const size = (await file.stat()).size;
+        bytes += size;
+        if (size > 256 << 20 || bytes > 512 << 20) throw new Error("Codex logs exceed the accounting limit");
+        for await (const chunk of file.createReadStream({ autoClose: false, signal })) {
+          signal.throwIfAborted();
+          lines.write(chunk as Buffer);
+        }
+        lines.end();
+        if (lines.invalid || !log || logs.has(log.id)) throw new Error("Codex accounting log is invalid");
+        logs.set(log.id, log);
+      } finally { await file.close(); }
+    }
+  }
+  for (const name of ["sessions", "archived_sessions"]) {
+    try { await visit(join(home, name)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  const included = new Set([decoder.rootId]);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const log of logs.values()) if (log.parent && included.has(log.parent) && !included.has(log.id)) {
+      included.add(log.id); changed = true;
+    }
+  }
+  const selected = [...included].map((id) => logs.get(id));
+  if (selected.some((log) => !log?.complete)) throw new Error("A selected Codex session did not finish");
+  const complete = selected as Log[];
+  const identities = new Set(complete.flatMap((log) => [log.id, log.agentPath].filter((id): id is string => !!id)));
+  if (complete.some((log) => [...log.spawned].some((id) => !identities.has(id)))
+    || [...decoder.spawned].some((id) => !identities.has(id))) {
+    throw new Error("A spawned Codex session log is missing");
+  }
+  return complete;
+}
+
+export async function collectCodexCost(home: string, decoder: CodexUsage, run: CommandRunner): Promise<AttemptUsage> {
+  const signal = AbortSignal.timeout(30_000);
+  const logs = await selectedLogs(home, decoder, signal);
+  const snapshot = await realpath(await mkdtemp(join(tmpdir(), "agent-flow-ccusage-")));
+  try {
+    await mkdir(join(snapshot, "sessions"), { mode: 0o700 });
+    const names = logs.map((log) => basename(log.path, ".jsonl"));
+    if (new Set(names).size !== names.length) throw new Error("Codex session filenames conflict");
+    for (const log of logs) await copyRegularFile(log.path, join(snapshot, "sessions", basename(log.path)), "Codex accounting snapshot", signal);
+    let config: string | undefined;
+    try { config = await readFile(await assertSafeFile(home, join(home, "config.toml"), "Codex tier settings"), { encoding: "utf8", signal }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const top = config?.split(/^\s*\[/m)[0];
+    const tier = top?.split(/\r?\n/).find((line) => /^\s*service_tier\s*=/.test(line));
+    if (tier) {
+      const match = /^\s*service_tier\s*=\s*(["'])(standard|default|priority|fast|flex)\1\s*(?:#.*)?$/.exec(tier);
+      if (!match) throw new Error("Codex service tier is unavailable");
+      await writeFile(join(snapshot, "config.toml"), `service_tier = "${match[2]}"\n`, { mode: 0o600 });
+    }
+    const path = join(snapshot, "ccusage.json");
+    await writeFile(path, '{"defaults":{"offline":false}}', { mode: 0o600 });
+    const options = { cwd: snapshot, signal,
+      env: harnessEnvironment({ CODEX_HOME: snapshot, HOME: snapshot, NO_COLOR: "1" }) };
+    const version = await run("ccusage", ["--version"], options);
+    const match = /^ccusage 20\.(\d+)\.(\d+)$/.exec(version.stdout.trim());
+    if (!match || (Number(match[1]) === 0 && Number(match[2]) < 47) || version.stderr.trim()) {
+      throw new Error("Codex accounting requires ccusage >=20.0.47 and <21");
+    }
+    const result = await run("ccusage", ["codex", "session", "--json", "--no-offline", "--config", path], options);
+    if (result.stderr.trim()) throw new Error("ccusage reported an accounting warning");
+    return { ...decodeCodexCostReport(JSON.parse(result.stdout), names), costCalculator: version.stdout.trim() };
+  } finally { await rm(snapshot, { recursive: true, force: true }); }
+}

@@ -22,6 +22,53 @@ import test from "node:test";
 
 import { createClaudeAdapter } from "../../src/harness/claude.ts";
 import { createCodexAdapter } from "../../src/harness/codex.ts";
+
+for (const accountingFailure of [false, true]) {
+  test(`Codex completes one model run with ${accountingFailure ? "a safe accounting failure" : "ccusage cost"}`, async (t) => {
+    const fixture = await runFixture("codex");
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const processes = processFixture();
+    const records = JSON.parse(await readFile("test/fixtures/harness/codex-delegation.json", "utf8"));
+    const ids = records.map((lines: Array<{ payload: { id: string } }>) => lines[0]!.payload.id);
+    processes.dependencies.runCommand = async (file, args) => {
+      if (file !== "ccusage") return { stdout: "", stderr: "" };
+      if (accountingFailure) throw new Error("token=SHOULD_NOT_ESCAPE");
+      if (args[0] === "--version") return { stdout: "ccusage 20.0.47", stderr: "" };
+      const sessions = ids.map((sessionId: string, index: number) => {
+        const inputTokens = index === 0 ? 693 : 297;
+        const cacheReadTokens = index === 0 ? 7 : 3;
+        const outputTokens = index === 0 ? 70 : 30;
+        const counts = { inputTokens, cacheReadTokens, outputTokens, cacheCreationTokens: 0,
+          totalTokens: inputTokens + cacheReadTokens + outputTokens };
+        return { sessionId, ...counts, costUSD: 0.002,
+          models: { "gpt-5.4": { ...counts, isFallback: false } } };
+      });
+      return { stdout: JSON.stringify({ sessions, totals: { inputTokens: 990, cacheReadTokens: 10,
+        outputTokens: 100, cacheCreationTokens: 0, totalTokens: 1100, costUSD: 0.004 } }), stderr: "" };
+    };
+    const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+    const pending = adapter.run(fixture.input);
+    await waitForSpawn(processes.calls);
+    const home = processes.calls[0]!.env.CODEX_HOME!;
+    await mkdir(join(home, "sessions"));
+    for (let index = 0; index < records.length; index++) {
+      await writeFile(join(home, "sessions", `${ids[index]}.jsonl`), records[index].map(JSON.stringify).join("\n") + "\n");
+    }
+    const child = processes.children[0]!;
+    child.stdout.write(JSON.stringify({ type: "thread.started", thread_id: ids[0] }) + "\n");
+    child.stdout.write('{"type":"turn.completed"}\n');
+    child.finish(0, null);
+    const result = await pending;
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.usage?.totalTokens, 1100);
+    assert.equal(result.usage?.costUsd, accountingFailure ? undefined : 0.004);
+    assert.equal(result.usage?.costCalculator, accountingFailure ? undefined : "ccusage 20.0.47");
+    assert.equal(result.usage?.costError, accountingFailure ? "CCUSAGE_UNAVAILABLE" : undefined);
+    assert.doesNotMatch(JSON.stringify(result), /SHOULD_NOT_ESCAPE/);
+    assert.equal(processes.calls.length, 1);
+    await assert.rejects(access(home));
+  });
+}
 import {
   HarnessPreflightError,
   HarnessProcessError,

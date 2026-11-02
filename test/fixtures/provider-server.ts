@@ -43,6 +43,7 @@ interface FixtureOptions {
   policy?: "conservative" | "autonomous";
   scenario?: "feature" | "bugfix";
   documentationEdits?: boolean;
+  documentarianHarness?: "claude" | "codex";
   documentationAttempt?: AttemptMode;
   reviewRework?: boolean;
   legacyFlow?: boolean;
@@ -1335,7 +1336,7 @@ async function createConfiguration(
     execution: {
       agents: {
         architect: execution("claude"), planner: execution("claude"),
-        documentarian: execution("claude"), developer: execution("codex"), reviewer: execution("codex"),
+        documentarian: execution(fixtureOptions.documentarianHarness ?? "claude"), developer: execution("codex"), reviewer: execution("codex"),
         "bug-investigator": execution("claude"), bugfixer: execution("codex"),
       },
       harnesses: { codex: { authFile: codexAuthFile }, claude: { authFile: claudeAuthFile } },
@@ -1353,7 +1354,7 @@ async function createConfiguration(
 async function createTools(bin: string, usage = false): Promise<void> {
   const executable = resolve(ROOT, "test/fixtures/fake-harness.ts");
   const events = join(dirname(bin), "events.ndjson");
-  await Promise.all(["gh", "glab", "apm", "codex", "claude"].map(async (tool) => {
+  await Promise.all(["gh", "glab", "apm", "codex", "claude", "ccusage"].map(async (tool) => {
     const path = join(bin, tool);
     await writeFile(path, `#!/bin/sh\nAGENT_FLOW_FIXTURE_USAGE=${usage ? "1" : "0"} AGENT_FLOW_FIXTURE_LOG=${JSON.stringify(events)} exec ${JSON.stringify(process.execPath)} ${JSON.stringify(executable)} ${tool} "$@"\n`);
     await chmod(path, 0o755);

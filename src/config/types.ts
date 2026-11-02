@@ -112,6 +112,8 @@ export interface AttemptUsage {
   model?: string;
   costUsd?: number;
   costSource?: "harness" | "estimated";
+  costCalculator?: string;
+  costError?: string;
 }
 
 export type ReceiptArtifact = ReceiptComment | ReceiptChangeRequest | ReceiptReview;

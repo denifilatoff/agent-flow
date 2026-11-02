@@ -9,7 +9,12 @@ Remaining increments:
 3. Resume retained prepared delivery independently of model execution. On uncertain writes, inspect provider evidence before another write; never blindly duplicate a comment. Preserve provider cancellation, ownership, provenance, and pinned configuration checks. Local prepared work remains disposable and cannot authorize a stage transition without provider evidence.
 4. Replace annotation tests with creation/readback/retry tests. Exercise GitHub and GitLab end to end, including legacy pins, unsuccessful attempts, cancellation, restart, absent cost, and uncertain delivery. Document protocol and disposable retention.
 
-References: owner-pinned ReviewCTL `bcc61d355c1c79bfbcc2df0866f67aa4fab14d69`, `usage.go` (completed session tree and complete pricing inputs), `signature.go` (target validation, exact readback, independent retry). Do not adopt its post-publication editing or add a dependency.
+References: owner-pinned ReviewCTL `bcc61d355c1c79bfbcc2df0866f67aa4fab14d69`, `usage.go` (completed session tree and complete pricing inputs), `signature.go` (target validation, exact readback, independent retry). Do not adopt its post-publication editing.
+
+The owner's 2026-11-02 correction requires working Codex dollar estimates through a maintained local tool, as in
+ReviewCTL. This supersedes the earlier restriction against adding the calculator dependency: install locked ccusage,
+use its online pricing and session accounting, and validate complete selected-session coverage. Keep credentials out of
+calculator snapshots and retain existing publication order, old pins, and historical amounts.
 
 Verification: focused Node tests per increment, then `npm run typecheck`, `npm test`, `npm run build`, `npm run test:e2e`, and diff review. No protocol version or pricing guesses; unavailable cost stays absent.
 

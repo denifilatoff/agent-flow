@@ -6,7 +6,7 @@ import { parsePublication } from "../../src/provider/publication.ts";
 import { startFixture } from "../fixtures/provider-server.ts";
 
 test("GitHub activation reaches done through both human gates", async (t) => {
-  const run = await startFixture("github", { usage: true, preparedComments: true });
+  const run = await startFixture("github", { usage: true, preparedComments: true, documentarianHarness: "codex" });
   t.after(() => run.close());
   assert.equal(await run.unauthenticatedProviderStatus(), 400);
 
@@ -35,8 +35,12 @@ test("GitHub activation reaches done through both human gates", async (t) => {
 
   const receipts = await run.receipts();
   assert.ok(receipts.every((receipt) => receipt.usage?.totalTokens === 1100));
+  assert.ok(receipts.every((receipt) => (receipt.usage?.costUsd ?? 0) > 0));
+  assert.equal(receipts.filter((receipt) => receipt.usage?.costCalculator === "ccusage 20.0.47").length, 3);
   const annotated = await run.latestAgentComment();
   assert.equal(annotated?.body.match(/Usage:/g)?.length, 1);
+  assert.match(annotated!.body, /\$\d+\.\d{2} estimated/);
+  assert.equal(annotated!.createdAt, annotated!.updatedAt);
   assert.deepEqual(receipts.map((receipt) => ({
     outcome: receipt.outcome,
     summary: receipt.summary,
@@ -86,7 +90,7 @@ test("GitHub activation reaches done through both human gates", async (t) => {
     { agentId: "planner", target: "claude" },
     { agentId: "planner", target: "claude" },
     { agentId: "developer", target: "codex" },
-    { agentId: "documentarian", target: "claude" },
+    { agentId: "documentarian", target: "codex" },
     { agentId: "reviewer", target: "codex" },
   ]);
   assert.deepEqual(await run.compilations(), [
@@ -95,7 +99,7 @@ test("GitHub activation reaches done through both human gates", async (t) => {
     { agentId: "planner", target: "claude" },
     { agentId: "planner", target: "claude" },
     { agentId: "developer", target: "codex" },
-    { agentId: "documentarian", target: "claude" },
+    { agentId: "documentarian", target: "codex" },
     { agentId: "reviewer", target: "codex" },
   ]);
 });

@@ -25,6 +25,8 @@ test("locks the runtime image, tools, and controller service", async () => {
   };
   assert.equal(toolsLock.packages["node_modules/@openai/codex"]?.version, "0.150.0-alpha.8");
   assert.equal(toolsLock.packages["node_modules/@anthropic-ai/claude-code"]?.version, "2.1.217");
+  assert.equal(toolsLock.packages["node_modules/ccusage"]?.version, "20.0.47");
+  assert.match(dockerfile, /ccusage --version.*20\.0\.47/);
   const toolsPackage = JSON.parse(await readFile("docker/tools/package.json", "utf8")) as { allowScripts?: unknown };
   assert.deepEqual(toolsPackage.allowScripts, { "@anthropic-ai/claude-code": true });
 

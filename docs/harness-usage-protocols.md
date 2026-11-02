@@ -23,8 +23,26 @@ Exact-version source: [exec notification filtering](https://github.com/openai/co
 [fork history filtering](https://github.com/openai/codex/blob/rust-v0.150.0-alpha.8/codex-rs/core/src/agent/control/spawn.rs).
 
 Cached input and cache writes are subsets of input; reasoning output is a subset of output. They must not be added
-to total tokens again. The public completion envelope has no actual model identity; configured model names alone do not
-establish an actual model for the entire attempt. Unknown model identity prevents a calculated cost.
+to total tokens again. The public completion envelope has no actual model identity. The controller uses actual
+session logs, rather than the configured model name, for pricing.
+
+After a successful Codex execution, the controller runs `ccusage codex session --json --no-offline` with a separate
+30-second deadline. It snapshots only the completed root session and its native descendants into a temporary
+calculator home. Authentication files and provider credentials are excluded; only the root `service_tier` setting is
+preserved. The snapshot is removed after calculation. Missing descendants, unfinished sessions, warnings, fallback or
+unpriced models, unsupported tool versions, and inconsistent reports leave the amount unavailable without rerunning
+the model. Observed partial counters remain available when calculation fails.
+
+The runtime image pins ccusage `20.0.47` in `docker/tools/package-lock.json`. Prices are refreshed through ccusage's
+online catalog; the controller has no Codex price table. The validated report supplies whole-attempt tokens, cache
+accounting, actual models, and the API-equivalent USD estimate. Receipts retain `costCalculator`; failures retain the
+safe `CCUSAGE_UNAVAILABLE` code and prepared comments display `cost unavailable`.
+
+`ccusage-codex.json` records ccusage `20.0.47` output for the public delegation fixture. It was captured on
+2026-11-02 with online pricing and no model requests. Its prices are a frozen test response, not a maintained rate
+table. A separate real CLI smoke also verified the same protocol counters attributed to `gpt-6.1-sol`.
+See [Codex session reports](https://ccusage.com/guide/codex/) and
+[unpriced-model JSON fields](https://ccusage.com/guide/json-output#unpriced-models).
 
 ## Claude
 

@@ -143,11 +143,17 @@ export class ClaudeUsage implements UsageObserver {
 
 export class CodexUsage implements UsageObserver {
   rootId: string | undefined;
+  readonly spawned = new Set<string>();
   completed = false;
   private readonly lines = new JsonLines((record) => {
     if (record?.type === "thread.started" && typeof record.thread_id === "string") this.rootId ??= record.thread_id;
     if (record?.type === "turn.completed") this.completed = true;
     if (record?.type === "turn.failed") this.completed = false;
+    const item = record?.item;
+    if (record?.type === "item.completed" && item?.type === "collab_tool_call"
+      && item.tool === "spawn_agent" && item.status === "completed" && Array.isArray(item.receiver_thread_ids)) {
+      for (const id of item.receiver_thread_ids) if (typeof id === "string") this.spawned.add(id);
+    }
   });
   write(chunk: Buffer): void { this.lines.write(chunk); }
   end(): void { this.lines.end(); }

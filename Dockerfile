@@ -12,7 +12,8 @@ WORKDIR /tools
 COPY docker/tools/package.json docker/tools/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund \
     && node_modules/.bin/codex --version | grep -F "0.150.0-alpha.8" \
-    && node_modules/.bin/claude --version | grep -F "2.1.217"
+    && node_modules/.bin/claude --version | grep -F "2.1.217" \
+    && node_modules/.bin/ccusage --version | grep -F "ccusage 20.0.47"
 
 FROM node:24-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df
 
