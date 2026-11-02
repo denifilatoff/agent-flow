@@ -98,11 +98,12 @@ export function createCodexAdapter(
       async function accounting(withCost: boolean) {
         if (!home) return undefined;
         const signal = AbortSignal.timeout(30_000);
+        let observedUsage: Awaited<ReturnType<typeof collectCodexUsage>>;
         if (withCost) {
-          try { return await collectCodexCost(home, observer, dependencies.runCommand, signal); }
+          try { return await collectCodexCost(home, observer, dependencies.runCommand, signal, (usage) => { observedUsage = usage; }); }
           catch { /* Retain observed categories without claiming complete accounting. */ }
         }
-        const usage = await collectCodexUsage(home, observer, signal).catch(() => undefined);
+        const usage = observedUsage ?? await collectCodexUsage(home, observer, signal).catch(() => undefined);
         if (!withCost) return usage;
         const { totalTokens: _incompleteTotal, ...observed } = usage ?? {};
         return { ...observed, costError: "CCUSAGE_UNAVAILABLE" };

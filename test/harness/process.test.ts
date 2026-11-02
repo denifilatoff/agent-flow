@@ -1045,15 +1045,25 @@ for (const lateProcessError of [false, true]) {
   });
 }
 
-for (const accountingFailure of [false, true]) {
-  test(`Codex completes one model run with ${accountingFailure ? "a safe accounting failure" : "ccusage cost"}`, async (t) => {
+for (const accountingFailure of [false, "unavailable", "timeout"] as const) {
+  test(`Codex completes one model run with ${accountingFailure || "ccusage cost"}`, async (t) => {
     const fixture = await runFixture("codex");
     t.after(() => rm(fixture.root, { recursive: true, force: true }));
     const processes = processFixture();
+    if (accountingFailure === "timeout") {
+      const timeout = AbortSignal.timeout.bind(AbortSignal);
+      t.mock.method(AbortSignal, "timeout", (milliseconds: number) => timeout(milliseconds === 30_000 ? 300 : milliseconds));
+    }
     const records = JSON.parse(await readFile("test/fixtures/harness/codex-delegation.json", "utf8"));
     const ids = records.map((lines: Array<{ payload: { id: string } }>) => lines[0]!.payload.id);
-    processes.dependencies.runCommand = async (file, args) => {
+    processes.dependencies.runCommand = async (file, args, options = {}) => {
       if (file !== "ccusage") return { stdout: "", stderr: "" };
+      if (accountingFailure === "timeout") {
+        await new Promise<void>((_resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("Accounting command ignored its deadline")), 2000);
+          options.signal!.addEventListener("abort", () => { clearTimeout(timer); reject(options.signal!.reason); }, { once: true });
+        });
+      }
       if (accountingFailure) throw new Error("token=SHOULD_NOT_ESCAPE");
       if (args[0] === "--version") return { stdout: "ccusage 20.0.47", stderr: "" };
       const sessions = ids.map((sessionId: string, index: number) => {

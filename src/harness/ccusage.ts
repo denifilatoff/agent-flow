@@ -110,6 +110,10 @@ interface Log {
   path: string;
   complete: boolean;
   spawned: Set<string>;
+  boundary: number;
+  counters?: Record<string, number>;
+  compactionRecords: Set<string>;
+  compacted: Set<string>;
 }
 
 async function selectedLogs(home: string, decoder: CodexUsage, signal: AbortSignal): Promise<Log[]> {
@@ -137,16 +141,43 @@ async function selectedLogs(home: string, decoder: CodexUsage, signal: AbortSign
         if (!log && record.type === "session_meta" && typeof p.id === "string") {
           const spawn = p.source?.subagent?.thread_spawn;
           log = { id: p.id, parent: p.parent_thread_id ?? spawn?.parent_thread_id ?? p.forked_from_id,
-            agentPath: spawn?.agent_path, path, complete: false, spawned: new Set() };
+            agentPath: spawn?.agent_path, path, complete: false, spawned: new Set(),
+            boundary: p.subagent_history_start_ordinal ?? -1, compactionRecords: new Set(), compacted: new Set() };
+          if (log.boundary !== -1 && !count(log.boundary)) throw new Error("Codex history boundary is invalid");
+          if (log.parent && p.history_mode !== "paginated") throw new Error("Codex descendant history is unverified");
           return;
         }
         if (!log) return;
+        if (log.boundary >= 0) {
+          if (!count(record.ordinal)) throw new Error("Codex history ordinal is missing");
+          if (record.ordinal < log.boundary) return;
+        }
         if (record.type === "event_msg" && p.type === "token_count" && p.info != null) {
-          const values = [p.info.total_token_usage, p.info.last_token_usage];
+          const total = p.info.total_token_usage;
+          const last = p.info.last_token_usage;
+          const values = [total, last];
           if (!values.some((value) => value != null) || values.some((value) => value != null && !validNativeCounters(value))) {
             throw new Error("Codex usage event contains invalid counters");
           }
+          if (total && last && Object.keys(last).some((key) => count(last[key]) && count(total[key]) && last[key] > total[key])) {
+            throw new Error("Codex usage delta exceeds cumulative counters");
+          }
+          if (total) log.counters = total;
         }
+        if (record.type === "token_usage_record") {
+          const usage = p.usage;
+          if (typeof p.response_id !== "string" || !p.response_id.trim() || !usage || !count(usage.input_tokens)
+            || !count(usage.output_tokens) || !validNativeCounters({ cached_input_tokens: 0, reasoning_output_tokens: 0,
+              total_tokens: usage.input_tokens + usage.output_tokens, ...usage })) {
+            throw new Error("Codex compaction usage is invalid");
+          }
+          if (p.thread_token_usage != null && !validNativeCounters({ cached_input_tokens: 0, reasoning_output_tokens: 0,
+            total_tokens: p.thread_token_usage.input_tokens + p.thread_token_usage.output_tokens, ...p.thread_token_usage })) {
+            throw new Error("Codex compaction thread counters are invalid");
+          }
+          if (usage.input_tokens + usage.output_tokens > 0) log.compactionRecords.add(p.response_id.trim());
+        }
+        if (record.type === "compacted" && typeof p.compaction_response_id === "string") log.compacted.add(p.compaction_response_id.trim());
         if (record.type === "event_msg" && p.type === "task_started") { turn = p.turn_id; log.complete = false; }
         if (record.type === "event_msg" && p.type === "task_complete" && turn && p.turn_id === turn) log.complete = true;
         if (record.type !== "response_item") return;
@@ -204,6 +235,7 @@ function validNativeCounters(value: Record<string, unknown>): boolean {
   return !!value && ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]
     .every((key) => count(value[key]))
     && Number(value.cached_input_tokens) <= Number(value.input_tokens)
+    && Number(value.cached_input_tokens) + Number(value.cache_write_input_tokens ?? 0) <= Number(value.input_tokens)
     && Number(value.reasoning_output_tokens) <= Number(value.output_tokens)
     && value.total_tokens === Number(value.input_tokens) + Number(value.output_tokens)
     && (value.cache_write_input_tokens === undefined || (count(value.cache_write_input_tokens)
@@ -211,8 +243,17 @@ function validNativeCounters(value: Record<string, unknown>): boolean {
 }
 
 export async function collectCodexCost(home: string, decoder: CodexUsage, run: CommandRunner,
-  signal = AbortSignal.timeout(30_000)): Promise<AttemptUsage> {
+  signal = AbortSignal.timeout(30_000), onObserved?: (usage: AttemptUsage) => void): Promise<AttemptUsage> {
   const logs = await selectedLogs(home, decoder, signal);
+  const observed: AttemptUsage = {};
+  for (const log of logs) if (log.counters) {
+    for (const [key, field] of [["inputTokens", "input_tokens"], ["cachedInputTokens", "cached_input_tokens"],
+      ["cacheCreationInputTokens", "cache_write_input_tokens"], ["outputTokens", "output_tokens"],
+      ["reasoningOutputTokens", "reasoning_output_tokens"]] as const) {
+      if (log.counters[field] !== undefined) observed[key] = (observed[key] ?? 0) + log.counters[field]!;
+    }
+  }
+  if (Object.keys(observed).length) onObserved?.(observed);
   const snapshot = await realpath(await mkdtemp(join(tmpdir(), "agent-flow-ccusage-")));
   try {
     await mkdir(join(snapshot, "sessions"), { mode: 0o700 });
@@ -246,6 +287,21 @@ export async function collectCodexCost(home: string, decoder: CodexUsage, run: C
     }
     const result = await run("ccusage", ["codex", "session", "--json", "--no-offline", "--config", path], options);
     if (result.stderr.trim()) throw new Error("ccusage reported an accounting warning");
-    return { ...decodeCodexCostReport(JSON.parse(result.stdout), names), costCalculator: version.stdout.trim() };
+    const report = JSON.parse(result.stdout);
+    const usage = decodeCodexCostReport(report, names);
+    for (const log of logs) {
+      // Remote compaction can bill records outside the ordinary cumulative counters.
+      if ([...log.compactionRecords].some((id) => log.compacted.has(id))) continue;
+      const counters = log.counters;
+      const session: Session = report.sessions.find((item: Session) => item.sessionId === basename(log.path, ".jsonl"));
+      if (!counters || session.inputTokens + session.cacheReadTokens + session.cacheCreationTokens !== counters.input_tokens
+        || session.cacheReadTokens !== counters.cached_input_tokens
+        || session.cacheCreationTokens !== (counters.cache_write_input_tokens ?? 0)
+        || session.outputTokens !== counters.output_tokens
+        || (session.reasoningOutputTokens !== undefined && session.reasoningOutputTokens !== counters.reasoning_output_tokens)) {
+        throw new Error("ccusage session does not match native cumulative counters");
+      }
+    }
+    return { ...usage, costCalculator: version.stdout.trim() };
   } finally { await rm(snapshot, { recursive: true, force: true }); }
 }

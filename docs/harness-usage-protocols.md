@@ -33,6 +33,10 @@ preserved. The snapshot is removed after calculation. Missing descendants, unfin
 unpriced models, unsupported tool versions, and inconsistent reports leave the amount unavailable without rerunning
 the model. Observed categories remain available when calculation fails, without claiming a complete attempt total.
 The deadline starts before any accounting log read and also applies to fallback collection.
+Ordinary session totals must match their native cumulative counters. Matched remote compaction records are validated
+separately and remain attributed by ccusage. Inherited fork history cannot establish completion or billable usage.
+If the calculator times out after the log scan, the controller retains the counters already observed without another
+read or an extension of the accounting deadline.
 
 The runtime image pins ccusage `20.0.47` in `docker/tools/package-lock.json`. Prices are refreshed through ccusage's
 online catalog; the controller has no Codex price table. The validated report supplies whole-attempt tokens, cache
