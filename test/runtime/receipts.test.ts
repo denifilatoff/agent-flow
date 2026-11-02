@@ -975,10 +975,78 @@ test("accepts only a VERIFIED bug receipt at the pinned change head", async () =
   ), /VERIFIED/);
 });
 
+for (const [name, separator] of [
+  ["immediate LF", "\n"],
+  ["blank LF", "\n\n"],
+  ["immediate CRLF", "\r\n"],
+  ["blank CRLF", "\r\n\r\n"],
+  ["whitespace-only LF", "\n \t\n"],
+  ["multiple whitespace-only CRLF", "\r\n \t\r\n\r\n\t\r\n"],
+]) {
+  test(`accepts a VERIFIED receipt after ${name} separators`, async () => {
+    const provider = new FakeProvider();
+    installComments(provider, [comment("diagnostic", {
+      body: marker("diagnostic") + separator + "BUG RECEIPT · VERIFIED",
+    })]);
+
+    const receipt = await readDecision({ event: "agent-succeeded" }, expectation({
+      stateId: "verification",
+      resultContract: "verification",
+      pinnedChangeRequest: change(),
+    }), provider);
+
+    assert.equal(receipt.outcome, "succeeded");
+    assert.equal(receipt.artifacts[0]?.artifactKind, "diagnostic");
+  });
+}
+
+for (const [name, content] of [
+  ["PARTIAL", "BUG RECEIPT · PARTIAL\nBUG RECEIPT · VERIFIED"],
+  ["BLOCKED", "BUG RECEIPT · BLOCKED\nBUG RECEIPT · VERIFIED"],
+  ["unrelated text before heading", "Explanation.\nBUG RECEIPT · VERIFIED"],
+  ["missing heading", ""],
+  ["indented heading", " BUG RECEIPT · VERIFIED"],
+  ["heading with trailing whitespace", "BUG RECEIPT · VERIFIED "],
+]) {
+  test(`rejects a verification receipt with ${name} after blank separators`, async () => {
+    const provider = new FakeProvider();
+    installComments(provider, [comment("diagnostic", {
+      body: `${marker("diagnostic")}\n \t\n${content}`,
+    })]);
+
+    await trustFailure(readDecision({ event: "agent-succeeded" }, expectation({
+      stateId: "verification",
+      resultContract: "verification",
+      pinnedChangeRequest: change(),
+    }), provider), /VERIFIED/);
+  });
+}
+
+test("rejects untrusted blank-separated VERIFIED diagnostics", async (context) => {
+  for (const untrusted of ["author", "config", "controller"] as const) {
+    await context.test(untrusted, async () => {
+      const provider = new FakeProvider();
+      let publication = marker("diagnostic");
+      if (untrusted === "author") provider.actorPermission = "read";
+      if (untrusted === "config") publication = publication.replace(CONFIG_REVISION, "b".repeat(40));
+      if (untrusted === "controller") publication = publication.replace(CONTROLLER_ID, FLOW_ID);
+      installComments(provider, [comment("diagnostic", {
+        body: `${publication}\n\nBUG RECEIPT · VERIFIED`,
+      })]);
+
+      await assert.rejects(readDecision({ event: "agent-succeeded" }, expectation({
+        stateId: "verification",
+        resultContract: "verification",
+        pinnedChangeRequest: change(),
+      }), provider));
+    });
+  }
+});
+
 test("rejects a verification receipt when the change head moves during readback", async () => {
   const provider = new FakeProvider();
   const verified = comment("diagnostic", {
-    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
+    body: `${marker("diagnostic")}\n\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
   });
   installComments(provider, [verified]);
   provider.ticketReads = [provider.ticket, snapshot({
@@ -1000,7 +1068,7 @@ test("rejects a verification receipt when the change head moves during readback"
 test("rejects successful bug verification when the change request is closed", async () => {
   const provider = new FakeProvider();
   installComments(provider, [comment("diagnostic", {
-    body: `${marker("diagnostic")}\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
+    body: `${marker("diagnostic")}\n\nBUG RECEIPT · VERIFIED\n\nProblem    Fixed.`,
   })]);
   provider.ticket.changeRequest = change({ state: "closed" });
 
