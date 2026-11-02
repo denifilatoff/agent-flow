@@ -529,7 +529,8 @@ function assertPinnedChange(
 }
 
 function assertVerifiedBugReceipt(body: string): void {
-  if (body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") {
+  const heading = body.split(/\r?\n/).slice(1).find((line) => line.trim().length > 0);
+  if (heading !== "BUG RECEIPT · VERIFIED") {
     decisionTrust("bug verification requires a BUG RECEIPT · VERIFIED diagnostic");
   }
 }

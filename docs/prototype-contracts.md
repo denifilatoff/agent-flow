@@ -160,8 +160,10 @@ not both model-owned and configured on the current state.
 After a successful harness exit, the controller reads the decision and discovers its evidence through the provider:
 
 - `agent-succeeded` requires the stage's marked assessment, plan, or diagnostic comment. Verification requires a
-  diagnostic whose second line is exactly `BUG RECEIPT · VERIFIED`; the linked change request must remain open at the
-  pinned head throughout readback. A development attempt without a linked change request creates one linked open
+  diagnostic whose first nonblank line after the publication marker is exactly `BUG RECEIPT · VERIFIED`. LF and CRLF
+  line endings and empty or whitespace-only separator lines are accepted; unrelated text before the heading and
+  PARTIAL, BLOCKED, or missing headings are rejected. The linked change request must remain open at the pinned head
+  throughout readback. A development attempt without a linked change request creates one linked open
   change request during the current attempt. A retry with a pinned change request keeps that exact request open and
   updates it during the current attempt instead of creating another;
 - `agent-needs-human` requires one marked question comment;
