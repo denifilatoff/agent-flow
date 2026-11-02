@@ -299,7 +299,7 @@ test("verification replay head change resumes review after SQLite loss on the bu
   const before = await run.changeRequest();
   const controller = await run.controllerId();
   await run.blockNextAttempt("bug-verification");
-  const target = await run.migrate("bug-verification", true);
+  const target = await run.migrate("bug-verification", true, { blockReplay: true });
   await run.reconcile();
   await run.untilState("bug-verification");
   await run.untilAttempt("started");

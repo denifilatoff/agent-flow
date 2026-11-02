@@ -126,7 +126,7 @@ export interface FixtureRun {
   latestAgentComment(): Promise<ProviderComment | null>;
   maximumConcurrentAttempts(): Promise<number>;
   mergeChangeRequest(): Promise<void>;
-  migrate(resume?:string,agentOnly?:boolean):Promise<string>;
+  migrate(resume?: string, agentOnly?: boolean, options?: { blockReplay?: boolean }): Promise<string>;
   migrateCiPolicy():Promise<string>;
   migrationReceipts():Promise<string[]>;
   reconcile(): Promise<void>;
@@ -441,7 +441,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     },
     async maximumConcurrentAttempts() { return state.maximumActiveAttempts; },
     async mergeChangeRequest() { state.setChangeState("merged"); },
-    async migrate(resume,agentOnly=false) {
+    async migrate(resume, agentOnly = false, options = {}) {
       const control=requireControl(currentControl());
       const worktree=join(dataDirectory,"worktrees",control.flowInstanceId);
       const branch=(await execFile("git",["-C",worktree,"branch","--show-current"])).stdout.trim();
@@ -452,6 +452,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
         await execFile("git",["-C",configRepository,"add","."]);await execFile("git",["-C",configRepository,"commit","-m","Update developer guidance"]);
       }
       const sha=(await execFile("git",["-C",configRepository,"rev-parse","HEAD"])).stdout.trim();
+      if (options.blockReplay && resume) state.nextModes.set(`${resume}:${sha}`, ["block"]);
       state.addComment(`/agent-flow migrate --pr ${state.change!.number} --to latest${resume ? " --resume-from "+resume : ""}`,MAINTAINER);
       return sha;
     },
@@ -751,7 +752,7 @@ class FixtureState {
       return;
     }
     const key = control.stateId === "needs-human" ? "needs-human" : control.stateId;
-    const queue = this.nextModes.get(key) ?? [];
+    const queue = this.nextModes.get(`${key}:${control.configRevision}`) ?? this.nextModes.get(key) ?? [];
     const mode = queue.shift() ?? "success";
     if (mode === "crash-after-push") {
       if (!this.change) throw new Error("documentation push needs an existing request");
