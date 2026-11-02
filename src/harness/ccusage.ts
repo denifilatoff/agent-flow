@@ -64,9 +64,11 @@ export function decodeCodexCostReport(source: unknown, expected: readonly string
     || report.sessions.length !== expected.length || !validCounts(report.totals)
     || !validAmount(report.totals.costUSD)
     || (report.totals.unpricedModels !== undefined
-      && (!Array.isArray(report.totals.unpricedModels) || report.totals.unpricedModels.length))) {
+      && (!Array.isArray(report.totals.unpricedModels)
+        || report.totals.unpricedModels.some((model) => typeof model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/.test(model))))) {
     throw new Error("ccusage report is incomplete or unpriced");
   }
+  if (report.totals.unpricedModels?.length) throw new Error("ccusage model pricing is unavailable");
   const seen = new Set<string>();
   const models = new Set<string>();
   const sums = Object.fromEntries(fields.map((field) => [field, 0])) as Record<typeof fields[number], number>;
@@ -181,7 +183,8 @@ async function selectedLogs(home: string, decoder: CodexUsage, signal: AbortSign
           const contextObservation = total && last && validNativeCounters(total)
             && ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"]
               .every((key) => last[key] === 0)
-            && (last.cache_write_input_tokens ?? 0) === 0 && count(last.total_tokens) && last.total_tokens > 0
+            && (last.cache_write_input_tokens === undefined || last.cache_write_input_tokens === 0)
+            && count(last.total_tokens) && last.total_tokens > 0
             && ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]
               .every((key) => (total[key] ?? 0) === (log!.counters?.[key] ?? 0));
           const values = [total, last];
@@ -303,7 +306,10 @@ export async function collectCodexCost(home: string, decoder: CodexUsage, run: C
         'with open(sys.argv[1], "rb") as source: value = tomllib.load(source).get("service_tier")',
         'if value is not None and value not in ("standard", "default", "priority", "fast", "flex"): raise SystemExit("Unsupported service tier")',
         "print(json.dumps(value))",
-      ].join("\n"), config], options);
+      ].join("\n"), config], options).catch((error: unknown) => {
+        if (signal.aborted || codexCostErrorCode(error, signal) === "CCUSAGE_IO_FAILED") throw error;
+        throw new Error("Codex service tier is unavailable");
+      });
       const tier = JSON.parse(result.stdout);
       if (result.stderr.trim() || (tier !== null && !["standard", "default", "priority", "fast", "flex"].includes(tier))) {
         throw new Error("Codex service tier is unavailable");

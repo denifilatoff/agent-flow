@@ -269,7 +269,7 @@ test("omits overflowing observed categories when the calculator fails", async (t
 });
 
 test("accepts native context-size observations without pricing them as usage", async (t) => {
-  for (const position of ["initial", "after-usage", "changed-cumulative"] as const) {
+  for (const position of ["initial", "after-usage", "changed-cumulative", "null-cache-write"] as const) {
     await t.test(position, async (context) => {
       const f = await fixture(context);
       const path = join(f.home, "sessions", `${f.ids[0]}.jsonl`);
@@ -280,13 +280,14 @@ test("accepts native context-size observations without pricing them as usage", a
       const observation = { type: "event_msg", payload: { type: "token_count", info: { total_token_usage: total,
         last_token_usage: { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0,
           output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 12345 } } } };
+      if (position === "null-cache-write") Object.assign(observation.payload.info.last_token_usage, { cache_write_input_tokens: null });
       lines.splice(position === "initial" ? 2 : lines.length - 1, 0, observation);
       await writeFile(path, lines.map(JSON.stringify).join("\n") + "\n");
       const runner: CommandRunner = async (file, args, options = {}) => {
         if (file === "python3") return processDependencies().runCommand(file, args, options);
         return { stdout: args[0] === "--version" ? "ccusage 20.0.47" : JSON.stringify(nativeReport(f.ids)), stderr: "" };
       };
-      if (position === "changed-cumulative") await assert.rejects(collectCodexCost(f.home, f.decoder, runner));
+      if (position === "changed-cumulative" || position === "null-cache-write") await assert.rejects(collectCodexCost(f.home, f.decoder, runner));
       else assert.equal((await collectCodexCost(f.home, f.decoder, runner)).totalTokens, 1100);
     });
   }
@@ -300,4 +301,26 @@ test("returns fixed accounting diagnostics without copying tool error text", () 
   assert.equal(codexCostErrorCode(new Error("token=private-value"), signal), "CCUSAGE_UNAVAILABLE");
   assert.equal(codexCostErrorCode(new Error("toString"), signal), "CCUSAGE_UNAVAILABLE");
   assert.equal(codexCostErrorCode(new Error("token=private-value"), AbortSignal.abort()), "CCUSAGE_TIMEOUT");
+});
+
+test("classifies actual unpriced reports and Python tier failures", async (t) => {
+  const signal = new AbortController().signal;
+  const value = report();Object.assign(value.totals, { unpricedModels: ["unknown-model"] });
+  assert.throws(() => decodeCodexCostReport(value, ["root", "child"]), (error) => {
+    assert.equal(codexCostErrorCode(error, signal), "CCUSAGE_MODEL_UNPRICED");return true;
+  });
+  const f = await fixture(t);
+  await writeFile(join(f.home, "config.toml"), 'service_tier = "unknown-tier"\n');
+  let priced = false;
+  const runner: CommandRunner = async (file, args, options = {}) => {
+    if (file === "python3") return processDependencies().runCommand(file, args, options);
+    priced = true;throw new Error("Unexpected price request");
+  };
+  await assert.rejects(collectCodexCost(f.home, f.decoder, runner), (error) => {
+    assert.equal(codexCostErrorCode(error, signal), "CCUSAGE_CONFIG_INVALID");return true;
+  });
+  assert.equal(priced, false);
+  await assert.rejects(collectCodexCost(f.home, f.decoder, async () => { throw Object.assign(new Error("private"), { code: "EIO" }); }), (error) => {
+    assert.equal(codexCostErrorCode(error, signal), "CCUSAGE_IO_FAILED");return true;
+  });
 });
