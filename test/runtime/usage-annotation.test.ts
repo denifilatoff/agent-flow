@@ -17,6 +17,7 @@ test("renders known totals, estimates, zero, native and cost-only usage", () => 
   assert.equal(usageLine({ totalTokens: 0 }), "Usage: 0 tokens");
   assert.equal(usageLine({ costUsd: 0, costSource: "harness" }), "Usage: $0.00 harness estimate");
   assert.equal(usageLine({ inputTokens: 3 }), null);
+  assert.equal(usageLine({ costUsd: 0.002981, costSource: "estimated" }), "Usage: <$0.01 estimated");
 });
 
 test("reports unavailable cost without losing the observed token total", () => {

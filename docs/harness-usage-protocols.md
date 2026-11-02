@@ -31,12 +31,15 @@ After a successful Codex execution, the controller runs `ccusage codex session -
 calculator home. Authentication files and provider credentials are excluded; only the root `service_tier` setting is
 preserved. The snapshot is removed after calculation. Missing descendants, unfinished sessions, warnings, fallback or
 unpriced models, unsupported tool versions, and inconsistent reports leave the amount unavailable without rerunning
-the model. Observed partial counters remain available when calculation fails.
+the model. Observed categories remain available when calculation fails, without claiming a complete attempt total.
+The deadline starts before any accounting log read and also applies to fallback collection.
 
 The runtime image pins ccusage `20.0.47` in `docker/tools/package-lock.json`. Prices are refreshed through ccusage's
 online catalog; the controller has no Codex price table. The validated report supplies whole-attempt tokens, cache
 accounting, actual models, and the API-equivalent USD estimate. Receipts retain `costCalculator`; failures retain the
-safe `CCUSAGE_UNAVAILABLE` code and prepared comments display `cost unavailable`.
+safe `CCUSAGE_UNAVAILABLE` code and prepared comments display `cost unavailable`. Positive estimates below one cent
+display `<$0.01`; receipts retain the full amount. The image's Python 3.11 TOML parser preserves equivalent quoted
+service-tier keys without copying other Codex settings.
 
 `ccusage-codex.json` records ccusage `20.0.47` output for the public delegation fixture. It was captured on
 2026-11-02 with online pricing and no model requests. Its prices are a frozen test response, not a maintained rate

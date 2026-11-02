@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import { collectCodexCost, decodeCodexCostReport } from "../../src/harness/ccusage.ts";
-import type { CommandRunner } from "../../src/harness/process.ts";
-import { CodexUsage } from "../../src/harness/usage.ts";
+import { processDependencies, type CommandRunner } from "../../src/harness/process.ts";
+import { CodexUsage, collectCodexUsage } from "../../src/harness/usage.ts";
 
 function report(ids = ["root", "child"]) {
   const counts = { inputTokens: 90, cacheReadTokens: 10, cacheCreationTokens: 0, outputTokens: 20,
@@ -34,6 +34,9 @@ test("rejects missing, duplicate, unpriced, fallback, and inconsistent ccusage r
     (value: ReturnType<typeof report>) => { value.sessions[0]!.totalTokens++; },
     (value: ReturnType<typeof report>) => { value.sessions[0]!.models["gpt-6.1-sol"]!.inputTokens--; },
     (value: ReturnType<typeof report>) => { value.sessions[0]!.costUSD = NaN; },
+    (value: ReturnType<typeof report>) => { value.totals.reasoningOutputTokens = 0; },
+    (value: ReturnType<typeof report>) => { delete (value.sessions[0]!.models["gpt-6.1-sol"] as { isFallback?: boolean }).isFallback; },
+    (value: ReturnType<typeof report>) => { value.sessions.forEach((session) => { session.costUSD = 0; }); value.totals.costUSD = 0; },
   ];
   for (const change of changes) {
     const value = report();
@@ -71,6 +74,7 @@ test("prices only completed selected logs in a credential-free snapshot and clea
   const f = await fixture(t);
   let snapshot = "";
   const runner: CommandRunner = async (file, args, options = {}) => {
+    if (file === "python3") return processDependencies().runCommand(file, args, options);
     assert.equal(file, "ccusage");
     assert.ok(options.signal);
     if (args[0] === "--version") return { stdout: "ccusage 20.0.47\n", stderr: "" };
@@ -92,7 +96,8 @@ test("prices only completed selected logs in a credential-free snapshot and clea
 });
 
 test("does not price incomplete descendants, unsupported tools, warnings, or linked files", async (t) => {
-  for (const problem of ["incomplete", "version", "warning", "symlink"] as const) {
+  for (const problem of ["incomplete", "version", "warning", "symlink", "null-counters", "cache-overflow",
+    "missing-spawn-result", "invalid-spawn-result", "invalid-stdout", "missing-child"] as const) {
     await t.test(problem, async (context) => {
       const f = await fixture(context);
       if (problem === "incomplete") {
@@ -101,10 +106,56 @@ test("does not price incomplete descendants, unsupported tools, warnings, or lin
         await writeFile(path, lines.filter((line) => line.payload?.type !== "task_complete").map(JSON.stringify).join("\n"));
       }
       if (problem === "symlink") await symlink(join(f.home, "auth.json"), join(f.home, "sessions", "linked.jsonl"));
-      const runner: CommandRunner = async (_file, args) => args[0] === "--version"
-        ? { stdout: problem === "version" ? "ccusage 21.0.0" : "ccusage 20.0.47", stderr: "" }
-        : { stdout: JSON.stringify(report(f.ids)), stderr: problem === "warning" ? "Pricing fallback used" : "" };
+      if (["null-counters", "cache-overflow", "missing-spawn-result", "invalid-spawn-result"].includes(problem)) {
+        const path = join(f.home, "sessions", `${f.ids[0]}.jsonl`);
+        const lines = (await readFile(path, "utf8")).trim().split("\n").map(JSON.parse);
+        if (problem === "null-counters") {
+          const event = lines.findLast((line) => line.payload?.type === "token_count");
+          event.payload.info.total_token_usage = null;
+          event.payload.info.last_token_usage = null;
+        } else if (problem === "cache-overflow") {
+          const event = lines.findLast((line) => line.payload?.type === "token_count");
+          event.payload.info.last_token_usage.cached_input_tokens = 1000;
+        } else {
+          lines.splice(-1, 0, { type: "response_item", payload: { type: "function_call", name: "spawn_agent", call_id: "unknown-child" } });
+          if (problem === "invalid-spawn-result") lines.splice(-1, 0, { type: "response_item",
+            payload: { type: "function_call_output", call_id: "unknown-child", output: "not a confirmed result" } });
+        }
+        await writeFile(path, lines.map(JSON.stringify).join("\n") + "\n");
+      }
+      if (problem === "invalid-stdout") f.decoder.write(Buffer.from("not JSON\n"));
+      if (problem === "missing-child") f.decoder.spawned.add("missing-child");
+      const runner: CommandRunner = async (file, args, options = {}) => {
+        if (file === "python3") return processDependencies().runCommand(file, args, options);
+        return args[0] === "--version"
+          ? { stdout: problem === "version" ? "ccusage 21.0.0" : "ccusage 20.0.47", stderr: "" }
+          : { stdout: JSON.stringify(report(f.ids)), stderr: problem === "warning" ? "Pricing fallback used" : "" };
+      };
       await assert.rejects(collectCodexCost(f.home, f.decoder, runner));
     });
   }
+});
+
+test("preserves quoted TOML tier keys in calculator snapshots", async (t) => {
+  for (const key of ['"service_tier"', "'service_tier'", '"service_\\u0074ier"']) {
+    const f = await fixture(t);
+    await writeFile(join(f.home, "config.toml"), `${key} = "fast"\n`);
+    const runner: CommandRunner = async (file, args, options = {}) => {
+      if (file === "python3") return processDependencies().runCommand(file, args, options);
+      if (args[0] === "--version") return { stdout: "ccusage 20.0.47", stderr: "" };
+      assert.equal(await readFile(join(options.env!.CODEX_HOME!, "config.toml"), "utf8"), 'service_tier = "fast"\n');
+      return { stdout: JSON.stringify(report(f.ids)), stderr: "" };
+    };
+    await collectCodexCost(f.home, f.decoder, runner);
+  }
+});
+
+test("applies one expired accounting deadline to pricing and fallback log reads", async (t) => {
+  const f = await fixture(t);
+  const signal = AbortSignal.abort();
+  let commands = 0;
+  const runner: CommandRunner = async () => { commands++; return { stdout: "", stderr: "" }; };
+  await assert.rejects(collectCodexCost(f.home, f.decoder, runner, signal), { name: "AbortError" });
+  await assert.rejects(collectCodexUsage(f.home, f.decoder, signal), { name: "AbortError" });
+  assert.equal(commands, 0);
 });

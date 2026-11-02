@@ -39,7 +39,7 @@ test("GitHub activation reaches done through both human gates", async (t) => {
   assert.equal(receipts.filter((receipt) => receipt.usage?.costCalculator === "ccusage 20.0.47").length, 3);
   const annotated = await run.latestAgentComment();
   assert.equal(annotated?.body.match(/Usage:/g)?.length, 1);
-  assert.match(annotated!.body, /\$\d+\.\d{2} estimated/);
+  assert.match(annotated!.body, /<\$0\.01 estimated/);
   assert.equal(annotated!.createdAt, annotated!.updatedAt);
   assert.deepEqual(receipts.map((receipt) => ({
     outcome: receipt.outcome,

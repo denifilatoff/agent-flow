@@ -97,10 +97,15 @@ export function createCodexAdapter(
       const observer = new CodexUsage();
       async function accounting(withCost: boolean) {
         if (!home) return undefined;
-        const usage = await collectCodexUsage(home, observer).catch(() => undefined);
-        if (!withCost || !observer.rootId) return usage;
-        try { return await collectCodexCost(home, observer, dependencies.runCommand); }
-        catch { return { ...usage, costError: "CCUSAGE_UNAVAILABLE" }; }
+        const signal = AbortSignal.timeout(30_000);
+        if (withCost) {
+          try { return await collectCodexCost(home, observer, dependencies.runCommand, signal); }
+          catch { /* Retain observed categories without claiming complete accounting. */ }
+        }
+        const usage = await collectCodexUsage(home, observer, signal).catch(() => undefined);
+        if (!withCost) return usage;
+        const { totalTokens: _incompleteTotal, ...observed } = usage ?? {};
+        return { ...observed, costError: "CCUSAGE_UNAVAILABLE" };
       }
       try {
         if (!home) throw new HarnessPreflightError("codex");

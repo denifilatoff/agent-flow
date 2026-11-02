@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { mkdir, mkdtemp, open, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { AttemptUsage } from "../config/types.ts";
@@ -49,29 +49,45 @@ export function decodeCodexCostReport(source: unknown, expected: readonly string
   const models = new Set<string>();
   const sums = Object.fromEntries(fields.map((field) => [field, 0])) as Record<typeof fields[number], number>;
   let cost = 0;
+  let reasoning = 0;
+  let reasoningComplete = true;
   for (const session of report.sessions) {
     if (!session || !expected.includes(session.sessionId) || seen.has(session.sessionId)
-      || !validCounts(session) || !validAmount(session.costUSD) || !session.models
+      || !validCounts(session) || !validAmount(session.costUSD) || (session.totalTokens > 0 && session.costUSD === 0) || !session.models
       || typeof session.models !== "object" || Array.isArray(session.models) || !Object.keys(session.models).length) {
       throw new Error("ccusage session coverage or accounting is invalid");
     }
     seen.add(session.sessionId);
     const modelSums = Object.fromEntries(fields.map((field) => [field, 0])) as typeof sums;
+    let modelReasoning = 0;
+    let modelReasoningComplete = true;
     for (const [model, usage] of Object.entries(session.models)) {
-      if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/.test(model) || !validCounts(usage)) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/.test(model) || !validCounts(usage)
+        || (usage.totalTokens > 0 && usage.isFallback !== false)) {
         throw new Error("ccusage model pricing is unavailable");
       }
       models.add(model);
       for (const field of fields) modelSums[field] += usage[field];
+      if (usage.reasoningOutputTokens === undefined) modelReasoningComplete = false;
+      else modelReasoning += usage.reasoningOutputTokens;
     }
     if (fields.some((field) => modelSums[field] !== session[field])) {
       throw new Error("ccusage model totals do not match the session");
+    }
+    if (session.reasoningOutputTokens === undefined) reasoningComplete = false;
+    else {
+      if (!modelReasoningComplete || modelReasoning !== session.reasoningOutputTokens) {
+        throw new Error("ccusage reasoning totals do not match the session");
+      }
+      reasoning += session.reasoningOutputTokens;
     }
     for (const field of fields) sums[field] += session[field];
     cost += session.costUSD;
   }
   if (fields.some((field) => sums[field] !== report.totals![field])
-    || !validAmount(cost) || Math.abs(cost - report.totals.costUSD) > 1e-8) {
+    || !validAmount(cost) || Math.abs(cost - report.totals.costUSD) > 1e-8
+    || (report.totals.reasoningOutputTokens !== undefined
+      && (!reasoningComplete || reasoning !== report.totals.reasoningOutputTokens))) {
     throw new Error("ccusage totals do not match the selected sessions");
   }
   return {
@@ -97,7 +113,7 @@ interface Log {
 }
 
 async function selectedLogs(home: string, decoder: CodexUsage, signal: AbortSignal): Promise<Log[]> {
-  if (!decoder.rootId || !decoder.completed) throw new Error("Codex attempt did not finish");
+  if (!decoder.rootId || !decoder.completed || !decoder.valid) throw new Error("Codex attempt did not finish reliably");
   const logs = new Map<string, Log>();
   let files = 0;
   let bytes = 0;
@@ -125,16 +141,27 @@ async function selectedLogs(home: string, decoder: CodexUsage, signal: AbortSign
           return;
         }
         if (!log) return;
+        if (record.type === "event_msg" && p.type === "token_count" && p.info != null) {
+          const values = [p.info.total_token_usage, p.info.last_token_usage];
+          if (!values.some((value) => value != null) || values.some((value) => value != null && !validNativeCounters(value))) {
+            throw new Error("Codex usage event contains invalid counters");
+          }
+        }
         if (record.type === "event_msg" && p.type === "task_started") { turn = p.turn_id; log.complete = false; }
         if (record.type === "event_msg" && p.type === "task_complete" && turn && p.turn_id === turn) log.complete = true;
         if (record.type !== "response_item") return;
-        if (p.type === "function_call" && (p.name === "spawn_agent" || p.name?.endsWith(".spawn_agent"))) calls.add(p.call_id);
-        if (p.type === "function_call_output" && calls.has(p.call_id) && typeof p.output === "string") {
+        if (p.type === "function_call" && (p.name === "spawn_agent" || p.name?.endsWith(".spawn_agent"))) {
+          if (typeof p.call_id !== "string" || !p.call_id || calls.has(p.call_id)) throw new Error("Codex spawn identity is invalid");
+          calls.add(p.call_id);
+        }
+        if (p.type === "function_call_output" && calls.has(p.call_id)) {
           let result;
-          try { result = JSON.parse(p.output); } catch { return; }
+          if (typeof p.output !== "string") throw new Error("Codex spawn result is invalid");
+          try { result = JSON.parse(p.output); } catch { throw new Error("Codex spawn result is unverified"); }
           if (typeof result.agent_id === "string") log.spawned.add(result.agent_id);
           else if (typeof result.task_name === "string") log.spawned.add(result.task_name);
           else if (!result.error) throw new Error("Spawned Codex session identity is missing");
+          calls.delete(p.call_id);
         }
       }, 16 << 20);
       try {
@@ -146,7 +173,7 @@ async function selectedLogs(home: string, decoder: CodexUsage, signal: AbortSign
           lines.write(chunk as Buffer);
         }
         lines.end();
-        if (lines.invalid || !log || logs.has(log.id)) throw new Error("Codex accounting log is invalid");
+        if (lines.invalid || calls.size || !log || logs.has(log.id)) throw new Error("Codex accounting log is invalid");
         logs.set(log.id, log);
       } finally { await file.close(); }
     }
@@ -173,8 +200,18 @@ async function selectedLogs(home: string, decoder: CodexUsage, signal: AbortSign
   return complete;
 }
 
-export async function collectCodexCost(home: string, decoder: CodexUsage, run: CommandRunner): Promise<AttemptUsage> {
-  const signal = AbortSignal.timeout(30_000);
+function validNativeCounters(value: Record<string, unknown>): boolean {
+  return !!value && ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]
+    .every((key) => count(value[key]))
+    && Number(value.cached_input_tokens) <= Number(value.input_tokens)
+    && Number(value.reasoning_output_tokens) <= Number(value.output_tokens)
+    && value.total_tokens === Number(value.input_tokens) + Number(value.output_tokens)
+    && (value.cache_write_input_tokens === undefined || (count(value.cache_write_input_tokens)
+      && value.cache_write_input_tokens <= Number(value.input_tokens)));
+}
+
+export async function collectCodexCost(home: string, decoder: CodexUsage, run: CommandRunner,
+  signal = AbortSignal.timeout(30_000)): Promise<AttemptUsage> {
   const logs = await selectedLogs(home, decoder, signal);
   const snapshot = await realpath(await mkdtemp(join(tmpdir(), "agent-flow-ccusage-")));
   try {
@@ -182,20 +219,26 @@ export async function collectCodexCost(home: string, decoder: CodexUsage, run: C
     const names = logs.map((log) => basename(log.path, ".jsonl"));
     if (new Set(names).size !== names.length) throw new Error("Codex session filenames conflict");
     for (const log of logs) await copyRegularFile(log.path, join(snapshot, "sessions", basename(log.path)), "Codex accounting snapshot", signal);
+    const options = { cwd: snapshot, signal,
+      env: harnessEnvironment({ CODEX_HOME: snapshot, HOME: snapshot, NO_COLOR: "1" }) };
     let config: string | undefined;
-    try { config = await readFile(await assertSafeFile(home, join(home, "config.toml"), "Codex tier settings"), { encoding: "utf8", signal }); }
+    try { config = await assertSafeFile(home, join(home, "config.toml"), "Codex tier settings"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    const top = config?.split(/^\s*\[/m)[0];
-    const tier = top?.split(/\r?\n/).find((line) => /^\s*service_tier\s*=/.test(line));
-    if (tier) {
-      const match = /^\s*service_tier\s*=\s*(["'])(standard|default|priority|fast|flex)\1\s*(?:#.*)?$/.exec(tier);
-      if (!match) throw new Error("Codex service tier is unavailable");
-      await writeFile(join(snapshot, "config.toml"), `service_tier = "${match[2]}"\n`, { mode: 0o600 });
+    if (config) {
+      const result = await run("python3", ["-I", "-c", [
+        "import json, sys, tomllib",
+        'with open(sys.argv[1], "rb") as source: value = tomllib.load(source).get("service_tier")',
+        'if value is not None and value not in ("standard", "default", "priority", "fast", "flex"): raise SystemExit("Unsupported service tier")',
+        "print(json.dumps(value))",
+      ].join("\n"), config], options);
+      const tier = JSON.parse(result.stdout);
+      if (result.stderr.trim() || (tier !== null && !["standard", "default", "priority", "fast", "flex"].includes(tier))) {
+        throw new Error("Codex service tier is unavailable");
+      }
+      if (tier !== null) await writeFile(join(snapshot, "config.toml"), `service_tier = "${tier}"\n`, { mode: 0o600 });
     }
     const path = join(snapshot, "ccusage.json");
     await writeFile(path, '{"defaults":{"offline":false}}', { mode: 0o600 });
-    const options = { cwd: snapshot, signal,
-      env: harnessEnvironment({ CODEX_HOME: snapshot, HOME: snapshot, NO_COLOR: "1" }) };
     const version = await run("ccusage", ["--version"], options);
     const match = /^ccusage 20\.(\d+)\.(\d+)$/.exec(version.stdout.trim());
     if (!match || (Number(match[1]) === 0 && Number(match[2]) < 47) || version.stderr.trim()) {
