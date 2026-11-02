@@ -6,7 +6,8 @@ for (const provider of ["github", "gitlab"] as const) {
   for (const policy of ["conservative", "autonomous"] as const) {
     for (const scenario of ["feature", "bugfix"] as const) {
       test(`${provider} ${policy} ${scenario} documents each implementation and rework on one request`, async (t) => {
-        const run = await startFixture(provider, { policy, scenario, documentationEdits: scenario === "bugfix", reviewRework: true });
+        const run = await startFixture(provider, { policy, scenario, documentationEdits: scenario === "bugfix", reviewRework: true,
+          preparedComments: policy === "autonomous", usage: true });
         t.after(() => run.close());
         const prefix = scenario === "bugfix" ? "bug-" : "";
         if (policy === "conservative") {
@@ -21,6 +22,7 @@ for (const provider of ["github", "gitlab"] as const) {
         const receipts = await run.receipts();
         const documentation = receipts.filter((r) => r.artifacts.some((a) => a.kind === "comment" && a.artifactKind === "documentation"));
         assert.equal(documentation.length, 2);
+        assert.ok(documentation.every((receipt) => receipt.usage?.totalTokens));
         const changes = documentation.flatMap((r) => r.artifacts.filter((a) => a.kind === "change-request"));
         assert.equal(new Set(changes.map((a) => a.number)).size, 1);
         assert.notEqual(changes[0]!.headSha, changes[1]!.headSha);

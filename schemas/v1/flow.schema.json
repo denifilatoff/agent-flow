@@ -24,6 +24,7 @@
       "required": ["initial", "states"],
       "properties": {
         "initial": { "$ref": "#/$defs/id" },
+        "requiredChecks": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
         "activationRoutes": {
           "type": "object",
           "minProperties": 1,
@@ -115,6 +116,7 @@
     "event": {
       "type": "string",
       "enum": [
+        "ci-failed",
         "agent-succeeded",
         "agent-needs-human",
         "attempts-exhausted",

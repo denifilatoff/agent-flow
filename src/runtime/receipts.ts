@@ -1,3 +1,5 @@
+import { assertCarriedChange } from "./migration-recovery.ts";
+import type { MigrationReceipt } from "../provider/migration-receipt.ts";
 import { open } from "node:fs/promises";
 
 import { validateDocument, type DocumentValidator } from "../config/schema-validator.ts";
@@ -30,12 +32,14 @@ const MAX_ERROR_MESSAGE = 240;
 const AUTHORIZED_PERMISSIONS = new Set(["write", "maintain", "admin"]);
 
 export interface DecisionExpectation {
+  migration?: MigrationReceipt;
   flow: FlowDefinition;
   stateId: string;
   mode: AttemptMode;
   resultContract: ResultContract;
   configRevision: string;
   activationLabel?: string;
+  activatedAt?: string;
   controllerId: string;
   publicationKeys: readonly string[];
   reusableCommentIds?: readonly string[];
@@ -182,6 +186,10 @@ export async function readDecisionAndBuildReceipt(
       verifiedComments.push(published);
       artifacts.push({ ...commentArtifact(published, "documentation", expected), inputHead: metadata.inputHead }, changeArtifact(verifiedChange));
     } else if (expected.resultContract === "development") {
+      if(expected.migration) {
+        const proof=await discoverDecisionComment(initialTicket,"diagnostic",expected,provider);
+        verifiedComments.push(proof);artifacts.push(commentArtifact(proof,"diagnostic",expected));
+      }
       verifiedChange = await readDecisionChange(initialTicket, expected, provider);
       artifacts.push(changeArtifact(verifiedChange));
     } else {
@@ -246,7 +254,9 @@ async function discoverDecisionComment(
   provider: ProviderAdapter,
 ): Promise<ProviderComment> {
   const expectedMarker = decisionMarker(expected);
-  const candidates = ticket.comments.filter((comment) => !isBaseline(expected, "comment", comment.id));
+  const candidates = ticket.comments.filter((comment) => !isBaseline(expected, "comment", comment.id)
+    && !expected.migration?.baseline.comments.includes(comment.id)
+    && !comment.body.includes("<!-- agent-flow-migration:"));
   const reusable = new Set(expected.reusableCommentIds ?? []);
   const marked = candidates.filter((comment) => hasExpectedPublication(comment.body, expected)
     && (artifactKind !== "documentation" || parseDocumentation(comment.body) !== null)
@@ -292,10 +302,11 @@ async function readDecisionChange(
     decisionTrust("linked change request identity does not match the pinned change request");
   }
   if (linked.state !== "open") decisionTrust("linked change request state is not open");
-  if (!hasExpectedPublication(linked.body, expected)) {
+  if (!hasExpectedPublication(linked.body, expected) && !expected.migration) {
     evidenceUnavailable("linked change request publication marker is unavailable");
   }
-  if (expected.resultContract !== "documentation" && isBaseline(expected, "change-request", String(linked.number))
+  if (expected.migration) assertCarriedChange(linked, expected.migration);
+  if (!expected.migration && expected.resultContract !== "documentation" && isBaseline(expected, "change-request", String(linked.number))
     && (!expected.pinnedChangeRequest || linked.headSha === expected.pinnedChangeRequest.headSha)) {
     evidenceUnavailable("linked change request was not updated for the current iteration");
   }
@@ -306,9 +317,10 @@ async function readDecisionChange(
   );
   assertChangeTicketIdentity(published, expected.ticket);
   assertSameDecisionChange(linked, published);
-  if (!hasExpectedPublication(published.body, expected)) {
+  if (!hasExpectedPublication(published.body, expected) && !expected.migration) {
     decisionTrust("linked change request publication marker changed during readback");
   }
+  if(expected.migration) assertCarriedChange(published,expected.migration);
   await assertAuthorizedPublication(provider, expected, published.actor);
   return published;
 }

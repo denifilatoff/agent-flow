@@ -83,6 +83,12 @@ test("keeps pull requests unprivileged and publishes verified multi-arch images"
   }
 });
 
+test("verification fetches historical configuration commits for migration validation", async () => {
+  const workflow = parse(await readFile(".github/workflows/build.yml", "utf8")) as BuildWorkflow;
+
+  assert.equal(stepUsing(workflow.jobs.verify, "actions/checkout").with?.["fetch-depth"], 0);
+});
+
 test("rejects runtime instructions placed only in a build stage", () => {
   const digest = "a".repeat(64);
   const dockerfile = `FROM node@sha256:${digest} AS build

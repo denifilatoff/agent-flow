@@ -53,6 +53,7 @@ export function createControlWriter(
         throw new Error("stale local execution write");
       }
       const value: LocalExecution = {
+        ...stored?.value.migrationId ? {migrationId:stored.value.migrationId} : {},
         controllerId,
         observedAt: now(),
         owner: stored?.value.owner ?? null,
@@ -84,8 +85,10 @@ export function createControlWriter(
             : "ready";
       const publicationKeys = [...(baseline ?? evidence.publications.map(({ key }) => key))].sort();
       const control = replacement === undefined ? stored?.value.control ?? null : replacement;
-      const comparable = { owner, disposition, reason: decision.reason, publicationKeys, control };
+      const migrationId=evidence.migration?.id ?? stored?.value.migrationId;
+      const comparable = { migrationId, owner, disposition, reason: decision.reason, publicationKeys, control };
       if (stored && isDeepStrictEqual(comparable, {
+        migrationId:stored.value.migrationId,
         owner: stored.value.owner,
         disposition: stored.value.disposition,
         reason: stored.value.reason,
@@ -98,6 +101,7 @@ export function createControlWriter(
         ? { ...control, sequence: revision }
         : control;
       return store.save(scope, ref, stored?.revision ?? null, {
+        ...migrationId ? {migrationId} : {},
         controllerId,
         observedAt: now(),
         owner,

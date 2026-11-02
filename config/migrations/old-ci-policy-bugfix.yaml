@@ -1,0 +1,12 @@
+apiVersion: agent-flow/migration-v1
+kind: WorkflowMigration
+id: old-ci-policy-bugfix
+source: 896c0003dd5c42350ee0628a4dc30b680409fefa
+sourceFlow: development-autonomous
+targetFlow: development-autonomous
+activationLabel: bugfix
+states:
+  bug-awaiting-merge:
+    target: bug-development
+    replay: [bug-reproduction, bug-development]
+    retain: []

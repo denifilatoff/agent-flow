@@ -431,3 +431,39 @@ export async function loadPinnedConfig(
   const root = await materializeRevision(repository, revision, dataDirectory);
   return loadConfigBundle(root, stackPath, revision);
 }
+
+/** Request-time resolution deliberately does not use startup's tolerant refresh path. */
+export async function resolveMigrationTarget(
+ prepared:PreparedConfigurationRepository, selector:string, authentication?:GitAuthentication,
+):Promise<string> {
+ if(selector!=='latest' && !SHA.test(selector) && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(selector) || selector==='HEAD' || selector.includes('..') || selector.startsWith('refs/') || selector.split('/').some(part=>!part || part==='.'))) {
+  throw new Error('Invalid migration selector: use latest, a tag, or a full SHA');
+ }
+ const configured=configurationSource(prepared.source);
+ let ref:string;
+ if(configured.kind==='remote') {
+  const auth=authentication??configurationGitAuthentication(prepared.source);
+  const command=async(args:string[])=> (await exec('git',[...auth.arguments,'--no-replace-objects','-C',prepared.repository,...args],{encoding:'utf8',maxBuffer:16*1024*1024,env:{...process.env,...auth.environment}})).stdout;
+  try {
+   if(SHA.test(selector)) ref=selector.toLowerCase();
+   else {
+    const requested=selector==='latest'?'HEAD':'refs/tags/'+selector;
+    const advertised=await command(['ls-remote','--symref','origin',requested,...(selector==='latest'?[]:[requested+'^{}'])]);
+    const lines=advertised.split('\n').map(line=>line.split('\t'));
+    const resolved=lines.find(([sha,name])=>SHA.test(sha!) && name===requested+'^{}')
+      ?? lines.find(([sha,name])=>SHA.test(sha!) && name===requested);
+    if(!resolved) throw new Error('Migration selector is unavailable');
+    ref=resolved[0]!.toLowerCase();
+   }
+   // Fetch and verify this immutable object; other tickets may fetch into the same mirror.
+   await command(['fetch','--no-write-fetch-head','origin',ref]);
+  } catch(error) { throw new Error('Migration configuration refresh or selector resolution failed',{cause:error}); }
+ } else if(selector==='latest') {
+  const symbolic=(await git(prepared.repository,['symbolic-ref','HEAD'])).toString('utf8').trim();
+  if(!symbolic.startsWith('refs/heads/')) throw new Error('Local default branch is unavailable');
+  ref=symbolic;
+ } else ref=SHA.test(selector)?selector:'refs/tags/'+selector;
+ const sha=(await git(prepared.repository,['rev-parse','--verify',ref+'^{commit}'])).toString('utf8').trim().toLowerCase();
+ if(!SHA.test(sha)) throw new Error('Migration target did not resolve to a full commit SHA');
+ return sha;
+}

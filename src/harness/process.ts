@@ -21,7 +21,8 @@ import { dirname, join, parse, relative, resolve, sep } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { finished, pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
-import type { HarnessTarget } from "../config/types.ts";
+import type { AttemptUsage, HarnessTarget } from "../config/types.ts";
+import type { UsageObserver } from "./usage.ts";
 import { isProviderTokenEnvironment } from "../config/provider-credentials.ts";
 import { assertSafeFile, createSafeDirectory } from "../runtime/filesystem.ts";
 import type { AttemptSession } from "../runtime/sessions.ts";
@@ -89,6 +90,7 @@ export interface ProcessDependencies {
 }
 
 export interface ProcessSpec {
+  observer?: UsageObserver;
   file: string;
   args: string[];
   cwd: string;
@@ -110,6 +112,7 @@ export class HarnessPreflightError extends Error {
 }
 
 export class HarnessProcessError extends Error {
+  usage?: AttemptUsage;
   readonly code = "HARNESS_PROCESS_FAILED";
   readonly retryable: boolean;
 
@@ -118,6 +121,11 @@ export class HarnessProcessError extends Error {
     this.name = "HarnessProcessError";
     this.retryable = retryable;
   }
+}
+
+export class HarnessTerminationError extends HarnessProcessError {
+  readonly termination:Promise<void>;
+  constructor(target:HarnessTarget, termination:Promise<void>) { super(target,false);this.termination=termination; }
 }
 
 const execFile = promisify(execFileCallback);
@@ -355,6 +363,10 @@ export async function runHarnessProcess(
     let timedOut = false;
     let terminating = false;
     let exited = false;
+    let confirmTermination!:()=>void;
+    const termination=new Promise<void>(resolve=>{confirmTermination=resolve;});
+    child.once("exit",()=>confirmTermination());
+    child.once("close",()=>confirmTermination());
     let failure: HarnessProcessError | undefined;
     let graceTimer: TimerHandle | undefined;
     let drainTimer: TimerHandle | undefined;
@@ -370,6 +382,7 @@ export async function runHarnessProcess(
       child.removeListener("exit", exit);
       child.removeListener("close", close);
       child.stdout.unpipe(log);
+      child.stdout.removeListener("data", observe);
       child.stderr.unpipe(log);
     };
 
@@ -388,10 +401,15 @@ export async function runHarnessProcess(
       stopLifecycle();
       log.end();
       await logFinished;
-      if (logFailed) failure = new HarnessProcessError(target, false);
+      if (logFailed && !(failure instanceof HarnessTerminationError)) {
+        failure = new HarnessProcessError(target, false);
+      }
       guardLateErrors();
+      let usage: AttemptUsage | undefined;
+      try { spec.observer?.end(); usage = spec.observer?.usage(); } catch { /* Observational only. */ }
+      if (failure && usage) failure.usage = usage;
       if (failure) rejectResult(failure);
-      else resolveResult({ exitCode, signal, timedOut });
+      else resolveResult({ exitCode, signal, timedOut, ...(usage ? { usage } : {}) });
     };
 
     function terminate(forTimeout: boolean): void {
@@ -414,7 +432,7 @@ export async function runHarnessProcess(
         return;
       }
       terminalTimer = dependencies.setTimeout(() => {
-        failure ??= new HarnessProcessError(target, false);
+        failure = new HarnessTerminationError(target, termination);
         void complete(child.exitCode, child.signalCode);
       }, SIGNAL_FAILURE_SETTLE_MS);
       signalChild("SIGKILL");
@@ -447,6 +465,7 @@ export async function runHarnessProcess(
     }
 
     function processError(error: Error): void {
+      if (failure instanceof HarnessTerminationError) return;
       failure = new HarnessProcessError(target, processStarted ? false : !isMissingBinary(error));
       if (!processStarted) {
         void complete(null, null);
@@ -460,6 +479,10 @@ export async function runHarnessProcess(
       if (!exited) terminate(false);
     }
 
+    function observe(chunk: Buffer): void {
+      try { spec.observer?.write(chunk); } catch { /* Observational only. */ }
+    }
+    child.stdout.on("data", observe);
     child.once("exit", exit);
     child.once("close", close);
     child.on("error", processError);

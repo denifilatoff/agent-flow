@@ -26,9 +26,28 @@
       }
     },
     "humanGate": { "$ref": "#/$defs/humanGate" },
-    "error": { "$ref": "#/$defs/error" }
+    "error": { "$ref": "#/$defs/error" },
+    "usage": { "$ref": "#/$defs/usage" }
   },
   "$defs": {
+    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "dependentRequired": { "costUsd": ["costSource"], "costSource": ["costUsd"] },
+      "properties": {
+        "totalTokens": { "$ref": "#/$defs/count" },
+        "inputTokens": { "$ref": "#/$defs/count" },
+        "outputTokens": { "$ref": "#/$defs/count" },
+        "cachedInputTokens": { "$ref": "#/$defs/count" },
+        "cacheCreationInputTokens": { "$ref": "#/$defs/count" },
+        "cacheReadInputTokens": { "$ref": "#/$defs/count" },
+        "reasoningOutputTokens": { "$ref": "#/$defs/count" },
+        "model": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "costUsd": { "type": "number", "minimum": 0 },
+        "costSource": { "enum": ["harness", "estimated"] }
+      }
+    },
     "uuid": {
       "type": "string",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"

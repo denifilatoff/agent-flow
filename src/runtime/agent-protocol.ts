@@ -4,7 +4,7 @@ import type {
   ResultContract,
 } from "../config/types.js";
 import type { FlowEventType } from "../flow/types.js";
-import type { NormalizedChangeRequest, ProviderComment } from "../provider/types.js";
+import type { NormalizedChangeRequest, ProviderComment, TicketRef } from "../provider/types.js";
 import { renderDocumentation } from "../provider/documentation.ts";
 import { renderPublication } from "../provider/publication.ts";
 
@@ -13,6 +13,7 @@ type EventSource = "agent" | "provider" | "controller";
 export type AttemptMode = "stage" | "human-input";
 
 export interface RuntimePromptInput {
+  migration?: import("../provider/migration-receipt.ts").MigrationReceipt;
   flow: FlowDefinition;
   stateId: string;
   mode: AttemptMode;
@@ -21,9 +22,13 @@ export interface RuntimePromptInput {
   controllerId: string;
   contextPath: string;
   decisionPath: string;
+  ticket: TicketRef;
   changeRequest: NormalizedChangeRequest | null;
   sourceComment: ProviderComment | null;
+  excludedCommentIds?: readonly string[];
   excludedReviewIds?: readonly string[];
+  preparedCommentPath?: string;
+  previousFailureCode?: string;
 }
 
 export const EVENT_SOURCES: Readonly<Record<FlowEventType, EventSource>> = Object.freeze({
@@ -42,6 +47,7 @@ export const EVENT_SOURCES: Readonly<Record<FlowEventType, EventSource>> = Objec
   "change-request-updated": "provider",
   "change-request-merged": "provider",
   "change-request-closed": "provider",
+  "ci-failed": "provider",
   "attempts-exhausted": "controller",
   "authorized-comment": "controller",
 });
@@ -76,7 +82,32 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
   const lines = [
     `Read the attempt context from ${input.contextPath}.`,
     `Write exactly one allowed JSON object to ${input.decisionPath}, with no other fields.`,
+    `Result and question comments belong on ticket ${input.ticket.provider} ${input.ticket.repository}#${input.ticket.number} `
+      + "from context.ticket. A PR/MR comment does not satisfy this requirement. "
+      + "Change-request descriptions and provider-native reviews belong on the selected PR/MR as required below.",
   ];
+  if (input.preparedCommentPath) {
+    lines.push(`Prepare the final stage comment text locally at ${input.preparedCommentPath}. `
+      + "Do not publish stage comments. The controller publishes the prepared text, publication marker, and usage together "
+      + "after the agent and its native subagents finish. Write only substantive text, without publication or usage markers. "
+      + "Keep the decision JSON unchanged. When reusing a suitable existing result, leave this file absent. "
+      + `The controller adds ${marker(input)}. `
+      + "Change-request creation/updates and provider-native reviews still use the existing publication protocol.");
+  }
+  const excludedCommentIds = [...new Set([
+    ...input.excludedCommentIds ?? [], ...input.migration?.baseline.comments ?? [],
+  ])];
+  if (excludedCommentIds.length) {
+    lines.push(`Do not reuse these existing comment IDs as result or question evidence: ${excludedCommentIds.join(", ")}. `
+      + "They belong to the publication baseline. Only eligible comments outside this list can satisfy an agent publication requirement.");
+  }
+  if (input.previousFailureCode === "DECISION_EVIDENCE_UNAVAILABLE") {
+    lines.push("Previous attempt failed with DECISION_EVIDENCE_UNAVAILABLE. "
+      + "Repair the required provider publication before returning the decision. "
+      + "Check its location, marker, and excluded IDs against the evidence contract below. "
+      + "A successful test run or completion report on the PR/MR alone cannot replace a required ticket comment. "
+      + "Reuse completed implementation and checks unless a new change or unresolved failure requires more work.");
+  }
   if (input.sourceComment) {
     lines.push(`Interpret the authorized human comment ${input.sourceComment.id} from the attempt context.`);
   }
@@ -102,6 +133,15 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
       "Because the linked change request is closed, do not review its head. Publish exactly one question asking whether "
         + "to reopen the same change request or cancel the flow, then write {\"event\":\"agent-needs-human\"}.",
     );
+  }
+  if(input.migration) {
+    lines.push("This execution follows an accepted migration/replay. Historical publications remain context. The selected stage and downstream results/approvals in migration.baseline are ineligible for reuse. Revalidate and publish a fresh eligible result. Keep updating the exact existing PR and branch; never create a replacement. Preserve its original description marker. New comments/reviews use the current marker.");
+    lines.push("Migration receipts are control records, never stage results or questions.");
+  }
+  if (!input.preparedCommentPath && input.mode === "stage" && ["assessment", "plan", "diagnostic"].includes(input.resultContract)) {
+    lines.push(`Append <!-- agent-flow-result:v1 state=${input.stateId} --> on its own line to a new successful final result comment. `
+      + "This identifies its stage across human-gate revisions; keep the common publication marker unchanged. "
+      + "Do not add this result annotation to questions or progress notes, or rewrite historical results.");
   }
   if (input.mode === "stage") {
     lines.push(
@@ -132,6 +172,17 @@ export function renderRuntimePrompt(input: RuntimePromptInput): string {
 }
 
 function evidence(input: RuntimePromptInput, event: AgentEventType): string {
+  if (input.preparedCommentPath && input.migration && input.resultContract === "development"
+    && event === "agent-succeeded" && input.changeRequest) {
+    return `the existing PR ${input.changeRequest.url} to remain open with its original marker intact, plus fresh development `
+      + `completion comment text prepared at ${input.preparedCommentPath} for controller publication on the canonical issue. `
+      + "Explain the revalidated work even if no code change was needed. Never create another PR";
+  }
+  if (input.preparedCommentPath && (event === "agent-needs-human" || event === "human-question"
+    || event === "human-unclear" || event === "human-answer-unclear"
+    || (event === "agent-succeeded" && ["assessment", "plan", "diagnostic", "verification"].includes(input.resultContract)))) {
+    return `final substantive comment text prepared at ${input.preparedCommentPath}, or reuse of an existing suitable marked result`;
+  }
   if (event === "agent-needs-human"
     || event === "human-question"
     || event === "human-unclear"
@@ -165,7 +216,9 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
           + "Publish a focused marked question and return agent-needs-human";
       }
       return `the same linked open change request ${change.repository}#${change.number} and a final documentation `
-        + `report on the ticket containing exactly ${marker(input)} and a metadata line in this form: `
+        + (input.preparedCommentPath
+          ? `report prepared at ${input.preparedCommentPath} for controller publication, with a metadata line in this form: `
+          : `report on the ticket containing exactly ${marker(input)} and a metadata line in this form: `)
         + `${renderDocumentation({ change: change.number, inputHead: change.headSha, resultHead: change.headSha })}. `
         + "Keep inputHead fixed to the supplied implementation boundary; replace resultHead with the current full head "
         + "after inspecting the complete diff against the target branch, including rework. Report affected documents "
@@ -179,6 +232,10 @@ function evidence(input: RuntimePromptInput, event: AgentEventType): string {
         return `creation of one linked open change request whose description contains exactly ${marker(input)}`;
       }
       const change = input.changeRequest;
+      if(input.migration) return `the existing PR ${change.url} to remain open with its original marker intact, `
+        + `plus a fresh marked development completion comment on ticket ${input.ticket.provider} `
+        + `${input.ticket.repository}#${input.ticket.number} containing exactly ${marker(input)}. `
+        + "Explain the revalidated work even if no code change was needed. Never create another PR";
       return `the exact pinned change request ${change.provider} ${change.repository}#${change.number} to remain open `
         + `and be updated during this attempt. Its description must contain exactly ${marker(input)}. `
         + "Do not create another change request";

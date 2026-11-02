@@ -49,3 +49,31 @@ targets. Generate/compile harness output only in disposable copies, and validate
 available. Documentation can finish with a substantive no-change report and unchanged request head; no empty commit or
 second request is needed. See the [documentation report contract](prototype-contracts.md#documentation-report) for
 readback, retry, and provider-only recovery limits.
+
+
+## Attempt accounting and publication pins
+
+Existing configuration pins keep agent-owned publication. The controller can retain optional usage on their receipts,
+including unsuccessful attempts, but does not edit their published stage comments. Existing receipts without usage and
+strict pinned receipt/control schemas remain supported through the validated controller-owned telemetry projection.
+
+To enable usage in the initial stage comment, start new flows on a configuration revision whose Stack declares
+`spec.publication: controller-prepared-v1`. Keep active flows on their original pins unless explicitly migrated.
+The updated runtime prompt prepares local comment text; the controller publishes it with accounting after execution
+and verifies provider readback before advancement. Documentation reports use the same prepared publication path,
+including their documentation metadata and completed accounting. PR/MR and native review publication are unchanged.
+
+Preserve disposable session directories when restarting if pending prepared results or accounting should survive.
+Delivery reconciliation reuses completed work and does not automatically run another model. Invalid or permanently
+untrusted results retain failed accounting and follow existing failure/retry/block rules; PR/review evidence requirements
+remain unchanged. An uncertain write with
+unavailable or mismatched provider evidence stays pending for inspection; do not delete local delivery state to force
+another create. Old post-publication `usage-delivery.json` records are no longer processed. No existing comment is
+edited for accounting, and no historic receipts are backfilled. See [the contracts](prototype-contracts.md#completed-attempt-accounting-and-prepared-stage-comments).
+
+## Explicit active-workflow migration
+
+After deploying the migration-capable controller and publishing a compatible target bundle, use [the operator
+procedure](operating-workflow-migrations.md) to retain an active ticket’s existing PR while changing its pin or
+replaying a stage. This does not relax the pre-Stack restrictions above, transfer ownership, or authorize migration
+of a live ticket automatically.

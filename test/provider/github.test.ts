@@ -1107,3 +1107,23 @@ test("receipt readback retains the pinned route's linked pull request after star
   }, github, false);
   assert.equal(receipt.artifacts[0]?.kind === "change-request" && receipt.artifacts[0].number, 31);
 });
+
+test("reads exact-head CI across check pages and latest commit status contexts", async () => {
+  for (const conclusion of ["success", "failure", "cancelled", "skipped", null]) {
+    const client = new FixtureClient()
+      .add("GET", `repos/owner/repo/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100`, {
+        data: { check_runs: [{ name: "verify", head_sha: HEAD_SHA, status: conclusion === null ? "in_progress" : "completed", conclusion }] }, next: "checks-page-2",
+      }).add("GET", "checks-page-2", { data: { check_runs: [{ name: "optional", head_sha: HEAD_SHA, status: "completed", conclusion: "skipped" }] } })
+      .add("GET", `repos/owner/repo/commits/${HEAD_SHA}/statuses?per_page=100`, { data: [{ context: "legacy", state: "pending" }, { context: "legacy", state: "success" }] });
+    const result = await adapter(client).readRequiredChecks({ provider: "github", repository: REPOSITORY, number: 17 }, { provider: "github", repository: REPOSITORY, number: 31, headSha: HEAD_SHA } as any);
+    assert.equal(result.headSha, HEAD_SHA);
+    assert.deepEqual(result.checks, [{ name: "verify", status: conclusion === "success" ? "success" : conclusion === null ? "pending" : "failure" }, { name: "optional", status: "failure" }, { name: "legacy", status: "pending" }]);
+  }
+});
+
+test("rejects check evidence for a different head and propagates unreadable checks", async () => {
+  for (const reply of [{ data: { check_runs: [{ name: "verify", head_sha: "f".repeat(40) }] } }, { data: null, error: new Error("unreadable") }]) {
+    const client = new FixtureClient().add("GET", `repos/owner/repo/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100`, reply);
+    await assert.rejects(adapter(client).readRequiredChecks({ provider: "github", repository: REPOSITORY, number: 17 }, { provider: "github", repository: REPOSITORY, number: 31, headSha: HEAD_SHA } as any));
+  }
+});

@@ -125,8 +125,12 @@ The [recovery specification](recovery-from-provider-draft.md) defines restart, o
 - GitHub agents use an already authenticated `gh`; GitLab agents use an already authenticated `glab`.
 - Agents initially run under the operator's user account and have direct provider access with `write` or `maintain`
   permissions.
-- Agents publish assessment, plan, questions, pull or merge request changes, review results, and other stage outputs
-  themselves.
+- Legacy configuration pins use agent publication for stage outputs. New Stack pins may select
+  `publication: controller-prepared-v1`: agents prepare substantive stage comment text locally, then the controller
+  publishes it with the existing common marker and completed-attempt accounting in one create. Exact readback and
+  normal provider evidence validation precede acceptance. Published comments are never edited for accounting.
+  Pull or merge request changes and native reviews remain agent-published. Completed prepared delivery may retry
+  independently of model execution; uncertain writes require provider reconciliation before any further write.
 - Agent packages describe domain behavior only. They do not define flow events, state labels, publication markers,
   machine record fields, or the structured response contract.
 - Before each attempt, the controller generates a runtime protocol prompt from the pinned flow state, attempt mode,
@@ -217,6 +221,16 @@ attempt without advancing the machine.
 - Requested changes return the ticket to development. Development, documentation, and review repeat within the same flow instance.
 - When the authenticated provider user authored the pull request, a GitHub review is published as a comment and
   machine-readable verdict rather than an impossible self-approval.
+- Both shipped flow policies pin `spec.requiredChecks: [verify]`. Before accepting development success, review approval,
+  or bug verification success, the controller independently reads these named checks on the current PR/MR head and
+  confirms that the head is still current. Only explicit success passes. Optional jobs do not gate advancement.
+- Pending, missing, or unreadable CI keeps the accepted agent publication and waits through ordinary reconciliation
+  without launching another model. Failed or cancelled required checks record `REQUIRED_CI_FAILED` and route corrective
+  development through the existing finite retry budget. Exhaustion uses the ordinary blocked-state human resume path.
+- GitHub evidence includes check runs and latest commit status contexts. GitLab evidence uses jobs from the newest
+  exact-source-head MR pipeline, excluding retried jobs. Required skipped jobs cannot pass; optional skipped jobs do
+  not block. Required names are explicit flow policy, independent of branch protection. Older pinned flow revisions
+  without this field retain their original policy until explicitly migrated.
 - Merge is manual initially. A later configuration option may enable automerge.
 - Human gates are flow policy, not hard-coded stage behavior. A conservative flow may require review after intermediate
   stages; a trusted flow may pause only when an agent reports that human input is needed.
@@ -553,3 +567,18 @@ The following details are outside the working prototype and must not be treated 
 - automatic retention and redaction policy for local session files;
 - the read-only UI scope and whether it reuses an existing XState graph viewer;
 - the conditions and provider rules for enabling automerge.
+
+## Explicit migration commit point
+
+Authorized GitHub ticket commands can change an active pin and/or replay an earlier agent stage while carrying one
+explicitly selected existing PR. The controller validates target-pinned declarative direct rules (or unchanged
+workflow/contracts), drains old work with confirmed process exit, rechecks mutable source evidence, and
+creates/reads back one immutable migration receipt before target execution. The common publication marker remains
+exactly its existing config/controller pair; separately versioned migration metadata identifies the request,
+original activation/owner, source/target pins, workspace, exact PR/branch and result boundary. Recovery validates
+the unique receipt chain before ordinary mixed-pin classification; historical markers remain intact and cannot elect
+ownership for a new configuration. Old selected/downstream results and approvals cannot advance replay. Later
+justified progress supersedes the receipt’s initial destination. Required exact-head CI, fresh review and manual
+merge remain ordinary target-flow behavior. GitLab migration is rejected initially; ordinary GitLab flows continue.
+Migration-only configuration refresh is strict and does not change normal startup/pinned loading. See
+[authoring](workflow-migrations.md) and [operations](operating-workflow-migrations.md).

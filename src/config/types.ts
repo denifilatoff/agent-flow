@@ -24,7 +24,7 @@ export interface FlowDefinition {
   apiVersion: "agent-flow/v1alpha1";
   kind: "Flow";
   metadata: { id: string; activationLabel: "agent-flow:development"; managedLabel: "agent-flow:managed" };
-  spec: { initial: string; activationRoutes?: Record<string, string>; states: Record<string, FlowState> };
+  spec: { initial: string; requiredChecks?: string[]; activationRoutes?: Record<string, string>; states: Record<string, FlowState> };
 }
 
 export interface FlowState {
@@ -51,7 +51,7 @@ export interface AgentCatalog {
 export interface StackDefinition {
   apiVersion: "agent-flow/v1alpha1";
   kind: "Stack";
-  spec: { flow: string; catalog: string; contracts: string[]; schemas: string[] };
+  spec: { flow: string; catalog: string; contracts: string[]; schemas: string[]; publication?: "controller-prepared-v1" };
 }
 
 export interface RuntimeConfig {
@@ -97,6 +97,21 @@ export interface AgentReceipt {
   artifacts: ReceiptArtifact[];
   humanGate?: ReceiptHumanGate;
   error?: ReceiptError;
+  usage?: AttemptUsage;
+}
+
+/** Optional accounting observations. Subset counters must not be added to totals twice. */
+export interface AttemptUsage {
+  totalTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+  reasoningOutputTokens?: number;
+  model?: string;
+  costUsd?: number;
+  costSource?: "harness" | "estimated";
 }
 
 export type ReceiptArtifact = ReceiptComment | ReceiptChangeRequest | ReceiptReview;
@@ -200,6 +215,7 @@ export interface ControlChangeRequest {
 }
 
 export interface LocalExecution {
+  migrationId?: string;
   controllerId: string;
   observedAt: string;
   owner: { controllerId: string; publicationKey: string } | null;

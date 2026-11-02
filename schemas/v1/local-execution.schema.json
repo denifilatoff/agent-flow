@@ -14,36 +14,73 @@
     "control"
   ],
   "properties": {
-    "controllerId": { "$ref": "#/$defs/uuid" },
-    "observedAt": { "type": "string", "format": "date-time" },
+    "controllerId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
     "owner": {
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["controllerId", "publicationKey"],
+          "required": [
+            "controllerId",
+            "publicationKey"
+          ],
           "properties": {
-            "controllerId": { "$ref": "#/$defs/uuid" },
-            "publicationKey": { "type": "string", "minLength": 1 }
+            "controllerId": {
+              "$ref": "#/$defs/uuid"
+            },
+            "publicationKey": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
-        { "type": "null" }
+        {
+          "type": "null"
+        }
       ]
     },
     "disposition": {
       "type": "string",
-      "enum": ["ready", "waiting", "foreign", "ambiguous", "inactive"]
+      "enum": [
+        "ready",
+        "waiting",
+        "foreign",
+        "ambiguous",
+        "inactive"
+      ]
     },
-    "reason": { "type": ["string", "null"] },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "publicationKeys": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "control": {
       "oneOf": [
-        { "$ref": "control-state.schema.json" },
-        { "type": "null" }
+        {
+          "$ref": "control-state.schema.json"
+        },
+        {
+          "type": "null"
+        }
       ]
+    },
+    "migrationId": {
+      "type": "string",
+      "minLength": 1
     }
   },
   "$defs": {

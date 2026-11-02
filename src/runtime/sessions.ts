@@ -17,6 +17,7 @@ import {
 } from "./filesystem.ts";
 
 export interface AttemptContext {
+  migration?: import("../provider/migration-receipt.ts").MigrationReceipt;
   ticket: ProviderTicketSnapshot;
   controlState: ControlState;
   artifacts: ProviderArtifact[];

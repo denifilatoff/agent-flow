@@ -18,6 +18,8 @@
 
 - Read `docs/agent-flow-architecture.md` before changing orchestration, provider state, retries, agent execution, or
   deployment behavior. GitHub or GitLab remains the only canonical operational store.
+- Agents changing workflows, execution contracts, or migration rules must read `docs/workflow-migrations.md` and
+  assess whether the change requires a migration rule.
 - Keep flow definitions data-only. Do not add executable code, shell commands, or inline scripts to flow YAML.
 - Do not introduce a database, durable queue, distributed lease, webhook, or multi-controller behavior without an
   approved architecture change.

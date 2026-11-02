@@ -35,6 +35,9 @@ export interface NormalizedChangeRequest {
   repository: string;
   number: number;
   url: string;
+  objectId?: string;
+  headRepository?: string;
+  headBranch?: string;
   headSha: string;
   state: "open" | "closed" | "merged";
   actor: Actor;
@@ -83,6 +86,7 @@ export interface RecoveryEvidence {
   complete: boolean;
   activeBoundary: "known" | "fresh" | "ambiguous";
   legacyActive: boolean;
+  migration?: import("../runtime/migration-recovery.ts").RecoveredMigration;
 }
 
 export interface DiscoveryWindow {
@@ -93,6 +97,11 @@ export interface DiscoveryWindow {
 export interface DiscoveryPage {
   tickets: TicketRef[];
   nextCursor: string | null;
+}
+
+export interface RequiredChecks {
+  headSha: string;
+  checks: Array<{ name: string; status: "success" | "pending" | "failure" }>;
 }
 
 export interface ProviderAdapter {
@@ -113,6 +122,7 @@ export interface ProviderAdapter {
     add: string[],
     pinnedActivationLabels?: readonly string[],
   ): Promise<string[]>;
+  readRequiredChecks(ref: TicketRef, change: NormalizedChangeRequest): Promise<RequiredChecks>;
   readChangeRequest(ref: TicketRef, number: number): Promise<NormalizedChangeRequest>;
   findReview(
     ref: TicketRef,

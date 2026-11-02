@@ -2,6 +2,7 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { createDocumentValidator, parseYaml, validateDocument, type DocumentValidator } from "./schema-validator.ts";
+import { loadMigrationRules, type MigrationRule } from "./migrations.ts";
 import type { AgentCatalog, FlowDefinition, SchemaKind, StackDefinition } from "./types.js";
 
 export interface ConfigBundle {
@@ -10,6 +11,7 @@ export interface ConfigBundle {
   stack: StackDefinition;
   flow: FlowDefinition;
   catalog: AgentCatalog;
+  migrations?: MigrationRule[];
 }
 
 const bundleValidators = new WeakMap<ConfigBundle, DocumentValidator>();
@@ -26,7 +28,17 @@ const requiredSchemas = [
 ] as const;
 
 export function validateBundleDocument<T>(bundle: ConfigBundle, kind: SchemaKind, value: unknown): T {
-  return (bundleValidators.get(bundle) ?? validateDocument)<T>(kind, value);
+  const pinned = bundleValidators.get(bundle) ?? validateDocument;
+  if (kind === "AgentReceipt" || kind === "ControlState") {
+    // Usage is controller-owned telemetry, outside the original pinned operational contract.
+    validateDocument(kind, value);
+    const projection = structuredClone(value) as Record<string, unknown>;
+    const receipt = kind === "AgentReceipt" ? projection : projection.latestReceipt;
+    if (receipt && typeof receipt === "object") delete (receipt as Record<string, unknown>).usage;
+    pinned(kind, projection);
+    return value as T;
+  }
+  return pinned<T>(kind, value);
 }
 
 function isInside(root: string, path: string): boolean {
@@ -86,7 +98,8 @@ export async function loadConfigBundle(root: string, stackPath: string, revision
     await parseYaml(await pinnedFile(canonicalRoot, stack.spec.catalog)),
   );
 
-  const bundle = { revision, root: canonicalRoot, stack, flow, catalog };
+  const bundle: ConfigBundle = { revision, root: canonicalRoot, stack, flow, catalog };
+  bundle.migrations = await loadMigrationRules(bundle);
   bundleValidators.set(bundle, validatePinnedDocument);
   return bundle;
 }

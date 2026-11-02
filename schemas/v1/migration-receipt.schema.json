@@ -1,0 +1,384 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "ticket",
+    "activation",
+    "owner",
+    "request",
+    "source",
+    "target",
+    "change",
+    "start",
+    "retained",
+    "baseline",
+    "predecessor",
+    "workspace"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "agent-flow/migration-v1"
+    },
+    "kind": {
+      "const": "MigrationReceipt"
+    },
+    "ticket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "repository",
+        "number"
+      ],
+      "properties": {
+        "provider": {
+          "enum": [
+            "github",
+            "gitlab"
+          ]
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eventId",
+        "label",
+        "actor",
+        "occurredAt"
+      ],
+      "properties": {
+        "eventId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "actor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "login",
+            "providerId"
+          ],
+          "properties": {
+            "login": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "providerId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          }
+        },
+        "occurredAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "config",
+        "createdAt"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "config": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "actor",
+        "bodyHash",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "actor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "login",
+            "providerId"
+          ],
+          "properties": {
+            "login": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "providerId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          }
+        },
+        "bodyHash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "updatedAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "config",
+        "stage",
+        "resume"
+      ],
+      "properties": {
+        "config": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "stage": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "resume": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "humanInput": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "digest"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "config",
+        "flow",
+        "label",
+        "basis"
+      ],
+      "properties": {
+        "config": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "flow": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "repository",
+        "number",
+        "url",
+        "headRepository",
+        "headBranch",
+        "headSha",
+        "marker"
+      ],
+      "properties": {
+        "provider": {
+          "enum": [
+            "github",
+            "gitlab"
+          ]
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "headRepository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "headBranch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "headSha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "marker": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    },
+    "start": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "retained": {
+      "type": "array",
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "stage",
+          "digest"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "stage": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "comments",
+        "reviews"
+      ],
+      "properties": {
+        "comments": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "reviews": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        }
+      }
+    },
+    "predecessor": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "workspace": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-flow.dev/schemas/v1/migration-receipt.schema.json"
+}

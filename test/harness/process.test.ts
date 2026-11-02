@@ -25,6 +25,7 @@ import { createCodexAdapter } from "../../src/harness/codex.ts";
 import {
   HarnessPreflightError,
   HarnessProcessError,
+  HarnessTerminationError,
   copyRegularFile,
   harnessEnvironment,
   runHarnessProcess,
@@ -283,6 +284,7 @@ test("runs Codex with canonical, unambiguous private attempt paths", async (t) =
   assert.deepEqual([call.file, ...call.args], [
     "codex",
     "exec",
+    "--json",
     "--model",
     "codex-fixture-model",
     "--config",
@@ -393,7 +395,7 @@ test("runs Claude with the deployed agent and prompt on stdin", async (t) => {
   const call = processes.calls[0]!;
   t.after(() => call.child.finish(0, null));
   assert.deepEqual([call.file, ...call.args], [
-    "claude", "--agent", "developer", "--model", "claude-fixture-model", "--effort", "high", "-p",
+    "claude", "--agent", "developer", "--model", "claude-fixture-model", "--effort", "high", "--output-format", "stream-json", "--verbose", "-p",
   ]);
   assert.deepEqual(call.args.filter((argument) => argument.includes("ticket 17")), []);
   assert.match(call.env.CLAUDE_CONFIG_DIR!, /agent-flow\/claude-/);
@@ -431,6 +433,40 @@ If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_D
   );
   call.child.finish(0, null);
   assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false });
+});
+
+test("retains structured Claude usage on an unsuccessful process exit", async (t) => {
+  const fixture = await runFixture("claude");
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const processes = processFixture();
+  const adapter = createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies);
+  const pending = adapter.run(fixture.input);
+  await waitForSpawn(processes.calls);
+  const call = processes.calls[0]!;
+  call.child.stdout.write(await readFile("test/fixtures/harness/claude-delegation.jsonl"));
+  call.child.stderr.write('{"type":"result","total_cost_usd":999}\n');
+  call.child.finish(1, null);
+  const result = await pending;
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.usage?.totalTokens, 1100);
+  assert.ok(result.usage!.costUsd! < 1);
+});
+
+test("retains Claude assistant input/cache usage when killed before a result", async (t) => {
+  const fixture = await runFixture("claude");
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const processes = processFixture();
+  const adapter = createClaudeAdapter({ credentialsFile: fixture.authFile }, processes.dependencies);
+  const pending = adapter.run(fixture.input);
+  await waitForSpawn(processes.calls);
+  const call = processes.calls[0]!;
+  const message = JSON.stringify({ type: "assistant", session_id: "root", message: { id: "message-1",
+    usage: { input_tokens: 100, cache_read_input_tokens: 20, cache_creation_input_tokens: 30, output_tokens: 1 } } });
+  call.child.stdout.write(message + "\n" + message + "\n");
+  call.child.finish(null, "SIGTERM");
+  const result = await pending;
+  assert.equal(result.signal, "SIGTERM");
+  assert.deepEqual(result.usage, { inputTokens: 100, cacheReadInputTokens: 20, cacheCreationInputTokens: 30 });
 });
 
 test("passes a GitLab personal token without seeding OAuth metadata", async (t) => {
@@ -944,3 +980,65 @@ test("both adapters deliver documentarian skills, report protocol, and context p
     assert.equal((await pending).exitCode, 0);
   }
 });
+
+test('unconfirmed kill exposes termination proof that resolves only on eventual exit',async(t)=>{
+ const {HarnessTerminationError}=await import('../../src/harness/process.ts');
+ const fixture=await runFixture('codex');t.after(()=>rm(fixture.root,{recursive:true,force:true}));
+ const processes=processFixture(),adapter=createCodexAdapter({authFile:fixture.authFile},processes.dependencies);
+ fixture.input.timeoutSeconds=3;const pending=adapter.run(fixture.input);await waitForSpawn(processes.calls);
+ const child=processes.children[0]!;child.exitOnTerm=false;child.killBehavior.set('SIGKILL','false');
+ processes.clock.fire(3000);processes.clock.fire(10000);processes.clock.fire(1000);
+ let failure:unknown;try{await pending;}catch(error){failure=error;}
+ assert.ok(failure instanceof HarnessTerminationError);
+ let confirmed=false;void failure.termination.then(()=>{confirmed=true;});await Promise.resolve();assert.equal(confirmed,false);
+ child.finish(null,'SIGKILL');await failure.termination;assert.equal(confirmed,true);
+});
+
+for (const lateProcessError of [false, true]) {
+  test(`preserves unconfirmed termination after log failure${lateProcessError ? " and a late process error" : ""}`, async (t) => {
+    const fixture = await runFixture("codex");
+    t.after(() => rm(fixture.root, { recursive: true, force: true }));
+    const processes = processFixture();
+    const spawn = processes.dependencies.spawn;
+    let log!: Writable;
+    processes.dependencies.spawn = (...args) => {
+      const child = spawn(...args);
+      const pipe = child.stdout.pipe;
+      t.mock.method(child.stdout, "pipe", function (destination: Writable) {
+        log = destination;
+        return pipe.call(child.stdout, destination, { end: false });
+      });
+      return child;
+    };
+    const adapter = createCodexAdapter({ authFile: fixture.authFile }, processes.dependencies);
+    const pending = adapter.run(fixture.input);
+    await waitForSpawn(processes.calls);
+    const child = processes.children[0]!;
+    child.exitOnTerm = false;
+    child.killBehavior.set("SIGTERM", "false");
+    child.killBehavior.set("SIGKILL", "false");
+
+    const logError = new Promise<void>((resolve) => log.once("error", () => resolve()));
+    log.destroy(Object.assign(new Error("log disk full"), { code: "ENOSPC" }));
+    await logError;
+    assert.deepEqual(child.kills, ["SIGTERM"]);
+    processes.clock.fire(10_000);
+    processes.clock.fire(1_000);
+    if (lateProcessError) child.emit("error", new Error("late process failure"));
+
+    let failure: unknown;
+    try { await pending; } catch (error) { failure = error; }
+    assert.ok(failure instanceof HarnessTerminationError);
+    assert.equal(child.exitCode, null);
+    assert.equal(child.signalCode, null);
+    let confirmed = false;
+    void failure.termination.then(() => { confirmed = true; });
+    await Promise.resolve();
+    assert.equal(confirmed, false);
+    assert.equal(processes.clock.timers.size, 0);
+
+    child.finish(null, "SIGKILL");
+    await failure.termination;
+    assert.equal(confirmed, true);
+  });
+}
