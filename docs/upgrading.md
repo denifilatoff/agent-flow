@@ -32,6 +32,24 @@ If new-format instances have already started, do not roll the old controller bac
 complete those instances with the new controller before a format downgrade. If that cannot be done, keep the service
 stopped and plan an explicit migration; do not rewrite provider state or run two controllers against the same tickets.
 
+## Adding the documentarian stage
+
+For a new configuration pin, both shipped flows route feature `development → documentation → review` and bugfix
+`bug-development → bug-documentation → bug-review`, including every implementation rework. Bug review approval still
+requires independent verification and merge remains manual. Existing instances keep their pinned flow; this upgrade
+does not migrate active instances or insert a stage into legacy direct-to-review routes.
+
+Add a complete `execution.agents.documentarian` binding to the mounted RuntimeConfig before selecting the new catalog.
+Use the fields shown in `config/runtime.example.yaml`: harness, model, reasoning, maxAttempts, delaySeconds, and
+timeoutSeconds. The package supports both Claude and Codex; choose an operator-supported model and supply the selected
+harness credentials. Retain execution settings needed by unfinished older pinned catalogs.
+
+Commit `agent-packages/documentarian/apm.lock.yaml` with the pinned documentation skill and deployment records for both
+targets. Generate/compile harness output only in disposable copies, and validate frozen installation and audit with APM
+available. Documentation can finish with a substantive no-change report and unchanged request head; no empty commit or
+second request is needed. See the [documentation report contract](prototype-contracts.md#documentation-report) for
+readback, retry, and provider-only recovery limits.
+
 
 ## Attempt accounting and publication pins
 
@@ -42,7 +60,8 @@ strict pinned receipt/control schemas remain supported through the validated con
 To enable usage in the initial stage comment, start new flows on a configuration revision whose Stack declares
 `spec.publication: controller-prepared-v1`. Keep active flows on their original pins unless explicitly migrated.
 The updated runtime prompt prepares local comment text; the controller publishes it with accounting after execution
-and verifies provider readback before advancement. PR/MR and native review publication are unchanged.
+and verifies provider readback before advancement. Documentation reports use the same prepared publication path,
+including their documentation metadata and completed accounting. PR/MR and native review publication are unchanged.
 
 Preserve disposable session directories when restarting if pending prepared results or accounting should survive.
 Delivery reconciliation reuses completed work and does not automatically run another model. Invalid or permanently

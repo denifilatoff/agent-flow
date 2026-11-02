@@ -246,6 +246,7 @@ test("compiles every package with domain-only role instructions", async (t) => {
     ["architect", ["claude", "codex"], /complete assessment/],
     ["planner", ["claude", "codex"], /complete implementation plan/],
     ["developer", ["codex"], /smallest change/],
+    ["documentarian", ["claude", "codex"], /complete implementation diff/],
     ["reviewer", ["codex"], /pinned head/],
     ["bug-investigator", ["claude", "codex"], /diagnostic artifact/],
     ["bugfixer", ["codex"], /smallest regression/],

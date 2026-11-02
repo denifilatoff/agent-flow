@@ -247,6 +247,27 @@ test("tells a fresh reviewer which observed review IDs cannot satisfy the attemp
   assert.match(renderRuntimePrompt(input), /Do not reuse these existing review IDs for this attempt: 701, 702/);
 });
 
+test("documentation protocol pins input, permits no-op, and requires a final head report", async () => {
+  const flow = await shippedFlow();
+  const base = promptInput(flow, { stateId: "development", resultContract: "documentation" });
+  const change = { provider: "github" as const, repository: "owner/repo", number: 8,
+    url: "https://github.test/owner/repo/pull/8", headSha: HEAD_SHA, state: "open" as const,
+    actor: { login: "owner", providerId: "1" }, body: "", createdAt: "", updatedAt: "" };
+  const prompt = renderRuntimePrompt({ ...base, changeRequest: change });
+  assert.match(prompt, /agent-flow-documentation:v1/);
+  assert.match(prompt, new RegExp(`"inputHead":"${HEAD_SHA}"`));
+  assert.match(prompt, /no-op/);
+  assert.match(prompt, /complete diff/);
+  assert.match(prompt, /same linked/);
+  assert.match(prompt, /obsolete/);
+  const prepared = renderRuntimePrompt({ ...base, changeRequest: change, preparedCommentPath: "/session/prepared-comment.txt" });
+  assert.match(prepared, /report prepared at \/session\/prepared-comment.txt for controller publication/);
+  assert.match(prepared, /metadata line in this form: <!-- agent-flow-documentation:v1/);
+  for (const changeRequest of [null, { ...change, state: "closed" as const }]) {
+    assert.match(renderRuntimePrompt({ ...base, changeRequest }), /cannot succeed/);
+  }
+});
+
 test("prepared comment protocol keeps stage text local until controller publication", async () => {
   const input = promptInput(await shippedFlow(), { preparedCommentPath: "/session/prepared-comment.txt" });
   const prompt = renderRuntimePrompt(input);

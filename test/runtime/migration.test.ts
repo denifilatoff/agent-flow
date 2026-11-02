@@ -161,6 +161,14 @@ test("unauthorized migration comments never resolve targets or mutate provider s
   );
 });
 
+function legacyFlow(flow: import("../../src/config/types.ts").FlowDefinition) {
+  for (const prefix of ["", "bug-"]) {
+    flow.spec.states[`${prefix}development`]!.on!["agent-succeeded"]!.target = `${prefix}review`;
+    delete flow.spec.states[`${prefix}documentation`];
+  }
+  return flow;
+}
+
 async function migrationFixture(t: import("node:test").TestContext) {
   const { mkdtemp, rm } = await import("node:fs/promises"),
     { tmpdir } = await import("node:os"),
@@ -185,6 +193,7 @@ async function migrationFixture(t: import("node:test").TestContext) {
       sourceSha,
     ),
     target = { ...source, revision: targetSha };
+  legacyFlow(source.flow);
   const root = await mkdtemp(join(tmpdir(), "migration-protocol-")),
     store = await openLocalStore(join(root, "local.sqlite"));
   t.after(async () => {
@@ -1138,7 +1147,7 @@ test("no-replay migrations retain each human gate's predecessor and wait for fre
       const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
       const { readFile } = await import("node:fs/promises");
       const { parse } = await import("yaml");
-      f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+      f.source.flow = legacyFlow(parse(await readFile("config/flows/development.yaml", "utf8")));
       f.target.flow = structuredClone(f.source.flow);
       f.snapshot.activation.label = label;
       f.snapshot.labels = ["agent-flow:managed", label, "agent-stage:" + gate];
@@ -1163,7 +1172,7 @@ test("no-replay human-gate migration rejects missing predecessor provenance befo
   const f = await migrationFixture(t);
   const { readFile } = await import("node:fs/promises");
   const { parse } = await import("yaml");
-  f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+  f.source.flow = legacyFlow(parse(await readFile("config/flows/development.yaml", "utf8")));
   f.target.flow = structuredClone(f.source.flow);
   f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:plan-review"];
   f.snapshot.comments[0]!.body = "Unmarked context";
@@ -1180,7 +1189,7 @@ test("no-replay human-gate migration preserves consumed input and leaves a pendi
   const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
   const { readFile } = await import("node:fs/promises");
   const { parse } = await import("yaml");
-  f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+  f.source.flow = legacyFlow(parse(await readFile("config/flows/development.yaml", "utf8")));
   f.target.flow = structuredClone(f.source.flow);
   f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:plan-review"];
   f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest";
@@ -1222,7 +1231,7 @@ test("empty-store recovery reassesses the latest migrated gate iteration before 
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");
   const { parse } = await import("yaml");
-  f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+  f.source.flow = legacyFlow(parse(await readFile("config/flows/development.yaml", "utf8")));
   f.target.flow = structuredClone(f.source.flow);
   f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:plan-review"];
   f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest";
@@ -1279,7 +1288,7 @@ test("completed migrated gate revisions do not obscure downstream agent recovery
         const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
         const { readFile } = await import("node:fs/promises");
         const { parse } = await import("yaml");
-        f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+        f.source.flow = legacyFlow(parse(await readFile("config/flows/development.yaml", "utf8")));
         f.target.flow = structuredClone(f.source.flow);
         f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:plan-review"];
         f.snapshot.comments[1]!.body = "/agent-flow migrate --pr 8 --to latest";
@@ -1491,7 +1500,7 @@ test(`${replay} replay recovers revised plans at the gate and downstream stages`
       const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
       const { readFile } = await import("node:fs/promises");
       const { parse } = await import("yaml");
-      f.source.flow = parse(await readFile("config/flows/development.yaml", "utf8"));
+      f.source.flow = legacyFlow(parse(await readFile("config/flows/development.yaml", "utf8")));
       f.target.flow = structuredClone(f.source.flow);
       f.snapshot.comments[1]!.body = `/agent-flow migrate --pr 8 --to latest --resume-from ${replay === "planning" ? replay : "assessment"}`;
       await reconcileTicket(f.d as never, f.ref);
@@ -1559,4 +1568,47 @@ test(`${replay} replay recovers revised plans at the gate and downstream stages`
   }
 });
 
+}
+
+for (const scenario of ["development-rework", "review-rework", "ci-correction"] as const) {
+  for (const unauthorized of [false, true, "documentation"] as const) {
+    if (scenario === "review-rework" && unauthorized === "documentation") continue;
+    test(`documented migrated ${scenario} recovers at merge wait (unauthorized=${unauthorized})`, async (t) => {
+      const f = await migrationFixture(t);
+      const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+      const { loadConfigBundle } = await import("../../src/config/load.ts");
+      const current = await loadConfigBundle(process.cwd(), "config/stack.yaml", f.source.revision);
+      f.source.flow = current.flow;
+      f.target.flow = structuredClone(current.flow);
+      const replay = scenario === "review-rework" ? "review" : "development";
+      f.snapshot.comments[1]!.body = `/agent-flow migrate --pr 8 --to latest --resume-from ${replay}`;
+      const initial = await reconcileTicket(f.d as never, f.ref);
+      assert.equal(initial.stateId, replay);
+      const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+      const report = (id: string, head: string) => f.comment(id, marker + "\n<!-- agent-flow-documentation:v1 "
+        + JSON.stringify({ change: 8, inputHead: head, resultHead: head }) + " -->\nExisting documentation matches the implementation.");
+      const review = (id: string, head: string, verdict: string) => ({ id, headSha: head, verdict,
+        actor: f.selected.actor, body: `${marker}\n<!-- agent-flow-review:v1 head=${head} verdict=${verdict} -->`,
+        submittedAt: f.comment(id, "").createdAt, url: `https://github.com/owner/repo/pull/8#pullrequestreview-${id}` });
+      if (replay === "development") {
+        f.snapshot.comments.push(f.comment("20", marker + "\nInitial development complete."), report("21", f.selected.headSha));
+      }
+      if (scenario !== "ci-correction") f.reviews.push(review("22", f.selected.headSha, "changes-requested"));
+      Object.assign(f.selected, { headSha: "2".repeat(40) });
+      f.snapshot.changeRequest = f.selected;
+      f.snapshot.comments.push(f.comment("23", marker + "\nCorrected development complete."), report("24", f.selected.headSha));
+      f.reviews.push(review("25", f.selected.headSha, "approved"));
+      if (unauthorized) {
+        if (unauthorized === "documentation") f.snapshot.comments.find(c => c.id === "21")!.actor = { login: "outsider", providerId: "2" };
+        else if (scenario === "ci-correction") f.snapshot.comments.find(c => c.id === "20")!.actor = { login: "outsider", providerId: "2" };
+        else f.reviews.find(r => r.id === "22")!.actor = { login: "outsider", providerId: "2" };
+        f.d.provider.permission = async (...args: unknown[]) => (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+      }
+      f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:awaiting-merge"];
+      await f.reset();
+      const recovered = await reconcileTicket(f.d as never, f.ref);
+      assert.deepEqual({ stage: recovered.stateId, disposition: recovered.recoveryDisposition }, unauthorized
+        ? { stage: null, disposition: "ambiguous" } : { stage: "awaiting-merge", disposition: "ready" });
+    });
+  }
 }

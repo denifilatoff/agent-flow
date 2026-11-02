@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { validateDocument } from "../config/schema-validator.ts";
 import type { AgentDecision, AttemptUsage } from "../config/types.ts";
 import { ProviderHttpError } from "../provider/http.ts";
+import { parseDocumentation } from "../provider/documentation.ts";
 import { electOwner, parsePublication, renderPublication } from "../provider/publication.ts";
 import type { ProviderAdapter } from "../provider/types.ts";
 import { allowedAgentEvents } from "./agent-protocol.ts";
@@ -30,7 +31,7 @@ interface PreparedPublication {
 
 export function needsPreparedComment(expected: DecisionExpectation, event: AgentDecision["event"]): boolean {
   return ["agent-needs-human", "human-question", "human-unclear", "human-answer-unclear"].includes(event)
-    || (event === "agent-succeeded" && (["assessment", "plan", "diagnostic", "verification"].includes(expected.resultContract)
+    || (event === "agent-succeeded" && (["assessment", "plan", "diagnostic", "verification", "documentation"].includes(expected.resultContract)
       || (expected.resultContract === "development" && !!expected.migration)));
 }
 
@@ -54,7 +55,11 @@ export async function freezePreparedPublication(root: string, expected: Decision
         if ((await file.stat()).size > 60_000) throw new InvalidDecisionError("prepared comment is too large");
         text = (await file.readFile("utf8")).trim();
       } finally { await file.close(); }
-      if (!text || /<!--\s*agent-flow/i.test(text)) throw new InvalidDecisionError("prepared comment text is invalid");
+      const documentation = expected.resultContract === "documentation" && decision.event === "agent-succeeded"
+        ? parseDocumentation(text) : null;
+      const substantive = documentation
+        ? text.replace(/^ {0,3}<!-- agent-flow-documentation:v1 .+ -->[ \t]*\r?$/m, "") : text;
+      if (!substantive.trim() || /<!--\s*agent-flow/i.test(substantive)) throw new InvalidDecisionError("prepared comment text is invalid");
       if (expected.resultContract === "verification" && decision.event === "agent-succeeded"
         && text.split(/\r?\n/)[0] !== "BUG RECEIPT · VERIFIED") {
         throw new InvalidDecisionError("prepared verification must begin with BUG RECEIPT · VERIFIED");
