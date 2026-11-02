@@ -32,6 +32,9 @@ const CONTROLLER = { login: "controller", providerId: "51" };
 type AttemptMode = "success" | "exit-failure" | "block" | "late" | "crash-after-publish" | "reuse" | "race";
 
 interface FixtureOptions {
+  usage?: boolean;
+  preparedComments?: boolean;
+  uncertainCreate?: boolean;
   oldCiPolicy?:boolean;
   activationLabel?: "agent-flow:development" | "bugfix";
   firstAttempt?: AttemptMode;
@@ -201,6 +204,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   const state = new FixtureState(provider, options.firstAttempt,options.oldCiPolicy, options.activationLabel);
   state.ciAfterReview = options.ciAfterReview;
   state.repairCiAfterFailure = options.repairCiAfterFailure;
+  state.uncertainCreate = options.uncertainCreate ?? false;
   server = createServer({ cert: await readFile(certificate), key: await readFile(key) }, (request, response) => {
     void state.handle(request, response).catch((error: unknown) => {
       response.writeHead(500, { "content-type": "application/json" });
@@ -218,7 +222,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
   const home = join(root, "home");
   const eventsPath = join(root, "events.ndjson");
   await Promise.all([mkdir(dataDirectory, { mode: 0o700 }), mkdir(bin), mkdir(home)]);
-  await createTools(bin);
+  await createTools(bin, options.usage);
   await createAuth(home);
   const tokenFile = join(root, "provider-token");
   const operatorAuthFile = join(root, "operator-password");
@@ -240,6 +244,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
     operatorAuthFile,
     60,
     options.firstAttempt === "race" ? 30 : 5,
+    options.preparedComments ?? false,
     options.oldCiPolicy,
   );
 
@@ -511,6 +516,7 @@ export async function startFixture(provider: ProviderKind, options: FixtureOptio
 }
 
 class FixtureState {
+  uncertainCreate = false;
   readonly provider: ProviderKind;
   readonly repository: string;
   readonly number: number;
@@ -740,7 +746,7 @@ class FixtureState {
     if (mode !== "success" && mode !== "reuse") return json(response, 200, { mode });
 
     const decision = this.publish(context, attemptId, mode === "reuse");
-    json(response, 200, { mode, decision });
+    json(response, 200, { mode, decision, preparedComment: context.preparedComment });
   }
 
   currentPublications(): Publication[] {
@@ -771,6 +777,10 @@ class FixtureState {
   }
 
   private publish(context: AttemptContext, attemptId: string, reuse = false): AgentDecision {
+    const stageComment = (body: string) => {
+      if (context.prepareComments) context.preparedComment = body.replace(context.publicationMarker, "").replace(/\n<!-- agent-flow-result:v1 state=[a-z][a-z0-9-]* -->/, "").trim();
+      else this.addComment(body);
+    };
     const state = context.controlState.stateId;
     if (context.mode === "human-input") {
       const source = context.artifacts
@@ -786,7 +796,7 @@ class FixtureState {
             : lower.includes("unclear") ? "unclear" as const
               : "approved" as const;
       if ((verdict === "question" || verdict === "unclear")) {
-        this.addComment(`${context.publicationMarker}\nPlease clarify the requested action.`);
+        stageComment(`${context.publicationMarker}\nPlease clarify the requested action.`);
       }
       if (state === "needs-human") {
         return { event: verdict === "cancelled" ? "human-answer-cancelled"
@@ -804,20 +814,21 @@ class FixtureState {
         && !context.migration?.baseline.comments.includes(String(artifact.id)) && "body" in artifact
         && artifact.body.split(/\r?\n/).includes(context.publicationMarker)
         && artifact.body.includes(`Fixture ${artifactKind}.`));
-      if (!existing) this.addComment(`${context.publicationMarker}\n${state === "bug-verification" ? "BUG RECEIPT · VERIFIED" : `Fixture ${artifactKind}.`}${state === "bug-verification" ? "" : `\n<!-- agent-flow-result:v1 state=${state} -->`}`);
+      if (!existing) stageComment(`${context.publicationMarker}\n${state === "bug-verification" ? "BUG RECEIPT · VERIFIED" : `Fixture ${artifactKind}.`}${state === "bug-verification" ? "" : `\n<!-- agent-flow-result:v1 state=${state} -->`}`);
       return { event: "agent-succeeded" };
     }
     if (state === "development" || state === "bug-development") {
       if (context.migration) {
         const completion = this.comments.findLast((comment) =>
           !context.migration!.baseline.comments.includes(comment.id)
-          && comment.body === context.publicationMarker + "\nFixture development revalidated.");
+          && comment.body.split(/\r?\n/).includes(context.publicationMarker)
+          && comment.body.split(/\r?\n/).includes("Fixture development revalidated."));
         const rejected = completion && [...this.reviews.values()].some((review) =>
           review.verdict === "changes-requested" && review.createdAt > completion.createdAt);
         const verified = completion && this.comments.some((comment) =>
           comment.createdAt > completion.createdAt
           && comment.body === context.publicationMarker + "\nBUG RECEIPT · VERIFIED");
-        if (!completion || rejected || verified) this.addComment(context.publicationMarker + "\nFixture development revalidated.");
+        if (!completion || rejected || verified) stageComment(context.publicationMarker + "\nFixture development revalidated.");
       }
       if (this.repairCiAfterFailure && this.change && this.ciStatus === "failure") {
         this.changeHead();
@@ -846,7 +857,7 @@ class FixtureState {
       return { event: verdict === "approved" ? "review-approved" : "review-changes-requested" };
     }
     if (state === "needs-human" && this.change?.state === "closed") {
-      this.addComment(`${context.publicationMarker}\nReopen the existing change request or cancel the flow?`);
+      stageComment(`${context.publicationMarker}\nReopen the existing change request or cancel the flow?`);
       return { event: "agent-needs-human" };
     }
     throw new Error(`unsupported fixture attempt state: ${state}`);
@@ -890,7 +901,9 @@ class FixtureState {
       return json(response, 200, this.githubComment(stored));
     }
     if (method === "POST" && path === `repos/${this.repository}/issues/${this.number}/comments`) {
-      return json(response, 201, this.githubComment(this.addComment(String((body as { body: string }).body))));
+      const comment = this.addComment(String((body as { body: string }).body));
+      if (this.uncertainCreate) { this.uncertainCreate = false; return json(response, 500, { message: "write outcome uncertain" }); }
+      return json(response, 201, this.githubComment(comment));
     }
     const label = new RegExp(`^repos/${this.repository}/issues/${this.number}/labels/(.+)$`).exec(path);
     if (method === "DELETE" && label) {
@@ -974,7 +987,9 @@ class FixtureState {
       return json(response, 200, this.gitlabNote(stored));
     }
     if (method === "POST" && path === `${project}/issues/${this.number}/notes`) {
-      return json(response, 201, this.gitlabNote(this.addComment(String((body as { body: string }).body))));
+      const comment = this.addComment(String((body as { body: string }).body));
+      if (this.uncertainCreate) { this.uncertainCreate = false; return json(response, 500, { message: "write outcome uncertain" }); }
+      return json(response, 201, this.gitlabNote(comment));
     }
     if (method === "PUT" && path === `${project}/issues/${this.number}`) {
       const update = body as { add_labels?: string; remove_labels?: string };
@@ -1194,6 +1209,8 @@ interface AttemptContext {
   artifacts: Array<Record<string, unknown>>;
   mode: "stage" | "human-input";
   publicationMarker: string;
+  prepareComments?: boolean;
+  preparedComment?: string;
 }
 
 async function createCertificate(certificate: string, key: string): Promise<void> {
@@ -1219,6 +1236,7 @@ async function createConfiguration(
   operatorAuthFile = join(dirname(repository), "operator-password"),
   pollingIntervalSeconds = 60,
   timeoutSeconds = 5,
+  preparedComments = false,
   oldCiPolicy=false,
 ): Promise<string> {
   await mkdir(join(repository, "config/flows"), { recursive: true });
@@ -1231,7 +1249,8 @@ async function createConfiguration(
   await cp(join(ROOT, "config/agents.yaml"), join(repository, "config/agents.yaml"));
   const stackFile = join(repository, "config/stack.yaml");
   await writeFile(stackFile, (await readFile(stackFile, "utf8"))
-    .replace("config/flows/development-autonomous.yaml", "config/flows/development.yaml"));
+    .replace("config/flows/development-autonomous.yaml", "config/flows/development.yaml")
+    .replace(preparedComments ? "__absent__" : "  publication: controller-prepared-v1\n", ""));
   if(oldCiPolicy) {
     const path=join(repository,"config/flows/development.yaml"),flow=parse(await readFile(path,"utf8"));delete flow.spec.requiredChecks;for(const state of Object.values(flow.spec.states) as Array<{on?:Record<string,unknown>}>) if(state.on) delete state.on["ci-failed"];await writeFile(path,stringify(flow));
   }
@@ -1274,12 +1293,12 @@ async function createConfiguration(
   return runtimePath;
 }
 
-async function createTools(bin: string): Promise<void> {
+async function createTools(bin: string, usage = false): Promise<void> {
   const executable = resolve(ROOT, "test/fixtures/fake-harness.ts");
   const events = join(dirname(bin), "events.ndjson");
   await Promise.all(["gh", "glab", "apm", "codex", "claude"].map(async (tool) => {
     const path = join(bin, tool);
-    await writeFile(path, `#!/bin/sh\nAGENT_FLOW_FIXTURE_LOG=${JSON.stringify(events)} exec ${JSON.stringify(process.execPath)} ${JSON.stringify(executable)} ${tool} "$@"\n`);
+    await writeFile(path, `#!/bin/sh\nAGENT_FLOW_FIXTURE_USAGE=${usage ? "1" : "0"} AGENT_FLOW_FIXTURE_LOG=${JSON.stringify(events)} exec ${JSON.stringify(process.execPath)} ${JSON.stringify(executable)} ${tool} "$@"\n`);
     await chmod(path, 0o755);
   }));
 }

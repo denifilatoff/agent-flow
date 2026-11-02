@@ -56,9 +56,10 @@ test("same-configuration planning replay requires a fresh plan and downstream hu
   assert.equal((await run.migrationReceipts()).length, 1);
 });
 
+for (const preparedComments of [false, true]) {
 for (const replay of ["planning", "assessment"]) {
-test(`${replay} replay revisions survive SQLite loss at the human gate and downstream stages`, async (t) => {
-  const run = await startFixture("github");
+test(`${replay} replay revisions survive SQLite loss at the human gate and downstream stages (prepared=${preparedComments})`, async (t) => {
+  const run = await startFixture("github", { preparedComments });
   t.after(() => run.close());
   await run.untilState("assessment-review");
   await run.answer("approved");
@@ -95,10 +96,18 @@ test(`${replay} replay revisions survive SQLite loss at the human gate and downs
   assert.equal((await run.changeRequest())!.number, before!.number);
   assert.equal((await run.changeRequest())!.body, before!.body);
   assert.equal(await run.controllerId(), controller);
+  if (preparedComments) {
+    const completion = await run.latestAgentComment();
+    assert.match(completion!.body, /Fixture development revalidated/);
+    assert.match(completion!.body, /<!-- agent-flow-result:v1 state=development -->/);
+    assert.match(completion!.url, /\/issues\/17#issuecomment-/);
+    assert.equal(completion!.createdAt, completion!.updatedAt);
+  }
   assert.equal((await run.migrationReceipts()).length, 1);
   assert.equal(await run.maximumConcurrentAttempts(), 1);
 });
 
+}
 }
 
 test("changed-CI migration of fixture issue 2 preserves PR 8 despite incidental PR 11 and requires target CI", async (t) => {

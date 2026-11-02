@@ -101,6 +101,7 @@ test("C9/C17 a changed review head invalidates the old result", async (t) => {
   const oldHead = (await run.changeRequest())!.headSha;
   await run.changeHead();
   await run.reconcile();
+  // Observe after automatic reconciliation has consumed the review success.
   await run.untilState("awaiting-merge");
   assert.notEqual((await run.changeRequest())!.headSha, oldHead);
   assert.equal((await run.control()).stateId, "awaiting-merge");
@@ -113,9 +114,13 @@ test("C10 a closed unmerged change asks for reopen or cancel", async (t) => {
   t.after(() => run.close());
   await passHumanGates(run);
   await run.untilState("awaiting-merge");
+  const commentsBeforeClose = (await run.agentCommentIds()).length;
   await run.closeChangeRequest();
   await run.reconcile();
-  await run.untilReceipt("needs-human");
+  await run.untilAgentComments(commentsBeforeClose + 1);
+  // Recovery can retain the verified question after clearing the current attempt.
+  await run.reconcile();
+  assert.equal((await run.control()).latestReceipt?.outcome, "needs-human");
   assert.equal((await run.control()).stateId, "needs-human");
   assert.equal((await run.control()).resumeStateId, "review");
   assert.match((await run.latestAgentComment())!.body, /reopen|cancel/i);
@@ -227,4 +232,35 @@ test("warm SQLite restart reuses the result published before its receipt was com
   assert.deepEqual(await run.agentCommentIds(), publications);
   assert.equal((await run.control()).attemptSeries?.consumed, 2);
   assert.equal(await run.controllerCommentWrites(), 0);
+});
+
+
+test("prepared comments reconcile uncertain creates without another model call on both providers", async () => {
+  for (const provider of ["github", "gitlab"] as const) {
+    const run = await startFixture(provider, { usage: true, preparedComments: true, uncertainCreate: true });
+    try {
+      await run.untilState("assessment-review");
+      assert.equal((await run.control()).attemptSeries?.consumed, 1);
+      assert.equal((await run.sessions()).length, 1);
+      assert.equal(await run.controllerCommentWrites(), 1);
+      const comment = (await run.latestAgentComment())!;
+      assert.equal(comment.createdAt, comment.updatedAt);
+      assert.equal(comment.body.match(/Usage:/g)?.length, 1);
+      await run.restart();
+      await run.untilState("assessment-review");
+      assert.equal((await run.sessions()).length, 1);
+      assert.equal(await run.controllerCommentWrites(), 1);
+    } finally { await run.close(); }
+  }
+});
+
+test("legacy pins retain usage in receipts without editing their existing stage comments", async (t) => {
+  const run = await startFixture("github", { usage: true, firstAttempt: "exit-failure" });
+  t.after(() => run.close());
+  await run.untilState("assessment-review");
+  assert.equal((await run.control()).attemptSeries?.consumed, 2);
+  assert.equal((await run.sessions()).length, 2);
+  assert.equal((await run.receipts()).at(-1)?.usage?.totalTokens, 1100);
+  assert.equal(await run.controllerCommentWrites(), 0);
+  assert.doesNotMatch((await run.latestAgentComment())!.body, /Usage:/);
 });

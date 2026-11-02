@@ -125,8 +125,12 @@ The [recovery specification](recovery-from-provider-draft.md) defines restart, o
 - GitHub agents use an already authenticated `gh`; GitLab agents use an already authenticated `glab`.
 - Agents initially run under the operator's user account and have direct provider access with `write` or `maintain`
   permissions.
-- Agents publish assessment, plan, questions, pull or merge request changes, review results, and other stage outputs
-  themselves.
+- Legacy configuration pins use agent publication for stage outputs. New Stack pins may select
+  `publication: controller-prepared-v1`: agents prepare substantive stage comment text locally, then the controller
+  publishes it with the existing common marker and completed-attempt accounting in one create. Exact readback and
+  normal provider evidence validation precede acceptance. Published comments are never edited for accounting.
+  Pull or merge request changes and native reviews remain agent-published. Completed prepared delivery may retry
+  independently of model execution; uncertain writes require provider reconciliation before any further write.
 - Agent packages describe domain behavior only. They do not define flow events, state labels, publication markers,
   machine record fields, or the structured response contract.
 - Before each attempt, the controller generates a runtime protocol prompt from the pinned flow state, attempt mode,

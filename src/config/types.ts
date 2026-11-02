@@ -51,7 +51,7 @@ export interface AgentCatalog {
 export interface StackDefinition {
   apiVersion: "agent-flow/v1alpha1";
   kind: "Stack";
-  spec: { flow: string; catalog: string; contracts: string[]; schemas: string[] };
+  spec: { flow: string; catalog: string; contracts: string[]; schemas: string[]; publication?: "controller-prepared-v1" };
 }
 
 export interface RuntimeConfig {
@@ -97,6 +97,21 @@ export interface AgentReceipt {
   artifacts: ReceiptArtifact[];
   humanGate?: ReceiptHumanGate;
   error?: ReceiptError;
+  usage?: AttemptUsage;
+}
+
+/** Optional accounting observations. Subset counters must not be added to totals twice. */
+export interface AttemptUsage {
+  totalTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+  reasoningOutputTokens?: number;
+  model?: string;
+  costUsd?: number;
+  costSource?: "harness" | "estimated";
 }
 
 export type ReceiptArtifact = ReceiptComment | ReceiptChangeRequest | ReceiptReview;
