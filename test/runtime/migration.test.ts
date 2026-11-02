@@ -1569,3 +1569,46 @@ test(`${replay} replay recovers revised plans at the gate and downstream stages`
 });
 
 }
+
+for (const scenario of ["development-rework", "review-rework", "ci-correction"] as const) {
+  for (const unauthorized of [false, true, "documentation"] as const) {
+    if (scenario === "review-rework" && unauthorized === "documentation") continue;
+    test(`documented migrated ${scenario} recovers at merge wait (unauthorized=${unauthorized})`, async (t) => {
+      const f = await migrationFixture(t);
+      const { reconcileTicket } = await import("../../src/runtime/reconcile.ts");
+      const { loadConfigBundle } = await import("../../src/config/load.ts");
+      const current = await loadConfigBundle(process.cwd(), "config/stack.yaml", f.source.revision);
+      f.source.flow = current.flow;
+      f.target.flow = structuredClone(current.flow);
+      const replay = scenario === "review-rework" ? "review" : "development";
+      f.snapshot.comments[1]!.body = `/agent-flow migrate --pr 8 --to latest --resume-from ${replay}`;
+      const initial = await reconcileTicket(f.d as never, f.ref);
+      assert.equal(initial.stateId, replay);
+      const marker = `<!-- agent-flow:v1 {"config":"${f.target.revision}","controller":"${f.d.controllerId}"} -->`;
+      const report = (id: string, head: string) => f.comment(id, marker + "\n<!-- agent-flow-documentation:v1 "
+        + JSON.stringify({ change: 8, inputHead: head, resultHead: head }) + " -->\nExisting documentation matches the implementation.");
+      const review = (id: string, head: string, verdict: string) => ({ id, headSha: head, verdict,
+        actor: f.selected.actor, body: `${marker}\n<!-- agent-flow-review:v1 head=${head} verdict=${verdict} -->`,
+        submittedAt: f.comment(id, "").createdAt, url: `https://github.com/owner/repo/pull/8#pullrequestreview-${id}` });
+      if (replay === "development") {
+        f.snapshot.comments.push(f.comment("20", marker + "\nInitial development complete."), report("21", f.selected.headSha));
+      }
+      if (scenario !== "ci-correction") f.reviews.push(review("22", f.selected.headSha, "changes-requested"));
+      Object.assign(f.selected, { headSha: "2".repeat(40) });
+      f.snapshot.changeRequest = f.selected;
+      f.snapshot.comments.push(f.comment("23", marker + "\nCorrected development complete."), report("24", f.selected.headSha));
+      f.reviews.push(review("25", f.selected.headSha, "approved"));
+      if (unauthorized) {
+        if (unauthorized === "documentation") f.snapshot.comments.find(c => c.id === "21")!.actor = { login: "outsider", providerId: "2" };
+        else if (scenario === "ci-correction") f.snapshot.comments.find(c => c.id === "20")!.actor = { login: "outsider", providerId: "2" };
+        else f.reviews.find(r => r.id === "22")!.actor = { login: "outsider", providerId: "2" };
+        f.d.provider.permission = async (...args: unknown[]) => (args[1] as { login: string }).login === "outsider" ? "read" : "write";
+      }
+      f.snapshot.labels = ["agent-flow:managed", "agent-flow:development", "agent-stage:awaiting-merge"];
+      await f.reset();
+      const recovered = await reconcileTicket(f.d as never, f.ref);
+      assert.deepEqual({ stage: recovered.stateId, disposition: recovered.recoveryDisposition }, unauthorized
+        ? { stage: null, disposition: "ambiguous" } : { stage: "awaiting-merge", disposition: "ready" });
+    });
+  }
+}

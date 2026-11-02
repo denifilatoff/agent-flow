@@ -829,7 +829,7 @@ async function recoveryIteration(
     .toSorted((left, right) =>
       Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.key.localeCompare(right.key));
   const documentationEnabled = Object.values(bundle.flow.spec.states).some((state) => state.resultContract === "documentation");
-  if (documentationEnabled) {
+  if (documentationEnabled && !migration) {
     const rework = evidence.reviews.filter((review) => review.verdict === "changes-requested"
       && evidence.publications.some((publication) => publication.metadata.controller === ownerController
         && publication.ownershipEligible !== false
@@ -1052,7 +1052,10 @@ async function recoveryIteration(
     if (migration) {
       for (const [developmentId, development] of Object.entries(bundle.flow.spec.states)) {
         if (development.resultContract !== "development") continue;
-        const review = bundle.flow.spec.states[development.on?.["agent-succeeded"]?.target ?? ""];
+        const next = bundle.flow.spec.states[development.on?.["agent-succeeded"]?.target ?? ""];
+        const documentation = next?.resultContract === "documentation" ? next : undefined;
+        const review = documentation
+          ? bundle.flow.spec.states[documentation.on?.["agent-succeeded"]?.target ?? ""] : next;
         if (review?.resultContract !== "review"
           || review.on?.["review-changes-requested"]?.target !== developmentId) continue;
         const prefix = successfulPublicationPath(bundle.flow, developmentId,
@@ -1068,9 +1071,23 @@ async function recoveryIteration(
             || review.on?.["ci-failed"]?.target === developmentId);
         while (active[index] && active[index + 1]
           && recoveryKind(active[index]!.key) === "comment") {
-          const nextKind = recoveryKind(active[index + 1]!.key);
+          let iterationLength = 1;
+          let report: ReturnType<typeof parseDocumentation> = null;
+          if (documentation && recoveryKind(active[index + 1]!.key) === "documentation") {
+            const comment = evidence.snapshot.comments.find((candidate) =>
+              hasPublicationIdentity(active[index + 1]!.key, evidence.snapshot.ref, "comment", candidate.id));
+            report = comment ? parseDocumentation(comment.body) : null;
+            if (!comment || !report || report.change !== linked?.number) break;
+            const permission = await providerCall("provider permission read failed", () =>
+              provider.permission(evidence.snapshot.ref.repository, comment.actor));
+            if (!AUTHORIZED.has(permission)) break;
+            iterationLength++;
+          }
+          const following = active[index + iterationLength];
+          if (!following) break;
+          const nextKind = recoveryKind(following.key);
           if (nextKind === "comment" && retriesCi) {
-            const completions = active.slice(index, index + 2).map((publication) =>
+            const completions = [active[index]!, following].map((publication) =>
               evidence.snapshot.comments.find((comment) =>
                 hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id)));
             if (completions.some((completion) => !completion)) break;
@@ -1084,23 +1101,24 @@ async function recoveryIteration(
               providerCall("provider permission read failed", () =>
                 provider.permission(evidence.snapshot.ref.repository, completion!.actor))));
             if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
-            active.splice(index, 1);
+            active.splice(index, iterationLength);
             continue;
           }
           // A verified rejection closes that completion/review iteration, even
           // when a later correction has moved the PR head.
-          if (nextKind !== "review") break;
+          if (nextKind !== "review" || (documentation && !report)) break;
           const completion = evidence.snapshot.comments.find((comment) =>
             hasPublicationIdentity(active[index]!.key, evidence.snapshot.ref, "comment", comment.id));
           const rejection = evidence.reviews.find((candidate) =>
-            hasPublicationIdentity(active[index + 1]!.key, evidence.snapshot.ref, "review", candidate.id));
+            hasPublicationIdentity(following.key, evidence.snapshot.ref, "review", candidate.id));
           if (!completion || rejection?.verdict !== "changes-requested"
-            || !/^[0-9a-f]{40}$/.test(rejection.headSha)) break;
+            || !/^[0-9a-f]{40}$/.test(rejection.headSha)
+            || (report && report.resultHead !== rejection.headSha)) break;
           const permissions = await Promise.all([completion.actor, rejection.actor].map((actor) =>
             providerCall("provider permission read failed", () =>
               provider.permission(evidence.snapshot.ref.repository, actor))));
           if (!permissions.every((permission) => AUTHORIZED.has(permission))) break;
-          active.splice(index, 2);
+          active.splice(index, iterationLength + 1);
         }
       }
     }
@@ -1157,13 +1175,7 @@ async function recoveryIteration(
     }
     active = active.filter((publication) => !superseded.has(publication.key));
   }
-  const kinds = active.map((publication) => {
-    const kind = recoveryKind(publication.key);
-    if (kind !== "comment") return kind;
-    const comment = evidence.snapshot.comments.find(({ id }) =>
-      hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", id));
-    return comment && parseDocumentation(comment.body) ? "documentation" : kind;
-  });
+  const kinds = active.map((publication) => recoveryKind(publication.key));
   const documentation = active.flatMap((publication, index) => {
     if (kinds[index] !== "documentation") return [];
     const comment = evidence.snapshot.comments.find(({ id }) =>

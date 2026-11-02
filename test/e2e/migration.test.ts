@@ -3,8 +3,8 @@ import test from "node:test";
 import { startFixture } from "../fixtures/provider-server.ts";
 import { parseMigrationReceipt } from "../../src/provider/migration-receipt.ts";
 
-test("agent-only update replays development on the same PR and recovers after SQLite loss", async (t) => {
-  const run = await startFixture("github", { legacyFlow: true });
+test("agent-only update replays development and documentation on the same PR after SQLite loss", async (t) => {
+  const run = await startFixture("github", { preparedComments: true, usage: true });
   t.after(() => run.close());
   await run.untilState("assessment-review");
   await run.answer("approved");
