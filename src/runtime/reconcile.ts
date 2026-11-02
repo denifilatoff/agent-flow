@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { isVerifiedBugReceipt } from "./bug-receipt.ts";
+
 import { validateBundleDocument, type ConfigBundle } from "../config/load.ts";
 import type {
   AttemptSeries,
@@ -880,7 +882,7 @@ async function recoveryIteration(
             || recoveryKind(next.key) !== "comment"))) break;
           const completion = evidence.snapshot.comments.find((comment) =>
             hasPublicationIdentity(diagnostic.key, evidence.snapshot.ref, "comment", comment.id));
-          if (completion?.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
+          if (!completion || !isVerifiedBugReceipt(completion.body)) break;
           const results = active.slice(0, prefix.length).map((publication, index) => {
             if (prefix[index] === "review") {
               const review = evidence.reviews.find((candidate) =>
@@ -922,7 +924,7 @@ async function recoveryIteration(
           if (kind !== "comment") break;
           const completion = evidence.snapshot.comments.find((comment) =>
             hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
-          if (!completion || completion.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
+          if (!completion || !isVerifiedBugReceipt(completion.body)) break;
           const permission = await providerCall("provider permission read failed", () =>
             provider.permission(evidence.snapshot.ref.repository, completion.actor));
           if (!AUTHORIZED.has(permission)) break;
@@ -1143,7 +1145,7 @@ async function recoveryIteration(
             hasPublicationIdentity(publication.key, evidence.snapshot.ref, "comment", comment.id));
           if (!approval || approval.verdict !== "approved" || approval.headSha === linked.headSha
             || !/^[0-9a-f]{40}$/.test(approval.headSha)
-            || completion?.body.split(/\r?\n/)[1] !== "BUG RECEIPT · VERIFIED") break;
+            || !completion || !isVerifiedBugReceipt(completion.body)) break;
           const permissions = await Promise.all([approval.actor, completion.actor].map((actor) =>
             providerCall("provider permission read failed", () =>
               provider.permission(evidence.snapshot.ref.repository, actor))));
