@@ -343,7 +343,7 @@ If that delegated agent does not inherit AGENT_FLOW_CONTEXT_PATH or AGENT_FLOW_D
   );
   call.child.finish(0, null);
 
-  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_UNAVAILABLE" } });
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_LOGS_INVALID" } });
   assert.equal(await readFile(fixture.input.session.logPath, "utf8"), "stdout line\nstderr line\n");
   await assert.rejects(access(call.env.CODEX_HOME!), { code: "ENOENT" });
 });
@@ -358,7 +358,7 @@ test("keeps late stdio errors guarded after a normal close", async (t) => {
   await waitForSpawn(processes.calls);
   const child = processes.children[0]!;
   child.finish(0, null);
-  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_UNAVAILABLE" } });
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_LOGS_INVALID" } });
 
   for (const stream of [child.stdin, child.stdout, child.stderr]) {
     assert.doesNotThrow(() => stream.emit("error", new Error("late stdio error")));
@@ -495,7 +495,7 @@ test("passes a GitLab personal token without seeding OAuth metadata", async (t) 
   assert.equal(metadataCalls, 0);
   assert.deepEqual(await readdir(call.env.GLAB_CONFIG_DIR!), []);
   call.child.finish(0, null);
-  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_UNAVAILABLE" } });
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_LOGS_INVALID" } });
 });
 
 test("rejects unsafe harness environment names and values", () => {
@@ -617,7 +617,7 @@ test("settles after direct-child exit when a descendant retains output descripto
   child.stdout.write("during drain\n");
   processes.clock.fire(1_000);
 
-  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_UNAVAILABLE" } });
+  assert.deepEqual(await pending, { exitCode: 0, signal: null, timedOut: false, usage: { costError: "CCUSAGE_LOGS_INVALID" } });
   assert.equal(await readFile(fixture.input.session.logPath, "utf8"), "before exit\nduring drain\n");
   assert.equal(processes.clock.timers.size, 0);
 });
@@ -1045,7 +1045,7 @@ for (const lateProcessError of [false, true]) {
   });
 }
 
-for (const accountingFailure of [false, "unavailable", "timeout"] as const) {
+for (const accountingFailure of [false, "unavailable", "timeout", "io"] as const) {
   test(`Codex completes one model run with ${accountingFailure || "ccusage cost"}`, async (t) => {
     const fixture = await runFixture("codex");
     t.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -1064,7 +1064,7 @@ for (const accountingFailure of [false, "unavailable", "timeout"] as const) {
           options.signal!.addEventListener("abort", () => { clearTimeout(timer); reject(options.signal!.reason); }, { once: true });
         });
       }
-      if (accountingFailure) throw new Error("token=SHOULD_NOT_ESCAPE");
+      if (accountingFailure) throw Object.assign(new Error("token=SHOULD_NOT_ESCAPE"), accountingFailure === "io" ? { code: "EIO" } : {});
       if (args[0] === "--version") return { stdout: "ccusage 20.0.47", stderr: "" };
       const sessions = ids.map((sessionId: string, index: number) => {
         const inputTokens = index === 0 ? 693 : 297;
@@ -1096,7 +1096,8 @@ for (const accountingFailure of [false, "unavailable", "timeout"] as const) {
     assert.equal(result.usage?.inputTokens, 1000);
     assert.equal(result.usage?.costUsd, accountingFailure ? undefined : 0.004);
     assert.equal(result.usage?.costCalculator, accountingFailure ? undefined : "ccusage 20.0.47");
-    assert.equal(result.usage?.costError, accountingFailure ? "CCUSAGE_UNAVAILABLE" : undefined);
+    assert.equal(result.usage?.costError, accountingFailure === "timeout" ? "CCUSAGE_TIMEOUT"
+      : accountingFailure === "io" ? "CCUSAGE_IO_FAILED" : accountingFailure ? "CCUSAGE_UNAVAILABLE" : undefined);
     assert.doesNotMatch(JSON.stringify(result), /SHOULD_NOT_ESCAPE/);
     assert.equal(processes.calls.length, 1);
     await assert.rejects(access(home));

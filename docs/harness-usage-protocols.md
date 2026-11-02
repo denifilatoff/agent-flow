@@ -35,6 +35,9 @@ the model. Observed categories remain available when calculation fails, without 
 The deadline starts before any accounting log read and also applies to fallback collection.
 Ordinary session totals must match their native cumulative counters. Matched remote compaction records are validated
 separately and remain attributed by ccusage. Inherited fork history cannot establish completion or billable usage.
+Codex 0.165 can report context occupancy as zero last-use categories with a positive `total_tokens` estimate. The
+controller accepts that observation only when the valid cumulative counters stay unchanged, including an initial
+zero baseline. It does not charge the context-size estimate as token usage.
 If the calculator times out after the log scan, the controller retains the counters already observed without another
 read or an extension of the accounting deadline.
 
@@ -44,6 +47,12 @@ accounting, actual models, and the API-equivalent USD estimate. Receipts retain 
 safe `CCUSAGE_UNAVAILABLE` code and prepared comments display `cost unavailable`. Positive estimates below one cent
 display `<$0.01`; receipts retain the full amount. The image's Python 3.11 TOML parser preserves equivalent quoted
 service-tier keys without copying other Codex settings.
+
+Receipts distinguish known failures with fixed codes: `CCUSAGE_LOGS_INVALID`, `CCUSAGE_LOGS_INCOMPLETE`,
+`CCUSAGE_IO_FAILED`, `CCUSAGE_TIMEOUT`, `CCUSAGE_CONFIG_INVALID`, `CCUSAGE_TOOL_UNSUPPORTED`, `CCUSAGE_TOOL_WARNING`,
+`CCUSAGE_REPORT_INVALID`, `CCUSAGE_COUNTER_MISMATCH`, or `CCUSAGE_MODEL_UNPRICED`. Unknown failures retain
+`CCUSAGE_UNAVAILABLE`. These codes contain no tool output or credentials. An unconfirmed model remains unpriced;
+the controller does not replace it with the requested model's rate.
 
 `ccusage-codex.json` records ccusage `20.0.47` output for the public delegation fixture. It was captured on
 2026-11-02 with online pricing and no model requests. Its prices are a frozen test response, not a maintained rate
