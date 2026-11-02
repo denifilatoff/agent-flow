@@ -3,7 +3,7 @@ import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, write
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { collectCodexCost, decodeCodexCostReport } from "../../src/harness/ccusage.ts";
+import { collectCodexCost, codexCostErrorCode, decodeCodexCostReport } from "../../src/harness/ccusage.ts";
 import { processDependencies, type CommandRunner } from "../../src/harness/process.ts";
 import { CodexUsage, collectCodexUsage } from "../../src/harness/usage.ts";
 
@@ -266,4 +266,38 @@ test("omits overflowing observed categories when the calculator fails", async (t
   assert.equal(observed?.inputTokens, undefined);
   assert.equal(observed?.outputTokens, 100);
   assert.equal(observed?.cachedInputTokens, 10);
+});
+
+test("accepts native context-size observations without pricing them as usage", async (t) => {
+  for (const position of ["initial", "after-usage", "changed-cumulative"] as const) {
+    await t.test(position, async (context) => {
+      const f = await fixture(context);
+      const path = join(f.home, "sessions", `${f.ids[0]}.jsonl`);
+      const lines = (await readFile(path, "utf8")).trim().split("\n").map(JSON.parse);
+      const total = structuredClone(lines.findLast((line) => line.payload?.type === "token_count").payload.info.total_token_usage);
+      if (position === "initial") for (const key of Object.keys(total)) total[key] = 0;
+      if (position === "changed-cumulative") { total.input_tokens++; total.total_tokens++; }
+      const observation = { type: "event_msg", payload: { type: "token_count", info: { total_token_usage: total,
+        last_token_usage: { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0,
+          output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 12345 } } } };
+      lines.splice(position === "initial" ? 2 : lines.length - 1, 0, observation);
+      await writeFile(path, lines.map(JSON.stringify).join("\n") + "\n");
+      const runner: CommandRunner = async (file, args, options = {}) => {
+        if (file === "python3") return processDependencies().runCommand(file, args, options);
+        return { stdout: args[0] === "--version" ? "ccusage 20.0.47" : JSON.stringify(nativeReport(f.ids)), stderr: "" };
+      };
+      if (position === "changed-cumulative") await assert.rejects(collectCodexCost(f.home, f.decoder, runner));
+      else assert.equal((await collectCodexCost(f.home, f.decoder, runner)).totalTokens, 1100);
+    });
+  }
+});
+
+test("returns fixed accounting diagnostics without copying tool error text", () => {
+  const signal = new AbortController().signal;
+  assert.equal(codexCostErrorCode(new Error("ccusage model pricing is unavailable"), signal), "CCUSAGE_MODEL_UNPRICED");
+  assert.equal(codexCostErrorCode(new Error("Codex accounting log is invalid"), signal), "CCUSAGE_LOGS_INVALID");
+  assert.equal(codexCostErrorCode(Object.assign(new Error("token=private-value"), { code: "EIO" }), signal), "CCUSAGE_IO_FAILED");
+  assert.equal(codexCostErrorCode(new Error("token=private-value"), signal), "CCUSAGE_UNAVAILABLE");
+  assert.equal(codexCostErrorCode(new Error("toString"), signal), "CCUSAGE_UNAVAILABLE");
+  assert.equal(codexCostErrorCode(new Error("token=private-value"), AbortSignal.abort()), "CCUSAGE_TIMEOUT");
 });

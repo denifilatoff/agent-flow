@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { assertSafeFile } from "../runtime/filesystem.ts";
 import type { HarnessAdapter, HarnessRunInput, HarnessResult } from "./types.ts";
 import { CodexUsage, collectCodexUsage } from "./usage.ts";
-import { collectCodexCost } from "./ccusage.ts";
+import { collectCodexCost, codexCostErrorCode } from "./ccusage.ts";
 import {
   HarnessPreflightError,
   HarnessProcessError,
@@ -99,14 +99,15 @@ export function createCodexAdapter(
         if (!home) return undefined;
         const signal = AbortSignal.timeout(30_000);
         let observedUsage: Awaited<ReturnType<typeof collectCodexUsage>>;
+        let costError = "CCUSAGE_UNAVAILABLE";
         if (withCost) {
           try { return await collectCodexCost(home, observer, dependencies.runCommand, signal, (usage) => { observedUsage = usage; }); }
-          catch { /* Retain observed categories without claiming complete accounting. */ }
+          catch (error) { costError = codexCostErrorCode(error, signal); }
         }
         const usage = observedUsage ?? await collectCodexUsage(home, observer, signal).catch(() => undefined);
         if (!withCost) return usage;
         const { totalTokens: _incompleteTotal, ...observed } = usage ?? {};
-        return { ...observed, costError: "CCUSAGE_UNAVAILABLE" };
+        return { ...observed, costError };
       }
       try {
         if (!home) throw new HarnessPreflightError("codex");

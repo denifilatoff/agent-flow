@@ -27,6 +27,28 @@ interface Session extends Counts {
 const fields = ["inputTokens", "cacheReadTokens", "cacheCreationTokens", "outputTokens", "totalTokens"] as const;
 const validAmount = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 
+export function codexCostErrorCode(error: unknown, signal: AbortSignal): string {
+  if (signal.aborted) return "CCUSAGE_TIMEOUT";
+  if (!(error instanceof Error)) return "CCUSAGE_UNAVAILABLE";
+  const code = (error as NodeJS.ErrnoException).code;
+  if (typeof code === "string" && ["EIO", "ENOSPC", "ENOENT", "EACCES", "EROFS"].includes(code)) {
+    return "CCUSAGE_IO_FAILED";
+  }
+  const codes: Record<string, string> = {
+    "ccusage model pricing is unavailable": "CCUSAGE_MODEL_UNPRICED",
+    "ccusage reported an accounting warning": "CCUSAGE_TOOL_WARNING",
+    "ccusage session does not match native cumulative counters": "CCUSAGE_COUNTER_MISMATCH",
+    "Codex accounting requires ccusage >=20.0.47 and <21": "CCUSAGE_TOOL_UNSUPPORTED",
+    "Codex service tier is unavailable": "CCUSAGE_CONFIG_INVALID",
+    "A selected Codex session did not finish": "CCUSAGE_LOGS_INCOMPLETE",
+    "A spawned Codex session log is missing": "CCUSAGE_LOGS_INCOMPLETE",
+  };
+  if (Object.hasOwn(codes, error.message)) return codes[error.message]!;
+  if (error.message.startsWith("Codex ")) return "CCUSAGE_LOGS_INVALID";
+  if (error.message.startsWith("ccusage ") || error instanceof SyntaxError) return "CCUSAGE_REPORT_INVALID";
+  return "CCUSAGE_UNAVAILABLE";
+}
+
 function validCounts(value: Counts): boolean {
   return !!value && fields.every((field) => count(value[field]) && value[field] <= 1e12)
     && value.totalTokens === value.inputTokens + value.cacheReadTokens + value.cacheCreationTokens + value.outputTokens
@@ -155,11 +177,20 @@ async function selectedLogs(home: string, decoder: CodexUsage, signal: AbortSign
         if (record.type === "event_msg" && p.type === "token_count" && p.info != null) {
           const total = p.info.total_token_usage;
           const last = p.info.last_token_usage;
+          // Codex also reports context occupancy without advancing billable usage.
+          const contextObservation = total && last && validNativeCounters(total)
+            && ["input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"]
+              .every((key) => last[key] === 0)
+            && (last.cache_write_input_tokens ?? 0) === 0 && count(last.total_tokens) && last.total_tokens > 0
+            && ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]
+              .every((key) => (total[key] ?? 0) === (log!.counters?.[key] ?? 0));
           const values = [total, last];
-          if (!values.some((value) => value != null) || values.some((value) => value != null && !validNativeCounters(value))) {
+          if (!values.some((value) => value != null)
+            || values.some((value) => value != null && !(value === last && contextObservation) && !validNativeCounters(value))) {
             throw new Error("Codex usage event contains invalid counters");
           }
-          if (total && last && Object.keys(last).some((key) => count(last[key]) && count(total[key]) && last[key] > total[key])) {
+          if (total && last && !contextObservation
+            && Object.keys(last).some((key) => count(last[key]) && count(total[key]) && last[key] > total[key])) {
             throw new Error("Codex usage delta exceeds cumulative counters");
           }
           if (total) log.counters = total;
